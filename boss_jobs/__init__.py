@@ -1,0 +1,108 @@
+"""BOSS直聘职位分页获取：即时清洗 + 入库 + 翻页节流。
+
+按 todo.md 第四节，抓下来的每条职位保留 8 个字段：
+
+    岗位名称 / 公司名称 / 工作地点 / 薪资待遇
+    工作经验要求 / 学历要求 / 公司行业 / 公司规模
+
+用法（登录态复用 ``boss_login`` 落盘的 ``session.json``）::
+
+    python -m boss_jobs fetch                 # 翻页抓，每页洗完就入库，页间睡 1s
+    python -m boss_jobs fetch --max-pages 3
+    python -m boss_jobs stats
+    python -m boss_jobs list --city 广州
+
+程序里用::
+
+    from boss_jobs import create_client, open_store
+
+    client = create_client()                  # 带登录态
+    with open_store() as store:               # 默认项目根 jobs.db
+        report = client.crawl(store=store)    # 抓一页存一页，页间睡 1 秒
+    print(report.stats.kept_count)
+
+**风控节流**：页与页之间默认硬睡 1 秒（``--interval`` 可调），把频率压到
+人手滚动的量级。清洗入库是同步的、按页的，中途断了已到手的页不会丢。
+"""
+
+from __future__ import annotations
+
+from .client import CrawlReport, CrawlStats, JobClient, create_client, http_from_session
+from .config import (
+    BASE_URL,
+    CODE_BROWSER_CHECK,
+    CODE_RISK_CONTROL,
+    DEFAULT_DB_PATH,
+    DEFAULT_MAX_PAGES,
+    DEFAULT_PAGE_INTERVAL,
+    DEFAULT_SESSION_PATH,
+    ENDPOINTS,
+    PAGE_SIZE,
+    STOKEN_COOKIE,
+    STOKEN_ENV,
+)
+from .errors import (
+    JobApiError,
+    JobDataError,
+    JobError,
+    JobTransportError,
+)
+from .models import Job, PageResult, clean_page, clean_pages, clean_salary, clean_text
+from .stoken import (
+    StokenChallenge,
+    StokenError,
+    StokenProvider,
+    compute_stoken,
+    load_security_js,
+    mint_offline,
+    parse_challenge,
+)
+from .store import JobStore, SaveOutcome, open_store
+
+__version__ = "0.1.0"
+
+__all__ = [
+    # 核心
+    "JobClient",
+    "create_client",
+    "http_from_session",
+    "CrawlReport",
+    "CrawlStats",
+    # __zp_stoken__
+    "StokenChallenge",
+    "StokenError",
+    "StokenProvider",
+    "compute_stoken",
+    "load_security_js",
+    "mint_offline",
+    "parse_challenge",
+    # 模型 / 清洗
+    "Job",
+    "PageResult",
+    "clean_page",
+    "clean_pages",
+    "clean_salary",
+    "clean_text",
+    # 入库
+    "JobStore",
+    "SaveOutcome",
+    "open_store",
+    # 异常
+    "JobApiError",
+    "JobDataError",
+    "JobError",
+    "JobTransportError",
+    # 常量
+    "BASE_URL",
+    "CODE_BROWSER_CHECK",
+    "CODE_RISK_CONTROL",
+    "DEFAULT_DB_PATH",
+    "DEFAULT_MAX_PAGES",
+    "DEFAULT_PAGE_INTERVAL",
+    "DEFAULT_SESSION_PATH",
+    "ENDPOINTS",
+    "PAGE_SIZE",
+    "STOKEN_COOKIE",
+    "STOKEN_ENV",
+    "__version__",
+]

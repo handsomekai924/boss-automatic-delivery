@@ -53,6 +53,7 @@ from .models import (
     options_from_api,
     options_from_rows,
 )
+from .search import JobSearchFilter, ResolvedSearchFilter
 
 __version__ = "0.1.0"
 
@@ -65,6 +66,8 @@ __all__ = [
     "FilterConditions",
     "FilterOption",
     "IndustryGroup",
+    "JobSearchFilter",
+    "ResolvedSearchFilter",
     # 异常
     "FilterApiError",
     "FilterDataError",

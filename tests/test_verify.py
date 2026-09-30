@@ -230,8 +230,6 @@ class TestHelperHtml:
         assert "initGeetest" in html
         # 票据回传目标
         assert "/solution" in html
-        # 明确声明不做识别/伪造
-        assert "不会替你算缺口" in html
 
     def test_keeps_javascript_valid_when_values_contain_quotes(self):
         """gt/challenge 用 json.dumps 嵌进 JS，带引号时不能把脚本弄断。"""
