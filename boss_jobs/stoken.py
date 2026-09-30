@@ -86,6 +86,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -377,7 +378,11 @@ class StokenProvider:
         )
 
     def apply(self, token: str) -> None:
-        """把 token 写进会话 Cookie（跟前端 ``a.A.set`` 同一套属性）。"""
+        """把 token 写进会话 Cookie（跟前端 ``a.A.set`` 同一套属性）。
+
+        前端是 ``max-age=3840*60``；``requests`` 的 cookiejar 认的是绝对过期
+        时间 ``expires``，这里换算过去。
+        """
         jar = getattr(self.http, "cookies", None)
         if jar is None or not hasattr(jar, "set"):
             raise StokenError("会话对象不支持 cookies.set，没法写入 " + C.STOKEN_COOKIE)
@@ -386,7 +391,7 @@ class StokenProvider:
             token,
             domain=".zhipin.com",
             path="/",
-            max_age=STOKEN_MAX_AGE,
+            expires=int(time.time()) + STOKEN_MAX_AGE,
         )
         logger.debug("已写入 %s（长度 %d）", C.STOKEN_COOKIE, len(token))
 

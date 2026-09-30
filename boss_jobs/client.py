@@ -208,6 +208,7 @@ class JobClient:
         page_interval: float | None = None,
         start_page: int = 1,
         db_path: Path | str | None = None,
+        search_filter: Any | None = None,
     ) -> CrawlReport:
         """分页抓取职位，**每页即时清洗入库**，页与页之间硬睡一会。
 
@@ -216,6 +217,10 @@ class JobClient:
         :param page_interval: 覆盖构造时的翻页间隔（秒）
         :param start_page: 起始页码，续跑时用
         :param db_path: 不传 ``store`` 时的库路径
+        :param search_filter: ``JobSearchFilter``（或任何能出 ``to_params()``/``for_page()``）。
+            **给了就走搜索流** ``/wapi/zpgeek/search/joblist.json``，条件照搬；
+            不给就走原来的推荐流 ``special/zone``（无筛选）。
+            筛选条件一般从配置文件读，见 :func:`boss_filter.load_search_filter`。
         :return: :class:`CrawlReport`（统计 + 每页明细）
         """
         interval = self.page_interval if page_interval is None else max(0.0, page_interval)
@@ -225,6 +230,7 @@ class JobClient:
         stats = CrawlStats(run_id=run_id)
         report = CrawlReport(stats=stats)
         reason = "抓到空页"
+        use_search = search_filter is not None
 
         try:
             page = start_page
@@ -233,7 +239,10 @@ class JobClient:
                     reason = f"达到 max_pages={max_pages}"
                     break
 
-                result = self.fetch_page_clean(page)
+                if use_search:
+                    result = self.fetch_search_page(search_filter, page=page)
+                else:
+                    result = self.fetch_page_clean(page)
                 outcome = store.save_page(result)  # 立刻入库
                 report.pages.append(result)
                 stats = stats.add(result, outcome)

@@ -79,6 +79,18 @@ class RecordingSleeper:
         self.calls.append(seconds)
 
 
+class FakeProvider:
+    """不打网络的 ``__zp_stoken__`` 桩，只验重试编排（详见 test_jobs_stoken）。"""
+
+    def __init__(self, token: str = "0138FAKE") -> None:
+        self.token = token
+        self.ensure_calls: list[bool] = []
+
+    def ensure(self, *, force: bool = False) -> str:
+        self.ensure_calls.append(force)
+        return self.token
+
+
 # --------------------------------------------------------------------------- #
 # 脚本
 # --------------------------------------------------------------------------- #
@@ -288,6 +300,58 @@ def test_crawl_opens_default_store_when_not_given(tmp_path, monkeypatch):
     report = client.crawl(page_interval=0.0)  # 不传 store
     assert report.stats.pages == 1  # 空页也算抓了一页
     assert db_path.exists()
+
+
+class _StubFilter:
+    """最小可用的 JobSearchFilter 桩：只要 to_params/for_page。"""
+
+    def __init__(self, params=None):
+        self._params = dict(params or {"query": "python", "city": "101280100", "page": "1"})
+
+    def to_params(self):
+        return dict(self._params)
+
+    def for_page(self, page):
+        return _StubFilter({**self._params, "page": str(page)})
+
+
+def test_crawl_带search_filter_走搜索流(tmp_path):
+    """给了 search_filter 就打 search/joblist，不打 special/zone。"""
+    client, http, _ = client_with(
+        [{"code": 0, "zpData": {"jobList": [api_item("s1")], "hasMore": False}}],
+        stoken_provider=FakeProvider(),
+    )
+    with JobStore(tmp_path / "s.db") as store:
+        report = client.crawl(store=store, max_pages=1, page_interval=0.0, search_filter=_StubFilter())
+
+    assert report.stats.pages == 1
+    assert "search/joblist" in http.calls[0]["url"]
+    assert "special/zone" not in http.calls[0]["url"]
+    assert http.calls[0]["params"]["query"] == "python"
+    assert http.calls[0]["params"]["city"] == "101280100"
+
+
+def test_crawl_不带search_filter_走推荐流(tmp_path):
+    client, http, _ = client_with([ok_page([api_item("r1")], has_more=False)])
+    with JobStore(tmp_path / "r.db") as store:
+        client.crawl(store=store, max_pages=1, page_interval=0.0)
+    assert "special/zone" in http.calls[0]["url"]
+
+
+def test_crawl_搜索流_翻页时换页码(tmp_path):
+    pages = [
+        {"code": 0, "zpData": {"jobList": [api_item(f"s{i}")], "hasMore": True}}
+        for i in range(2)
+    ]
+    # 塞满 15 条才不会被「不满页 + hasMore=false」提前收手
+    pages[0] = {"code": 0, "zpData": {"jobList": [api_item(f"s{i}") for i in range(15)], "hasMore": True}}
+    pages[1] = {"code": 0, "zpData": {"jobList": [api_item("s99")], "hasMore": False}}
+    client, http, _ = client_with(pages, stoken_provider=FakeProvider())
+    with JobStore(tmp_path / "p.db") as store:
+        report = client.crawl(store=store, max_pages=2, page_interval=0.0, search_filter=_StubFilter())
+
+    assert [c["params"]["page"] for c in http.calls] == ["1", "2"]
+    assert report.stats.pages == 2
 
 
 def test_iter_pages_yields_without_store():
@@ -550,7 +614,83 @@ def test_cli_fetch_reports_browser_check(tmp_path, monkeypatch, capsys):
     assert code == 1
     err = capsys.readouterr().err
     assert "__zp_stoken__" in err
+    # 现在会自动算令牌，提示也改成「自动补 + 仍被拒怎么办」
+    assert "自动算" in err
+    assert "security-js" in err
+
+
+def test_cli_fetch_reports_risk_control(tmp_path, monkeypatch, capsys):
+    """code 36 是账号风控，话术要明说「不去绕」。"""
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session",
+        lambda *a, **k: FakeHttp(
+            [{"code": 36, "message": "您的账户存在异常行为", "zpData": {}}]
+        ),
+    )
+    code = cli.main(
+        ["--db", str(tmp_path / "x.db"), "--session", str(tmp_path / "s.json"), "fetch"]
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "风控" in err
     assert "不去绕" in err
+
+
+class _Httplet:
+    """只实现 crawl 要用的 request() 的极简会话。"""
+
+    def __init__(self, request):
+        self._request = request
+        self.headers: dict[str, str] = {}
+        self.cookies = FakeCookieJar()
+
+    def request(self, method, url, **kwargs):
+        return self._request(method, url, **kwargs)
+
+
+def _capturing_http(captured):
+    """造一个会话，把每次请求的 url/params 记进 ``captured``。"""
+
+    def _request(method, url, **kwargs):
+        captured["url"] = url
+        captured["params"] = kwargs.get("params") or {}
+        return FakeResponse(ok_page([api_item("j1")], has_more=False))
+
+    return _Httplet(_request)
+
+
+def test_cli_fetch_条件文件_有筛选就走搜索流(tmp_path, monkeypatch, capsys):
+    """配置文件里写了条件 → 打 search/joblist，并把条件带进查询串。"""
+    monkeypatch.setenv("BOSS_SEARCH_FILTER", str(tmp_path / "f.json"))
+    (tmp_path / "f.json").write_text(
+        '{"query": "python", "city": "101280100", "salary": "405"}', encoding="utf-8"
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session", lambda *a, **k: _capturing_http(captured)
+    )
+    code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1"])
+    assert code == 0
+    assert "search/joblist" in captured["url"]
+    assert captured["params"]["query"] == "python"
+    assert captured["params"]["city"] == "101280100"
+    assert captured["params"]["salary"] == "405"
+    out = capsys.readouterr().out
+    assert "搜索流" in out
+
+
+def test_cli_fetch_条件文件不存在_留空走推荐流(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BOSS_SEARCH_FILTER", str(tmp_path / "没有.json"))
+    captured = {}
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session", lambda *a, **k: _capturing_http(captured)
+    )
+    code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1"])
+    assert code == 0
+    assert "special/zone" in captured["url"]   # 空条件 = 不限 = 推荐流
+    assert "query" not in captured["params"]
+    out = capsys.readouterr().out
+    assert "推荐流" in out
 
 
 def test_cli_list_and_stats(tmp_path, monkeypatch, capsys):

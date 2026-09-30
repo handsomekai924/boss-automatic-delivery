@@ -18,10 +18,14 @@ industry/scale/stage`` 是多选，``city/jobType/salary`` 是单选。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .models import FilterConditions, FilterOption, normalize_code
+from .config import DEFAULT_FILTER_PATH, FILTER_ENV
+from .models import FilterConditions, normalize_code
 
 
 def _join(values: Iterable[Any]) -> str:
@@ -145,6 +149,25 @@ class JobSearchFilter:
             page=page,
             page_size=self.page_size,
             scene=self.scene,
+        )
+
+    @property
+    def is_blank(self) -> bool:
+        """True = 一个筛选维度都没选（关键词也没有），等于「不限」。"""
+        return not any(
+            (
+                self.query.strip(),
+                self.city,
+                self.job_type,
+                self.salary,
+                self.experience,
+                self.degree,
+                self.industry,
+                self.scale,
+                self.pay_type,
+                self.part_time,
+                self.stage,
+            )
         )
 
     # ------------------------------------------------------------------ #
@@ -293,3 +316,165 @@ class ResolvedSearchFilter:
             "page": self.page,
             "pageSize": self.page_size,
         }
+
+
+# --------------------------------------------------------------------------- #
+# 配置文件：把筛选条件放磁盘，没有就留空
+# --------------------------------------------------------------------------- #
+
+#: 配置文件里认的键 → :class:`JobSearchFilter` 的字段。
+#: 单选维度收字符串，多选维度收数组（也兼容逗号串）。``page``/``scene``
+#: 是运行期的，不进配置。
+FILTER_FILE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("query", "query"),
+    ("city", "city"),
+    ("job_type", "job_type"),
+    ("jobType", "job_type"),
+    ("salary", "salary"),
+    ("experience", "experience"),
+    ("degree", "degree"),
+    ("industry", "industry"),
+    ("scale", "scale"),
+    ("pay_type", "pay_type"),
+    ("payType", "pay_type"),
+    ("part_time", "part_time"),
+    ("partTime", "part_time"),
+    ("stage", "stage"),
+    ("page_size", "page_size"),
+    ("pageSize", "page_size"),
+)
+
+#: 单选字段（其余按多选收）
+_SINGLE_FIELDS: frozenset[str] = frozenset({"query", "city", "job_type", "salary"})
+
+#: 写模板时用的字段顺序（camelCase，跟站点查询串对齐）
+TEMPLATE_KEYS: tuple[str, ...] = (
+    "query",
+    "city",
+    "jobType",
+    "salary",
+    "experience",
+    "degree",
+    "industry",
+    "scale",
+    "payType",
+    "partTime",
+    "stage",
+    "pageSize",
+)
+
+
+def filter_path(path: Path | str | None = None) -> Path:
+    """配置文件路径：显式参数 → ``BOSS_SEARCH_FILTER`` → 项目根 ``search_filter.json``。"""
+    if path:
+        return Path(path)
+    env = os.environ.get(FILTER_ENV, "").strip()
+    if env:
+        return Path(env)
+    return DEFAULT_FILTER_PATH
+
+
+def _to_codes(value: Any) -> tuple[str, ...]:
+    """多选值收数组或逗号串，统一成 code 元组。"""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raw: Iterable[Any] = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw = value
+    else:
+        raw = (value,)
+    return tuple(code for code in (normalize_code(v).strip() for v in raw) if code)
+
+
+def search_filter_from_dict(data: Mapping[str, Any]) -> JobSearchFilter:
+    """把配置文件的内容装配成 :class:`JobSearchFilter`。
+
+    认 snake_case 和 camelCase 两种键名；缺的键、空值一律留空
+    （= 该维度「不限」）。``page``/``scene`` 不收——翻页是运行期的事。
+    """
+    if not isinstance(data, Mapping):
+        raise ValueError(f"筛选条件配置得是 JSON 对象，收到 {type(data).__name__}")
+
+    fields: dict[str, Any] = {}
+    for key, attr in FILTER_FILE_FIELDS:
+        if key not in data:
+            continue
+        value = data[key]
+        if attr in _SINGLE_FIELDS:
+            fields[attr] = normalize_code(value).strip() if attr != "query" else str(value or "").strip()
+        elif attr == "page_size":
+            try:
+                fields[attr] = int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"pageSize 得是正整数，收到 {value!r}") from None
+        else:
+            fields[attr] = _to_codes(value)
+
+    # 同一字段给了两种键名（job_type 与 jobType）时，后写的胜出且要一致
+    return JobSearchFilter(**fields)
+
+
+def load_search_filter(path: Path | str | None = None) -> JobSearchFilter:
+    """从配置文件读筛选条件。**文件不存在就留空**，不报错。
+
+    配置文件是一个 JSON 对象，键跟站点查询串对齐，值留空 = 该维度「不限」::
+
+        {
+          "query": "python",
+          "city": "101280100",
+          "jobType": "",
+          "salary": "405",
+          "experience": ["104", "105"],
+          "degree": ["209"],
+          "industry": [],
+          "scale": [],
+          "pageSize": 15
+        }
+
+    code 取值见 :class:`~boss_filter.models.FilterConditions`，
+    ``python -m boss_filter export`` 能把整张表导出来对照。
+
+    :param path: 配置文件路径；不传按 :func:`filter_path` 定位
+    :return: 文件在就按文件装配（可全空）；不在就 :class:`JobSearchFilter()` 全空
+    :raises ValueError: 文件不是 JSON 对象、或 pageSize 形状不对
+    """
+    p = filter_path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return JobSearchFilter()
+    except OSError as exc:
+        raise ValueError(f"读不了筛选条件配置 {p}：{exc}") from exc
+
+    if not text.strip():
+        return JobSearchFilter()
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"筛选条件配置 {p} 不是合法 JSON：{exc}") from exc
+    return search_filter_from_dict(data)
+
+
+def save_search_filter(
+    search_filter: JobSearchFilter,
+    path: Path | str | None = None,
+) -> Path:
+    """把筛选条件写回配置文件（camelCase，空值留空串/空数组）。"""
+    p = filter_path(path)
+    data = {
+        "query": search_filter.query,
+        "city": search_filter.city,
+        "jobType": search_filter.job_type,
+        "salary": search_filter.salary,
+        "experience": list(search_filter.experience),
+        "degree": list(search_filter.degree),
+        "industry": list(search_filter.industry),
+        "scale": list(search_filter.scale),
+        "payType": list(search_filter.pay_type),
+        "partTime": list(search_filter.part_time),
+        "stage": list(search_filter.stage),
+        "pageSize": search_filter.page_size,
+    }
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return p

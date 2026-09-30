@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Final
 
 BASE_URL: Final[str] = "https://www.zhipin.com"
@@ -114,3 +115,17 @@ HTML_OPTION_PATTERNS: Final[dict[str, str]] = {
 
 #: 行业下拉整块（含分组标签）的定位标记
 HTML_INDUSTRY_MARKER: Final[str] = "condition-industry-select"
+
+# --------------------------------------------------------------------------- #
+# 筛选条件配置文件
+# --------------------------------------------------------------------------- #
+
+#: 项目根目录（跟 cwd 无关）
+PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
+
+#: 用户的搜索条件配置文件。**没有它就留空**（= 全部「不限」，走站点默认），
+#: 不报错。格式见 :func:`boss_filter.search.load_search_filter`。
+DEFAULT_FILTER_PATH: Final[Path] = PROJECT_ROOT / "search_filter.json"
+
+#: 想换个位置放配置文件时设它（覆盖上面的默认路径）
+FILTER_ENV: Final[str] = "BOSS_SEARCH_FILTER"

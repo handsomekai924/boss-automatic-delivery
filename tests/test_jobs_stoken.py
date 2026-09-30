@@ -363,6 +363,27 @@ def test_provider_会话不支持cookie就报错(tmp_path, monkeypatch):
         provider.ensure()
 
 
+def test_provider_apply_用requests认的expires():
+    """``requests.create_cookie`` 不收 ``max_age``（那是浏览器概念），只收 ``expires``。"""
+    import time as _time
+
+    from requests.cookies import RequestsCookieJar
+
+    class _Http:
+        cookies = RequestsCookieJar()
+
+    http = _Http()
+    provider = StokenProvider(http=http, cache_dir=None)
+    before = int(_time.time())
+    provider.apply("0138REAL")
+
+    cookie = next(iter(http.cookies))
+    assert cookie.name == "__zp_stoken__" and cookie.value == "0138REAL"
+    assert cookie.domain == ".zhipin.com" and cookie.path == "/"
+    # 3840 分钟 ≈ 230400 秒
+    assert before + 230000 <= cookie.expires <= before + 231000
+
+
 # --------------------------------------------------------------------------- #
 # JobClient：code 37 自动补令牌后重试
 # --------------------------------------------------------------------------- #

@@ -5,32 +5,40 @@
     1. 装配会话（session.json）
     2. **全自动**获取 ``__zp_stoken__``（拿挑战 → 下 security-js → ABC.z 算令牌）
     3. 拿筛选条件（boss_filter.get_filter_conditions）
-    4. 装配 JobSearchFilter（选中值 → 查询串）
+    4. 装配 JobSearchFilter（**配置文件** → 查询串）
     5. fetch_search_page 抓一页搜索结果并清洗
 
-``__zp_stoken__`` 的来源与算法见 :mod:`boss_jobs.stoken`，本脚本只是把它
-接进流水线并计时——**不需要**人工回浏览器拷令牌。
+筛选条件来自配置文件 ``search_filter.json``（没有就留空 = 全部「不限」），
+命令行参数只做覆盖。``__zp_stoken__`` 的来源与算法见 :mod:`boss_jobs.stoken`。
 
 用法::
 
-    python tools/wire_search.py
-    python tools/wire_search.py --query python --city 101280100 --max-pages 2
-    python tools/wire_search.py --skip-stoken   # 只测条件装配，不碰安全网关
+    python tools/wire_search.py                          # 读 search_filter.json
+    python tools/wire_search.py --query python --city 广州   # 覆盖配置里的值
+    python tools/wire_search.py --skip-stoken             # 只测条件装配
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from boss_filter import JobSearchFilter, get_filter_conditions  # noqa: E402
+from boss_filter import (  # noqa: E402
+    DEFAULT_FILTER_PATH,
+    FILTER_ENV,
+    JobSearchFilter,
+    get_filter_conditions,
+    load_search_filter,
+)
 from boss_filter.models import FilterConditions  # noqa: E402
 from boss_jobs import STOKEN_COOKIE, create_client  # noqa: E402
 from boss_jobs.errors import JobApiError, JobError  # noqa: E402
@@ -63,34 +71,55 @@ class Timer:
         return "\n".join(lines)
 
 
+def _split_codes(value: str | None) -> tuple[str, ...] | None:
+    """"104,105" → ("104","105")；没传返回 None（表示不覆盖）。"""
+    if value is None:
+        return None
+    return tuple(x for x in value.split(",") if x)
+
+
 def build_filter(
+    base: JobSearchFilter,
     conditions: FilterConditions,
     *,
-    query: str,
-    city: str,
-    salary: str,
-    experience: tuple[str, ...],
-    degree: tuple[str, ...],
-) -> JobSearchFilter:
-    """从命令行选项 + 筛选表code装配一次搜索条件。
+    query: str | None,
+    city: str | None,
+    salary: str | None,
+    experience: str | None,
+    degree: str | None,
+) -> tuple[JobSearchFilter, str]:
+    """配置文件打底，命令行覆盖；城市中文名就地换成 code。
 
-    城市名容错：传了中文名（如「广州」）就地换成 code，传 code 原样用。
+    返回 ``(filter, 来源说明)``。
     """
-    city_code = city
-    if city and not city.isdigit():
-        node = conditions.find_city_by_name(city)
-        if node is None:
-            raise SystemExit(f"筛选表里找不到城市 {city!r}，请改用 code（广州=101280100）")
-        city_code = node.code
+    overrides: dict[str, object] = {}
+    notes: list[str] = []
+    if query is not None:
+        overrides["query"] = query
+        notes.append("query")
+    if city is not None:
+        city_code = city
+        if city and not city.isdigit():
+            node = conditions.find_city_by_name(city)
+            if node is None:
+                raise SystemExit(f"筛选表里找不到城市 {city!r}，请改用 code（广州=101280100）")
+            city_code = node.code
+        overrides["city"] = city_code
+        notes.append("city")
+    if salary is not None:
+        overrides["salary"] = salary
+        notes.append("salary")
+    for key, raw in (("experience", experience), ("degree", degree)):
+        codes = _split_codes(raw)
+        if codes is not None:
+            overrides[key] = codes
+            notes.append(key)
 
-    return JobSearchFilter.from_codes(
-        query=query,
-        city=city_code,
-        salary=salary,
-        experience=experience,
-        degree=degree,
-        page=1,
-    )
+    merged = replace(base, **overrides) if overrides else base
+    # 页码永远从 1 起步（配置文件不存页码）
+    merged = replace(merged, page=1)
+    source = "命令行覆盖 " + ",".join(notes) if notes else "配置文件"
+    return merged, source
 
 
 def _force_utf8_streams() -> None:
@@ -104,11 +133,16 @@ def _force_utf8_streams() -> None:
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_streams()
     parser = argparse.ArgumentParser(description="接通 JobSearchFilter + fetch_search_page + __zp_stoken__")
-    parser.add_argument("--query", default="python", help="搜索关键词")
-    parser.add_argument("--city", default="101280100", help="城市 code 或中文名（默认广州）")
-    parser.add_argument("--salary", default="", help="薪资档 code，如 405=10-20K")
-    parser.add_argument("--experience", default="", help="经验 code，逗号分隔")
-    parser.add_argument("--degree", default="", help="学历 code，逗号分隔")
+    parser.add_argument(
+        "--filter",
+        default=None,
+        help=f"搜索条件配置文件（默认 {DEFAULT_FILTER_PATH}；没有就留空 = 不限）",
+    )
+    parser.add_argument("--query", default=None, help="搜索关键词（覆盖配置）")
+    parser.add_argument("--city", default=None, help="城市 code 或中文名（覆盖配置）")
+    parser.add_argument("--salary", default=None, help="薪资档 code，如 405=10-20K（覆盖配置）")
+    parser.add_argument("--experience", default=None, help="经验 code，逗号分隔（覆盖配置）")
+    parser.add_argument("--degree", default=None, help="学历 code，逗号分隔（覆盖配置）")
     parser.add_argument("--max-pages", type=int, default=1, help="抓几页（默认 1）")
     parser.add_argument("--interval", type=float, default=1.0, help="页间间隔秒")
     parser.add_argument("--stoken", default="", help="显式传 __zp_stoken__（跳过自动计算）")
@@ -167,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     stoken_value = client._http.cookies.get(STOKEN_COOKIE) or ""
     stoken_len = stoken_len or len(stoken_value)
 
-    # 3. 筛选条件
+    # 3. 筛选条件（代码里的 7 类可选值表，跟用户配置无关）
     try:
         conditions = get_filter_conditions()
     except Exception as exc:  # noqa: BLE001 - 兜底表救回来
@@ -175,19 +209,24 @@ def main(argv: list[str] | None = None) -> int:
         conditions = get_filter_conditions(html_path=str(ROOT / ".saved_web" / "求职_找工作_招聘信息-BOSS直聘.html"))
     filter_span = timer.mark("拿筛选条件 get_filter_conditions")
 
-    # 4. JobSearchFilter 装配
-    search_filter = build_filter(
+    # 4. JobSearchFilter 装配：配置文件打底 + 命令行覆盖
+    base = load_search_filter(args.filter)
+    filter_file = args.filter or os.environ.get(FILTER_ENV) or str(DEFAULT_FILTER_PATH)
+    search_filter, build_source = build_filter(
+        base,
         conditions,
         query=args.query,
         city=args.city,
         salary=args.salary,
-        experience=tuple(x for x in args.experience.split(",") if x),
-        degree=tuple(x for x in args.degree.split(",") if x),
+        experience=args.experience,
+        degree=args.degree,
     )
     params = search_filter.to_params()
     build_span = timer.mark("装配 JobSearchFilter")
 
     resolved = search_filter.resolve(conditions)
+    print(f"条件来源  {build_source}（{filter_file}"
+          f"{'，文件不存在=全空' if not Path(filter_file).exists() else ''}）")
     print("搜索条件：")
     for line in resolved.summary_lines():
         print("  " + line)

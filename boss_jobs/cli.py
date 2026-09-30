@@ -33,6 +33,9 @@ from .config import (
 from .errors import JobApiError, JobDataError, JobError, JobTransportError
 from .store import open_store
 
+# 筛选条件的配置文件（没有就留空 = 全部「不限」）
+from boss_filter import DEFAULT_FILTER_PATH, JobSearchFilter, load_search_filter
+
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
@@ -77,6 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"翻页间隔秒数，防风控（默认 {DEFAULT_PAGE_INTERVAL}）",
     )
     fetch.add_argument("--start-page", type=int, default=1, help="起始页码（默认 1）")
+    fetch.add_argument(
+        "--filter",
+        default=None,
+        help=(
+            "搜索条件配置文件（JSON）。"
+            f"默认 {DEFAULT_FILTER_PATH}；文件不存在 = 条件全空（不限），不报错"
+        ),
+    )
     fetch.add_argument("--json", action="store_true", help="抓完把统计按 JSON 输出")
 
     stats = sub.add_parser("stats", help="看库里的汇总（条数、页数、城市分布）")
@@ -114,11 +125,18 @@ def main(argv: list[str] | None = None) -> int:
         elif exc.is_browser_check:
             print(
                 f"✗ 撞上安全网关（code {exc.code}）：{exc.message}\n"
-                f"  这不是登录问题——缺的是 __zp_stoken__ 安全网关令牌。\n"
-                f"  用浏览器打开 {BASE_URL}/web/geek/jobs 让站点种上 Cookie，"
-                f"再把 {STOKEN_COOKIE} 写进 session.json 的 cookies，"
-                f"或设 {STOKEN_ENV} 环境变量。\n"
-                f"  （本工具不去绕这个校验。）",
+                f"  缺的是 {STOKEN_COOKIE} 安全网关令牌。本工具会自动算一枚补上"
+                f"（见 boss_jobs.stoken），\n"
+                f"  仍被拒多半是 security-js 的环境指纹跟请求头对不上。\n"
+                f"  急用的话，也可以从浏览器拷一枚塞进 session.json 的 cookies，"
+                f"或设 {STOKEN_ENV} 环境变量。",
+                file=sys.stderr,
+            )
+        elif exc.is_risk_control:
+            print(
+                f"✗ 账号风控（code {exc.code}）：{exc.message}\n"
+                f"  这不是缺令牌，是账号维度的风险状态，要走人机验证（GeeTest）后才恢复。\n"
+                f"  客户端不去绕。",
                 file=sys.stderr,
             )
         else:
@@ -144,16 +162,26 @@ def main(argv: list[str] | None = None) -> int:
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
     client = _build_client(args)
+    # 筛选条件来自配置文件；没有文件 = 全空 = 不限（走推荐流，不搜关键词）
+    search_filter = load_search_filter(args.filter)
+    if search_filter.is_blank:
+        search_filter = None          # 空条件没有筛选语义，走推荐流
+        source_note = "推荐流 special/zone（无筛选条件）"
+    else:
+        source_note = f"搜索流 search/joblist（条件文件 {args.filter or DEFAULT_FILTER_PATH}）"
+
     with open_store(args.db) as store:
         report = client.crawl(
             store=store,
             max_pages=args.max_pages,
             page_interval=args.interval,
             start_page=args.start_page,
+            search_filter=search_filter,
         )
         stats = report.stats
         summary = {
             "run_id": stats.run_id,
+            "source": source_note,
             "pages": stats.pages,
             "raw_count": stats.raw_count,
             "kept_count": stats.kept_count,
@@ -168,6 +196,7 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:
+        print(f"抓取来源  {source_note}")
         for line in stats.summary_lines():
             print(line)
         print(f"库内总数  {summary['jobs_in_db']} → {summary['db_path']}")

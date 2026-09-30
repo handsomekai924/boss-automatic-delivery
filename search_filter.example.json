@@ -1,0 +1,12 @@
+{
+  "_说明": "搜索条件配置。复制成 search_filter.json 后按需填；留空 = 该维度「不限」。code 用 python -m boss_filter export 查表。",
+  "query": "",
+  "city": "",
+  "jobType": "",
+  "salary": "",
+  "experience": [],
+  "degree": [],
+  "industry": [],
+  "scale": [],
+  "pageSize": 15
+}

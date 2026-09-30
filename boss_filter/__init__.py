@@ -20,6 +20,12 @@
 
     cond = get_filter_conditions(html_path=".saved_web/求职_找工作_招聘信息-BOSS直聘.html")
 
+搜索条件的**用户配置**走磁盘文件（没有就留空 = 全部「不限」）::
+
+    from boss_filter import load_search_filter
+    f = load_search_filter()            # 读 search_filter.json，没有就是全空
+    f.to_params()                       # → {'page': '1', 'pageSize': '15', 'scene': '1'}
+
 CLI::
 
     python -m boss_filter show
@@ -30,7 +36,7 @@ CLI::
 from __future__ import annotations
 
 from .client import FilterClient, get_filter_conditions, load_industries, parse_conditions_payload
-from .config import BASE_URL, DEFAULT_SAVED_HTML, ENDPOINTS
+from .config import BASE_URL, DEFAULT_FILTER_PATH, DEFAULT_SAVED_HTML, ENDPOINTS, FILTER_ENV, PROJECT_ROOT
 from .errors import (
     FilterApiError,
     FilterDataError,
@@ -53,7 +59,14 @@ from .models import (
     options_from_api,
     options_from_rows,
 )
-from .search import JobSearchFilter, ResolvedSearchFilter
+from .search import (
+    JobSearchFilter,
+    ResolvedSearchFilter,
+    filter_path,
+    load_search_filter,
+    save_search_filter,
+    search_filter_from_dict,
+)
 
 __version__ = "0.1.0"
 
@@ -68,6 +81,11 @@ __all__ = [
     "IndustryGroup",
     "JobSearchFilter",
     "ResolvedSearchFilter",
+    # 搜索条件配置文件
+    "filter_path",
+    "load_search_filter",
+    "save_search_filter",
+    "search_filter_from_dict",
     # 异常
     "FilterApiError",
     "FilterDataError",
@@ -87,7 +105,10 @@ __all__ = [
     "options_from_rows",
     # 常量
     "BASE_URL",
+    "DEFAULT_FILTER_PATH",
     "DEFAULT_SAVED_HTML",
     "ENDPOINTS",
+    "FILTER_ENV",
+    "PROJECT_ROOT",
     "__version__",
 ]
