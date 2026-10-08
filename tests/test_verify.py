@@ -231,6 +231,19 @@ class TestHelperHtml:
         # 票据回传目标
         assert "/solution" in html
 
+    def test_post_url_is_customizable(self):
+        """网页控制台把帮助页挂在自己的路由下，回传地址要能改。"""
+        challenge = parse_challenge(
+            {"captchaType": 1, "startCaptcha": json.dumps({"gt": "gt-1", "challenge": "ch-1"})}
+        )
+        html = build_helper_html(
+            challenge, post_url="/api/auth/slider/abc/solution"
+        )
+        assert '"/api/auth/slider/abc/solution"' in html
+        # 默认值不受影响
+        default_html = build_helper_html(challenge)
+        assert '"/solution"' in default_html
+
     def test_keeps_javascript_valid_when_values_contain_quotes(self):
         """gt/challenge 用 json.dumps 嵌进 JS，带引号时不能把脚本弄断。"""
         challenge = parse_challenge({"gt": 'gt"quote', "challenge": "c"})

@@ -29,3 +29,7 @@ stoken.json
 jobs.db
 search_filter.json
 .chrome_profile/
+
+# Web 控制台运行时数据
+data/
+llm_config.json

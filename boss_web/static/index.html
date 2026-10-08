@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BOSS · ORBIT 星舰控制台</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230B0F1A' stroke='%236EE7FF' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%236EE7FF'/%3E%3C/svg%3E">
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"></div>
+  <div class="noise" aria-hidden="true"></div>
+
+  <header class="bridge">
+    <a class="brand" href="#/">
+      <span class="brand-orb"></span>
+      <span class="brand-text">BOSS<em>ORBIT</em></span>
+    </a>
+    <nav class="stages" id="stages">
+      <a href="#/login"  data-stage="login"><i></i><span>登录</span></a>
+      <a href="#/jobs"   data-stage="jobs"><i></i><span>职位</span></a>
+      <a href="#/resume" data-stage="resume"><i></i><span>简历</span></a>
+      <a href="#/llm"    data-stage="llm"><i></i><span>模型</span></a>
+    </nav>
+    <div class="bridge-status" id="bridge-status">
+      <span class="signal" id="signal-session" title="登录状态"></span>
+      <span class="signal-label" id="signal-session-label">会话检测中</span>
+    </div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="modal-root"></div>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

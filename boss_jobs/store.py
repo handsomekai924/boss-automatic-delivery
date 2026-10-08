@@ -246,14 +246,7 @@ class JobStore:
     ) -> list[Job]:
         """按最近抓取顺序列职位。``keyword`` 同时匹配岗位名与公司名。"""
         sql = "SELECT * FROM jobs"
-        where: list[str] = []
-        params: list[Any] = []
-        if city:
-            where.append("city_name = ?")
-            params.append(city)
-        if keyword:
-            where.append("(job_name LIKE ? OR brand_name LIKE ?)")
-            params.extend([f"%{keyword}%", f"%{keyword}%"])
+        where, params = _match_where(city=city, keyword=keyword)
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY fetched_at DESC, page ASC LIMIT ? OFFSET ?"
@@ -267,6 +260,50 @@ class JobStore:
             "SELECT * FROM fetch_pages ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def count_jobs_matching(
+        self,
+        *,
+        city: str | None = None,
+        keyword: str | None = None,
+    ) -> int:
+        """按 :meth:`list_jobs` 同款条件数职位，翻页前先看总数。"""
+        sql = "SELECT COUNT(*) AS n FROM jobs"
+        where, params = _match_where(city=city, keyword=keyword)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        row = self._conn.execute(sql, params).fetchone()
+        return int(row["n"]) if row else 0
+
+    def delete_job(self, encrypt_job_id: str) -> bool:
+        """删一条职位；返回是否真的删掉了。"""
+        cur = self._conn.execute(
+            "DELETE FROM jobs WHERE encrypt_job_id = ?", (encrypt_job_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def delete_jobs(self, encrypt_job_ids: Sequence[str]) -> int:
+        """批量删职位，返回删除条数。空列表直接返回 0。"""
+        ids = [str(i) for i in encrypt_job_ids if i]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        cur = self._conn.execute(
+            f"DELETE FROM jobs WHERE encrypt_job_id IN ({placeholders})", ids
+        )
+        self._conn.commit()
+        return int(cur.rowcount)
+
+    def clear_jobs(self, *, city: str | None = None, keyword: str | None = None) -> int:
+        """按条件清空职位；两个条件都不给 = 清整张表。返回删除条数。"""
+        where, params = _match_where(city=city, keyword=keyword)
+        sql = "DELETE FROM jobs"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        cur = self._conn.execute(sql, params)
+        self._conn.commit()
+        return int(cur.rowcount)
 
     def summary(self) -> dict[str, Any]:
         """一页人读摘要（CLI ``stats`` 用）。"""
@@ -309,6 +346,23 @@ class JobStore:
 # --------------------------------------------------------------------------- #
 # 行 ↔ 模型
 # --------------------------------------------------------------------------- #
+
+
+def _match_where(
+    *,
+    city: str | None = None,
+    keyword: str | None = None,
+) -> tuple[list[str], list[Any]]:
+    """``list_jobs`` / ``delete_*`` 共用的 WHERE 片段。"""
+    where: list[str] = []
+    params: list[Any] = []
+    if city:
+        where.append("city_name = ?")
+        params.append(city)
+    if keyword:
+        where.append("(job_name LIKE ? OR brand_name LIKE ?)")
+        params.extend([f"%{keyword}%", f"%{keyword}%"])
+    return where, params
 
 
 def _job_params(job: Job, fetched_at: str) -> dict[str, Any]:

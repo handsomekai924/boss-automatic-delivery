@@ -384,7 +384,7 @@ _HELPER_HTML = """\
 (function () {{
   var gt = {gt_json};
   var challenge = {challenge_json};
-  var postUrl = "/solution";
+  var postUrl = {post_url_json};
 
   function finish(validate) {{
     var ok = document.getElementById("ok");
@@ -459,12 +459,18 @@ def build_helper_html(
     host: str = C.SLIDER_HELPER_HOST,
     port: int = C.SLIDER_HELPER_PORT,
     loader_url: str = C.GEETEST_LOADER_URL,
+    post_url: str = "/solution",
 ) -> str:
-    """渲染本地求解帮助页。纯函数，便于离线核对输出。"""
+    """渲染本地求解帮助页。纯函数，便于离线核对输出。
+
+    :param post_url: 票据回传地址。默认 ``/solution``（本地帮助服务）；
+                     网页控制台可指到自己的路由，把帮助页挂在别的服务下。
+    """
     return _HELPER_HTML.format(
         host=host,
         port=port,
         loader_url=loader_url,
+        post_url_json=json.dumps(post_url),
         gt_json=json.dumps(challenge.gt, ensure_ascii=False),
         challenge_json=json.dumps(challenge.challenge, ensure_ascii=False),
         api_servers_json=json.dumps(list(C.GEETEST_API_SERVERS), ensure_ascii=False),

@@ -731,3 +731,64 @@ def test_cli_list_and_stats(tmp_path, monkeypatch, capsys):
     assert cli.main(["--db", str(db_path), "stats", "--json"]) == 0
     out = capsys.readouterr().out
     assert json.loads(out)["jobs"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 进度回调 / 协作式停止（网页控制台用）
+# --------------------------------------------------------------------------- #
+
+
+def test_crawl_on_progress_fires_per_page(tmp_path):
+    """每页入库后回调一次，payload 带上网页要的计数。"""
+    pages = [
+        ok_page([api_item("a1"), api_item("a2")], has_more=True),
+        ok_page([api_item("b1")], has_more=False),
+    ]
+    client, _, _ = client_with(pages)
+    events: list[dict] = []
+    with JobStore(tmp_path / "p.db") as store:
+        client.crawl(store=store, page_interval=0.0, on_progress=events.append)
+
+    assert len(events) == 2
+    assert events[0]["page"] == 1
+    assert events[0]["kept_count"] == 2
+    assert events[0]["inserted"] == 2
+    assert events[1]["page"] == 2
+    assert events[1]["has_more"] is False
+
+
+def test_crawl_should_stop_breaks_before_next_page(tmp_path):
+    """取消信号在翻页前生效，已入库的页保留。"""
+    pages = [
+        ok_page([api_item("a1")], has_more=True),
+        ok_page([api_item("b1")], has_more=True),
+        ok_page([api_item("c1")], has_more=True),
+    ]
+    client, http, _ = client_with(pages)
+    calls = {"n": 0}
+
+    def stop_after_first() -> bool:
+        return calls["n"] >= 1
+
+    def counting(payload):
+        calls["n"] += 1
+
+    with JobStore(tmp_path / "s.db") as store:
+        report = client.crawl(
+            store=store,
+            page_interval=0.0,
+            on_progress=counting,
+            should_stop=stop_after_first,
+        )
+        assert store.count_jobs() == 1
+
+    assert len(http.calls) == 1  # 只打了第 1 页
+    assert "停止信号" in report.stats.stopped_reason
+
+
+def test_crawl_without_hooks_still_works(tmp_path):
+    """不传 on_progress / should_stop 时行为不变。"""
+    client, _, _ = client_with([ok_page([])])
+    with JobStore(tmp_path / "n.db") as store:
+        report = client.crawl(store=store, page_interval=0.0)
+    assert report.stats.pages == 1

@@ -219,6 +219,8 @@ class JobClient:
         start_page: int = 1,
         db_path: Path | str | None = None,
         search_filter: Any | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> CrawlReport:
         """分页抓取职位，**每页即时清洗入库**，页与页之间硬睡一会。
 
@@ -231,6 +233,10 @@ class JobClient:
             **给了就走搜索流** ``/wapi/zpgeek/search/joblist.json``，条件照搬；
             不给就走原来的推荐流 ``special/zone``（无筛选）。
             筛选条件一般从配置文件读，见 :func:`boss_filter.load_search_filter`。
+        :param on_progress: 每页入库后回调 ``{page, raw_count, kept_count,
+            inserted, updated, has_more, stopped_reason?}``；网页控制台用来推进度。
+        :param should_stop: 翻页前（含起始页）调一次；返回 ``True`` 则协作式收手，
+            已入库的页保留。适合后台任务的取消按钮。
         :return: :class:`CrawlReport`（统计 + 每页明细）
         """
         interval = self.page_interval if page_interval is None else max(0.0, page_interval)
@@ -242,9 +248,30 @@ class JobClient:
         reason = "抓到空页"
         use_search = search_filter is not None
 
+        def _push(result: PageResult, outcome: SaveOutcome, extra: dict[str, Any] | None = None) -> None:
+            if on_progress is None:
+                return
+            payload: dict[str, Any] = {
+                "run_id": run_id,
+                "page": result.page,
+                "raw_count": result.raw_count,
+                "kept_count": len(result.jobs),
+                "dropped_count": result.raw_count - len(result.jobs),
+                "inserted": outcome.inserted,
+                "updated": outcome.updated,
+                "has_more": result.has_more,
+            }
+            if extra:
+                payload.update(extra)
+            on_progress(payload)
+
         try:
             page = start_page
             while True:
+                if should_stop is not None and should_stop():
+                    reason = "收到停止信号"
+                    break
+
                 if max_pages and (page - start_page) >= max_pages:
                     reason = f"达到 max_pages={max_pages}"
                     break
@@ -257,6 +284,7 @@ class JobClient:
                 report.pages.append(result)
                 stats = stats.add(result, outcome)
                 report.stats = stats
+                _push(result, outcome)
 
                 if result.is_empty:
                     reason = f"第 {page} 页接口回空列表"
