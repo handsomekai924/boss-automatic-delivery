@@ -9,6 +9,10 @@
     python -m boss_jobs list --json                # 职位按 JSON 输出
 
 登录态默认读项目根目录的 ``session.json``（``boss_login`` 落的那份）。
+
+搜索流还会**自动**补 ``__zp_stoken__``：每次抓搜索页前判一次过期，过期了就
+拉起一台 Chrome（CDP）让站点自己算一枚、落盘到 ``stoken.json``、再镜像进
+``session.json``，下次直接用（令牌约 64 小时）。没有单独的「取令牌」命令。
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .cdp_stoken import CHROME_BIN_ENV
 from .client import JobClient, create_client
 from .config import (
     BASE_URL,
@@ -31,6 +36,7 @@ from .config import (
     STOKEN_ENV,
 )
 from .errors import JobApiError, JobDataError, JobError, JobTransportError
+from .stoken import StokenError
 from .store import open_store
 
 # 筛选条件的配置文件（没有就留空 = 全部「不限」）
@@ -125,9 +131,9 @@ def main(argv: list[str] | None = None) -> int:
         elif exc.is_browser_check:
             print(
                 f"✗ 撞上安全网关（code {exc.code}）：{exc.message}\n"
-                f"  缺的是 {STOKEN_COOKIE} 安全网关令牌。本工具会自动算一枚补上"
-                f"（见 boss_jobs.stoken），\n"
-                f"  仍被拒多半是 security-js 的环境指纹跟请求头对不上。\n"
+                f"  缺的是 {STOKEN_COOKIE} 安全网关令牌。本工具会自动拉起 Chrome（CDP）\n"
+                f"  让站点自己算一枚补上并落盘（见 boss_jobs.cdp_stoken），\n"
+                f"  仍被拒多半是登录态失效，或那台 Chrome 站点也不认。\n"
                 f"  急用的话，也可以从浏览器拷一枚塞进 session.json 的 cookies，"
                 f"或设 {STOKEN_ENV} 环境变量。",
                 file=sys.stderr,
@@ -141,6 +147,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print(f"✗ 接口返回失败：{exc.message}（code {exc.code}）", file=sys.stderr)
+        return EXIT_ERROR
+    except StokenError as exc:
+        print(
+            f"✗ 取 {STOKEN_COOKIE} 失败：{exc}\n"
+            f"  这枚令牌要真浏览器才生成得出来（Chrome + CDP，见 boss_jobs.cdp_stoken）。\n"
+            f"  装好 Google Chrome，或用 {CHROME_BIN_ENV} 指到它的可执行文件；\n"
+            f"  也可以手工从浏览器拷一枚塞进 session.json 的 cookies，或设 {STOKEN_ENV} 环境变量。",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
     except (JobTransportError, JobDataError) as exc:
         print(f"✗ {exc.message}", file=sys.stderr)

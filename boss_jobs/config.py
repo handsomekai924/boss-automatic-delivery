@@ -36,8 +36,8 @@ ENDPOINTS: Final[dict[str, str]] = {
     #: 唯一在用的分页职位列表（GET）。见文件头的实测记录。
     "job_list": "/wapi/zpgeek/pc/special/zone/joblist.json",
     #: 职位搜索列表（GET）。要登录 **且** 要 ``__zp_stoken__``（缺了回 code 37）。
-    #: 令牌由 :class:`boss_jobs.stoken.StokenProvider` 全自动补，见
-    #: :func:`boss_jobs.client.JobClient.fetch_search_page`。
+    #: 令牌由 :class:`boss_jobs.cdp_stoken.CdpStokenProvider` 全自动补（拉 Chrome
+    #: 让站点自己算），见 :func:`boss_jobs.client.JobClient.fetch_search_page`。
     "job_search": "/wapi/zpgeek/search/joblist.json",
     #: 职位详情。列表页已经带全 todo.md 要的字段，先留着备用。
     "job_detail": "/wapi/zpgeek/job/detail.json",
@@ -74,8 +74,10 @@ CODE_BROWSER_CHECK: Final[int] = 37
 CODE_RISK_CONTROL: Final[int] = 36
 
 #: 安全网关令牌的 Cookie 名。**不是服务端发的**，是浏览器按
-#: ``/web/common/security-js/{name}.js`` 的 ``ABC.z(seed, ts)`` 算出来再回传的。
-#: 本项目 :mod:`boss_jobs.stoken` 复刻了这条链路，可全自动获取。
+#: ``/web/common/security-js/{name}.js`` 的 ``ABC.z(seed, ts)`` 算出来再回传的，
+#: 里面还编了浏览器环境指纹。取它最稳的路子是拉真 Chrome 让站点自己写
+#: （:mod:`boss_jobs.cdp_stoken`，``fetch`` 默认走这条）；
+#: :mod:`boss_jobs.stoken` 那条 Node 硬算只用来验证算法，服务端不认它的指纹。
 STOKEN_COOKIE: Final[str] = "__zp_stoken__"
 
 #: 环境变量兜底：想跳过自动计算、直接用浏览器里拷出来的令牌时设它。

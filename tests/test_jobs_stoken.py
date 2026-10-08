@@ -409,7 +409,7 @@ def test_fetch_search_page_撞37_自动补令牌重试():
     result = client.fetch_search_page(_F())
 
     assert result.raw_count == 0
-    assert provider.ensure_calls == [True]              # 强制重算
+    assert provider.ensure_calls == [False, True]      # 先判过期，撞 37 再强制换新
     assert http.cookies.get("__zp_stoken__") == "0138AUTO"
     assert len(http.request_calls) == 2                 # 补令牌后真的重试了一次
 
@@ -431,8 +431,9 @@ def test_fetch_search_page_撞37_没挂provider_照旧报错():
     assert len(http.request_calls) == 1
 
 
-def test_fetch_search_page_撞36_不碰provider():
-    """账号风控不是缺令牌，别去白算一轮。"""
+def test_fetch_search_page_撞36_不强制换新():
+    """账号风控不是缺令牌。请求前那一次 ``ensure()`` 是常规判过期，
+    撞上 code 36 **不会**再 force 换一枚。"""
     provider = FakeProvider()
     http = FakeHttp(
         request_responses=[FakeResponse({"code": 36, "message": "您的账户存在异常行为."})]
@@ -449,4 +450,4 @@ def test_fetch_search_page_撞36_不碰provider():
     with pytest.raises(JobApiError) as excinfo:
         client.fetch_search_page(_F())
     assert excinfo.value.is_risk_control
-    assert provider.ensure_calls == []
+    assert provider.ensure_calls == [False]           # 只有请求前那一次，没有 force

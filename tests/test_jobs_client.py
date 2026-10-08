@@ -504,6 +504,28 @@ def test_stoken_都没有就不带它(tmp_path, monkeypatch):
     assert "__zp_stoken__" not in cookie_map(fake)
 
 
+def test_换新令牌时不会留下同名旧Cookie(tmp_path, monkeypatch):
+    """同名不同 domain 的 Cookie 会一起进请求头，服务端照旧的那枚拒。
+
+    实测踩过：``http_from_session`` 不带 domain 写了一枚，后面 ``put_cookie``
+    又按 domain=.zhipin.com 补一枚，请求头里 ``__zp_stoken__=旧; __zp_stoken__=新``。
+    """
+    import requests
+
+    from boss_jobs.stoken import put_cookie
+
+    jar = requests.cookies.RequestsCookieJar()
+    jar.set("__zp_stoken__", "OLD")                       # 不带 domain（老写法）
+    put_cookie(jar, "__zp_stoken__", "NEW")
+    assert [c.value for c in jar if c.name == "__zp_stoken__"] == ["NEW"]
+    assert next(c for c in jar if c.name == "__zp_stoken__").domain == ".zhipin.com"
+
+    prepared = requests.Request("GET", "https://www.zhipin.com/wapi/x").prepare()
+    header = requests.cookies.get_cookie_header(jar, prepared) or ""
+    assert header.count("__zp_stoken__=") == 1
+    assert "NEW" in header and "OLD" not in header
+
+
 def test_stoken_会话里有就不会被环境变量盖掉(tmp_path, monkeypatch):
     monkeypatch.setenv("BOSS_ZP_STOKEN", "TOKEN-FROM-ENV")
     path = write_session(tmp_path, {"__zp_stoken__": "TOKEN-FROM-SESSION"})
@@ -605,7 +627,11 @@ def test_cli_fetch_reports_browser_check(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session",
         lambda *a, **k: FakeHttp(
-            [{"code": 37, "message": "你的浏览器环境异常", "zpData": {"seed": "s", "ts": 1, "name": "n"}}]
+            [
+                {"code": 37, "message": "你的浏览器环境异常", "zpData": {"seed": "s", "ts": 1, "name": "n"}},
+                # 自动补一枚重试后**仍然** 37，才算「救不回来」
+                {"code": 37, "message": "你的浏览器环境异常", "zpData": {"seed": "s", "ts": 1, "name": "n"}},
+            ]
         ),
     )
     code = cli.main(
@@ -614,9 +640,9 @@ def test_cli_fetch_reports_browser_check(tmp_path, monkeypatch, capsys):
     assert code == 1
     err = capsys.readouterr().err
     assert "__zp_stoken__" in err
-    # 现在会自动算令牌，提示也改成「自动补 + 仍被拒怎么办」
-    assert "自动算" in err
-    assert "security-js" in err
+    # 现在是拉 Chrome（CDP）让站点自己算，提示也改成「自动补 + 仍被拒怎么办」
+    assert "CDP" in err
+    assert "Chrome" in err
 
 
 def test_cli_fetch_reports_risk_control(tmp_path, monkeypatch, capsys):

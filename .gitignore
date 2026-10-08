@@ -25,3 +25,7 @@ docs/
 # 其他
 session.json
 filters.json
+stoken.json
+jobs.db
+search_filter.json
+.chrome_profile/

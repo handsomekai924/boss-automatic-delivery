@@ -47,6 +47,14 @@ from .errors import (
     JobError,
     JobTransportError,
 )
+from .cdp_stoken import (
+    CdpClient,
+    CdpStokenProvider,
+    StokenRecord,
+    StokenStore,
+    connect_or_launch,
+    find_chrome,
+)
 from .models import Job, PageResult, clean_page, clean_pages, clean_salary, clean_text
 from .stoken import (
     StokenChallenge,
@@ -68,7 +76,14 @@ __all__ = [
     "http_from_session",
     "CrawlReport",
     "CrawlStats",
-    # __zp_stoken__
+    # __zp_stoken__（真浏览器 CDP 取法，fetch 默认走这条）
+    "CdpClient",
+    "CdpStokenProvider",
+    "StokenRecord",
+    "StokenStore",
+    "connect_or_launch",
+    "find_chrome",
+    # __zp_stoken__（Node 硬算，算法可验但服务端不认指纹）
     "StokenChallenge",
     "StokenError",
     "StokenProvider",

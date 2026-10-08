@@ -3,13 +3,13 @@
 跑一遍真实站点的搜索流水线，并把每一段的耗时打出来：
 
     1. 装配会话（session.json）
-    2. **全自动**获取 ``__zp_stoken__``（拿挑战 → 下 security-js → ABC.z 算令牌）
+    2. **全自动**获取 ``__zp_stoken__``（拉 Chrome，CDP，让站点自己算一枚并落盘）
     3. 拿筛选条件（boss_filter.get_filter_conditions）
     4. 装配 JobSearchFilter（**配置文件** → 查询串）
     5. fetch_search_page 抓一页搜索结果并清洗
 
 筛选条件来自配置文件 ``search_filter.json``（没有就留空 = 全部「不限」），
-命令行参数只做覆盖。``__zp_stoken__`` 的来源与算法见 :mod:`boss_jobs.stoken`。
+命令行参数只做覆盖。``__zp_stoken__`` 的来源见 :mod:`boss_jobs.cdp_stoken`。
 
 用法::
 
@@ -42,7 +42,7 @@ from boss_filter import (  # noqa: E402
 from boss_filter.models import FilterConditions  # noqa: E402
 from boss_jobs import STOKEN_COOKIE, create_client  # noqa: E402
 from boss_jobs.errors import JobApiError, JobError  # noqa: E402
-from boss_jobs.stoken import StokenError, StokenProvider, mint_offline  # noqa: E402
+from boss_jobs.stoken import StokenError  # noqa: E402
 
 
 class Timer:
@@ -171,29 +171,23 @@ def main(argv: list[str] | None = None) -> int:
         stoken_note = "命令行显式传入"
         timer.mark("__zp_stoken__（显式传入）")
     else:
-        provider: StokenProvider | None = client.stoken_provider
+        provider = client.stoken_provider
         if provider is None:
             timer.mark("__zp_stoken__（未挂 Provider）")
         else:
             try:
-                # 先算后用：把「拿挑战 + 下脚本 + 算令牌」单独计时
-                challenge = provider.fetch_challenge()
-                token = provider.mint(challenge)
-                provider.apply(token)
+                # 先判过期再决定要不要拉 Chrome：新鲜就直接复用
+                record = provider.store.load() if getattr(provider, "store", None) else None
+                was_fresh = bool(record and record.is_fresh())
+                token = provider.ensure()
                 stoken_len = len(token)
-                stoken_note = f"在线铸币（name={challenge.name}，脚本 {challenge.name}.js）"
+                stoken_note = (
+                    f"复用本地账本（剩 {record.ttl_left / 60:.0f} 分钟）"
+                    if was_fresh
+                    else "拉 Chrome（CDP）让站点自算并落盘"
+                )
             except StokenError as exc:
-                # 拿不到真挑战（多半 code 36 风控）时，退到本地缓存脚本铸一枚，
-                # 把「算法这条路通了」和「纯铸币耗时」量出来。样例令牌不会被服务端认。
-                try:
-                    token = mint_offline(cache_dir=provider.cache_dir, node_bin=provider.node_bin)
-                    stoken_len = len(token)
-                    stoken_note = (
-                        f"离线铸币（真挑战拿不到：{exc}）——样例挑战，"
-                        f"仅验证算法与耗时，服务端不会认"
-                    )
-                except StokenError as exc2:
-                    stoken_note = f"获取失败：{exc}；离线铸币也失败：{exc2}"
+                stoken_note = f"获取失败：{exc}"
             timer.mark("__zp_stoken__ 全自动获取")
         if stoken_len:
             client._set_cookie(STOKEN_COOKIE, client._http.cookies.get(STOKEN_COOKIE) or "")
@@ -264,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
             elif exc.is_browser_check:
                 stopped = (
                     f"code 37 安全网关：自动补 {STOKEN_COOKIE} 后仍被拒。"
-                    f"多半是 security-js 的环境指纹跟请求头对不上。"
+                    f"多半是登录态失效，或那台 Chrome 站点也不认。"
                 )
             else:
                 stopped = f"接口报错 code={exc.code}：{exc.message}"

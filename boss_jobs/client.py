@@ -99,8 +99,9 @@ class JobClient:
     :param backoff: 重试退避基数（秒），按 2 的幂递增
     :param sleeper: 可替换的 sleep（测试里注入 no-op）
     :param page_interval: 翻页硬间隔（秒），默认 1.0，防风控
-    :param stoken_provider: ``__zp_stoken__`` 自动获取器（见 :mod:`boss_jobs.stoken`）。
-        传了它，搜索接口撞上 code 37 时会自己算令牌重试；不传就按老规矩报错。
+    :param stoken_provider: ``__zp_stoken__`` 自动获取器（见 :mod:`boss_jobs.cdp_stoken`）。
+        每次搜索前会 ``ensure()`` 判过期、过期了自己换新；撞上 code 37 时会
+        ``ensure(force=True)`` 强制再换一枚重试。不传就按老规矩报错。
     """
 
     def __init__(
@@ -164,9 +165,10 @@ class JobClient:
         与 :meth:`fetch_page` 的区别：这条是**关键词 + 筛选条件**的搜索流，
         而 ``fetch_page`` 走的是推荐页那条 ``special/zone`` 流。
 
-        撞上安全网关（code 37）时，会**自动**走一遍
-        :mod:`boss_jobs.stoken` 的令牌获取（拿挑战 → 跑 ``security-js`` →
-        算出 ``__zp_stoken__`` → 重试），不需要人工回浏览器。
+        每次进来都先让 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`
+        **判一次 ``__zp_stoken__`` 过期**：没过期直接用，过期了自动拉 Chrome
+        （CDP）让站点自己算一枚、落盘、再带上去打接口。撞上安全网关
+        （code 37）时还会**强制**换一枚重试，不需要人工回浏览器拷。
 
         :param search_filter: ``JobSearchFilter``；只要能出 ``to_params()`` 也行
         :param page: 覆盖条件里的页码（翻页时省得自己改条件）
@@ -178,6 +180,11 @@ class JobClient:
         params = dict(search_filter.to_params())
         path = self.endpoints["job_search"]
         action = f"搜索第 {params.get('page', '?')} 页"
+
+        if self.stoken_provider is not None:
+            # 先补一枚没过期的，省得每次都撞一次 37 再回头补
+            token = self.stoken_provider.ensure()
+            self._set_cookie(C.STOKEN_COOKIE, token)
 
         try:
             payload = self._get_json(path, params=params, action=action)
@@ -192,9 +199,12 @@ class JobClient:
         return clean_page(payload, page=int(params.get("page", 1)))
 
     def _set_cookie(self, name: str, value: str) -> None:
+        from .stoken import put_cookie  # 延迟导入，避免跟 stoken 硬绑
+
         jar = getattr(self._http, "cookies", None)
-        if jar is not None and hasattr(jar, "set"):
-            jar.set(name, value, domain=".zhipin.com", path="/")
+        if jar is None:
+            return
+        put_cookie(jar, name, value)
 
     # ------------------------------------------------------------------ #
     # 翻页：抓 → 洗 → 存 → 睡
@@ -383,8 +393,8 @@ def http_from_session(
     3. 环境变量 :data:`config.STOKEN_ENV`（``BOSS_ZP_STOKEN``）
 
     都没有就**先不带**——搜索类接口会回 code 37，由
-    :func:`create_client` 挂上的 :class:`~boss_jobs.stoken.StokenProvider`
-    按站点前端那条链路自动算一枚补上（见 :mod:`boss_jobs.stoken`）。
+    :func:`create_client` 挂上的 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`
+    拉 Chrome（CDP）让站点自己算一枚补上（见 :mod:`boss_jobs.cdp_stoken`）。
     """
     from boss_login.session import load_session  # 延迟导入，避免硬依赖
 
@@ -404,13 +414,17 @@ def http_from_session(
 
     # 取值顺序：显式参数 → session.json → 环境变量。先定序再落盘，
     # 这样显式传进来的一定盖得过会话里旧的那份。
+    from .stoken import put_cookie  # 延迟导入
+
     token = stoken or stored.cookies.get(C.STOKEN_COOKIE) or os.environ.get(C.STOKEN_ENV, "")
     if token and hasattr(sess, "cookies") and hasattr(sess.cookies, "set"):
-        sess.cookies.set(C.STOKEN_COOKIE, token)
+        # 走 put_cookie：会把上面那行不带 domain 写进去的同名旧 Cookie 清掉，
+        # 否则请求头里会同时出现两枚 __zp_stoken__，服务端照旧的那枚拒。
+        put_cookie(sess.cookies, C.STOKEN_COOKIE, token)
         logger.debug("已带上 %s（长度 %d）", C.STOKEN_COOKIE, len(token))
     else:
         logger.debug(
-            "会话里还没有 %s：搜索接口会先回 code 37，由 StokenProvider 自动算一枚补上。",
+            "会话里还没有 %s：搜索接口会先回 code 37，由 CdpStokenProvider 拉 Chrome 算一枚补上。",
             C.STOKEN_COOKIE,
         )
     return sess
@@ -428,15 +442,20 @@ def create_client(
 ) -> JobClient:
     """一步拿到带登录态的 :class:`JobClient`。
 
-    ``auto_stoken=True``（默认）时挂上 :class:`~boss_jobs.stoken.StokenProvider`，
-    搜索接口撞上 code 37 就自动算 ``__zp_stoken__`` 重试。
+    ``auto_stoken=True``（默认）时挂上 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`：
+    每次搜索前判一次 ``__zp_stoken__`` 过期，过期了自动拉 Chrome（CDP）换新并
+    落盘（``stoken.json`` + 镜像进 ``session.json``）。这是**真浏览器**自算，
+    不是 Node 硬算——后者指纹对不上，服务端不认，见 :mod:`boss_jobs.cdp_stoken`。
     """
     http = http_from_session(session_path, stoken=stoken)
     provider = None
     if auto_stoken:
-        from .stoken import StokenProvider  # 延迟导入
+        from .cdp_stoken import CdpStokenProvider  # 延迟导入
 
-        provider = StokenProvider(http=http, base_url=base_url)
+        provider = CdpStokenProvider(
+            http=http,
+            session_path=session_path or C.DEFAULT_SESSION_PATH,
+        )
     return JobClient(
         base_url=base_url,
         http=http,

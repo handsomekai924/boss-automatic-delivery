@@ -124,6 +124,7 @@ __all__ = [
     "load_security_js",
     "mint_offline",
     "parse_challenge",
+    "put_cookie",
     "security_js_path",
 ]
 
@@ -383,14 +384,10 @@ class StokenProvider:
         前端是 ``max-age=3840*60``；``requests`` 的 cookiejar 认的是绝对过期
         时间 ``expires``，这里换算过去。
         """
-        jar = getattr(self.http, "cookies", None)
-        if jar is None or not hasattr(jar, "set"):
-            raise StokenError("会话对象不支持 cookies.set，没法写入 " + C.STOKEN_COOKIE)
-        jar.set(
+        put_cookie(
+            self.http.cookies,
             C.STOKEN_COOKIE,
             token,
-            domain=".zhipin.com",
-            path="/",
             expires=int(time.time()) + STOKEN_MAX_AGE,
         )
         logger.debug("已写入 %s（长度 %d）", C.STOKEN_COOKIE, len(token))
@@ -414,6 +411,42 @@ class StokenProvider:
         token = self.mint(challenge)
         self.apply(token)
         return token
+
+
+def put_cookie(
+    jar: Any,
+    name: str,
+    value: str,
+    *,
+    domain: str = ".zhipin.com",
+    path: str = "/",
+    expires: int | None = None,
+) -> None:
+    """把一枚 Cookie 稳稳地写进 cookiejar：**先清同名，再写**。
+
+    ``requests`` 的 jar 允许同名不同 domain 共存，而 ``http_from_session``
+    装配时是不带 domain 写的（domain=``''``）。要是不清就补一枚
+    domain=``.zhipin.com`` 的，请求头里会同时出现新旧两枚
+    ``__zp_stoken__``，服务端照着旧的那枚拒——实测就是这么吃的 code 37。
+    """
+    if jar is None or not hasattr(jar, "set"):
+        raise StokenError("会话对象不支持 cookies.set，没法写入 " + name)
+    try:
+        for cookie in list(jar):
+            if getattr(cookie, "name", None) == name:
+                try:
+                    jar.clear(cookie.domain or "", cookie.path or "/", name)
+                except Exception:  # noqa: BLE001 - 清不掉就盖写，下面再试
+                    pass
+    except Exception:  # noqa: BLE001 # pragma: no cover - 假 jar 不可迭代
+        pass
+    kwargs: dict[str, Any] = {"domain": domain, "path": path}
+    if expires is not None:
+        kwargs["expires"] = int(expires)
+    try:
+        jar.set(name, value, **kwargs)
+    except TypeError:  # 简易假 jar 只认 set(name, value, **ignored)
+        jar.set(name, value)
 
 
 def _read_cookie(http: Any, name: str) -> str:
