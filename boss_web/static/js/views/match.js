@@ -29,8 +29,30 @@ export async function renderMatch(root) {
       </div>
     </div>
 
+    <div class="card mb-24">
+      <div class="card-head">
+        <h3 class="card-title">发送工具条</h3>
+        <span class="card-sub">任何粒度发送前都会弹确认 · 已成功的不会重发 · 发送 = 标准打招呼（招呼语暂不随请求发出）</span>
+      </div>
+      <div class="flex between center wrap gap-12">
+        <div class="btn-row">
+          <button class="btn primary" id="btn-send-all">一键发送全部</button>
+          <button class="btn" id="btn-send-sel">发送选中 (<span id="send-sel-n">0</span>)</button>
+        </div>
+        <span class="muted" style="font-size:12px">在下方「匹配结果」里展开单条可单独改招呼语 / 发送</span>
+      </div>
+    </div>
+
+    <div class="card mb-24">
+      <div class="card-head">
+        <h3 class="card-title">历史分析</h3>
+        <span class="card-sub">data/boss.db · analysis 表</span>
+      </div>
+      <div id="history-list" class="scroll-y" style="max-height:200px"></div>
+    </div>
+
     <div class="bento">
-      <div class="card span-5">
+      <div class="card span-5 panel-col">
         <div class="card-head">
           <h3 class="card-title">岗位列表</h3>
           <span class="card-sub" id="jobs-sub">—</span>
@@ -42,7 +64,7 @@ export async function renderMatch(root) {
           </div>
           <span class="pill accent" id="sel-count">已选 0</span>
         </div>
-        <div id="job-list"></div>
+        <div id="job-list" class="scroll-y"></div>
         <div class="flex between center mt-12">
           <button class="btn sm ghost" id="btn-prev">上一页</button>
           <span class="muted mono" id="page-info" style="font-size:12px">—</span>
@@ -50,37 +72,15 @@ export async function renderMatch(root) {
         </div>
       </div>
 
-      <div class="card span-7">
+      <div class="card span-7 panel-col" id="results-card">
         <div class="card-head">
           <h3 class="card-title">匹配结果</h3>
           <span class="card-sub" id="an-sub">尚未匹配</span>
         </div>
-        <div id="an-results">
+        <div id="an-results" class="scroll-y">
           <div class="empty"><div class="empty-icon">◌</div><p>启动匹配后，结果会按分数从高到低排在这里</p></div>
         </div>
       </div>
-    </div>
-
-    <div class="card mt-24">
-      <div class="card-head">
-        <h3 class="card-title">发送工具条</h3>
-        <span class="card-sub">任何粒度发送前都会弹确认</span>
-      </div>
-      <div class="flex between center wrap gap-12">
-        <div class="btn-row">
-          <button class="btn primary" id="btn-send-all">一键发送全部</button>
-          <button class="btn" id="btn-send-sel">发送选中 (<span id="send-sel-n">0</span>)</button>
-        </div>
-        <span class="muted" style="font-size:12px">已成功的不会重发 · 发送 = 标准打招呼（招呼语暂不随请求发出）</span>
-      </div>
-    </div>
-
-    <div class="card mt-24">
-      <div class="card-head">
-        <h3 class="card-title">历史分析</h3>
-        <span class="card-sub">data/boss.db · analysis 表</span>
-      </div>
-      <div id="history-list"></div>
     </div>
   `;
 
@@ -95,6 +95,8 @@ export async function renderMatch(root) {
   let analysisId = null;
   let pollTimer = null;
   let taskId = null;
+  const expanded = new Set();      // 展开中的 match（encrypt_job_id）
+  const greetDrafts = new Map();   // 手改中的招呼语草稿，轮询重绘不丢
 
   // ---------- 简历选择 ----------
   async function loadResumes() {
@@ -242,6 +244,47 @@ export async function renderMatch(root) {
     }
   }
 
+  /** 页面回来 / 刷新后，接上还在跑（或刚跑完）的匹配任务 */
+  async function restoreTask() {
+    let s = null;
+    try {
+      s = await api.get("/api/match/analyze/status");
+    } catch { /* ignore */ }
+    if (!s || !s.task_id) return;
+
+    taskId = s.task_id;
+    analysisId = s.analysis_id || s.task_id;
+    matches = s.matches || [];
+    if (s.resume_id) {
+      currentResumeId = s.resume_id;
+      $("resume-select").value = s.resume_id;
+      updateLlmBadge();
+    }
+
+    if (s.status === "running") {
+      $("btn-match-all").classList.add("hidden");
+      $("btn-match-sel").classList.add("hidden");
+      $("btn-stop").classList.remove("hidden");
+      $("an-sub").textContent = `匹配中 · ${s.done || 0}/${s.total || "?"}`;
+      $("mt-bar").style.width =
+        (s.total ? Math.round(((s.done || 0) / s.total) * 100) : 0) + "%";
+      $("mt-msg").textContent = `${s.done || 0}/${s.total || "?"} · ${s.current_job || ""}`;
+      renderMatches();
+      renderJobs();
+      startPoll();
+      toast("已接上进行中的匹配任务", "ok");
+      return;
+    }
+
+    if (matches.length) {
+      $("an-sub").textContent = `${s.status === "done" ? "已完成" : s.status === "cancelled" ? "已停止" : "失败"} · ${matches.length} 条`;
+      $("mt-bar").style.width = "100%";
+      $("mt-msg").textContent = s.error || s.status;
+      renderMatches();
+      renderJobs();
+    }
+  }
+
   function startPoll() {
     clearInterval(pollTimer);
     pollTimer = setInterval(async () => {
@@ -281,67 +324,110 @@ export async function renderMatch(root) {
     }, 1200);
   }
 
-  // ---------- 匹配结果 ----------
+  // ---------- 匹配结果（默认收起：评分 / 岗位 / 公司 / 地址 / 薪资 / 建议） ----------
   function renderMatches() {
+    const box = $("an-results");
+    const keepScroll = box.scrollTop;
+
     if (!matches.length) {
-      $("an-results").innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>还没有匹配结果</p></div>`;
+      box.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>还没有匹配结果</p></div>`;
       return;
     }
+
+    // 轮询重绘前把在改的招呼语草稿存下来
+    box.querySelectorAll(".match-card").forEach((card) => {
+      const ta = card.querySelector(".greeting-edit");
+      if (ta) greetDrafts.set(card.dataset.jid, ta.value);
+    });
+
     const ranked = [...matches].sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
-    $("an-results").innerHTML = ranked
+    box.innerHTML = ranked
       .map((m) => {
+        const jid = m.encrypt_job_id;
         const score = m.match_score || 0;
+        const open = expanded.has(jid);
+        const advice = (m.advice || "").trim();
+        const verdict = (m.verdict || "").trim();
+        const adviceLine = advice || verdict;
         const matched = (m.matched_skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
         const missing = (m.missing_skills || []).map((s) => `<span class="pill static bad">${escapeHtml(s)}</span>`).join(" ");
         const pros = (m.pros || []).map((p) => `<div class="muted" style="font-size:12.5px">✓ ${escapeHtml(p)}</div>`).join("");
         const cons = (m.cons || []).map((c) => `<div class="muted" style="font-size:12.5px">✗ ${escapeHtml(c)}</div>`).join("");
+        const draft = greetDrafts.has(jid) ? greetDrafts.get(jid) : (m.greeting || "");
         return `
-          <div class="card lift mb-16" style="padding:16px" data-jid="${escapeHtml(m.encrypt_job_id)}">
+          <div class="card lift mb-16 match-card" style="padding:16px" data-jid="${escapeHtml(jid)}">
             <div class="match-row">
               ${scoreRing(score)}
               <div class="match-main">
-                <h4>${escapeHtml(m.job_name)} <span class="muted" style="font-weight:400;font-size:13px">@ ${escapeHtml(m.brand_name)}</span></h4>
-                <div class="muted" style="font-size:12px">${escapeHtml(m.location || "")} · ${escapeHtml(m.salary_desc || "")}</div>
-                <div class="muted" style="font-size:12.5px;margin-top:6px">${escapeHtml(m.verdict || "")}</div>
-                <div class="job-meta">${matched}</div>
-                ${missing ? `<div class="card-sub mb-8">缺口</div><div class="pills">${missing}</div>` : ""}
-                ${pros ? `<div class="card-sub mb-8">优点</div>${pros}` : ""}
-                ${cons ? `<div class="card-sub mb-8">缺点</div>${cons}` : ""}
-                <div class="card-sub mb-8">招呼语 <span class="muted" style="font-size:11px">可直接改，改完点保存</span></div>
-                <textarea class="input mono greeting-edit" rows="2" style="width:100%;font-size:12.5px">${escapeHtml(m.greeting || "")}</textarea>
-                <div class="btn-row mt-8">
-                  <button class="btn sm ghost btn-save-greet">保存招呼语</button>
-                  <button class="btn sm primary btn-send-one">发送</button>
-                  <span class="muted send-status" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
+                <div class="flex between center gap-8">
+                  <h4 class="match-title">${escapeHtml(m.job_name)} <span class="muted" style="font-weight:400;font-size:13px">@ ${escapeHtml(m.brand_name)}</span></h4>
+                  <button class="btn sm ghost btn-toggle-more flex-shrink-0">${open ? "▾ 收起" : "▸ 展开"}</button>
                 </div>
-                ${m.error ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>` : ""}
+                <div class="muted" style="font-size:12px">${escapeHtml(m.location || "")} · ${escapeHtml(m.salary_desc || "")}</div>
+                <div class="muted" style="font-size:12.5px;margin-top:6px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(adviceLine)}</div>
+                ${open ? `
+                  <div class="match-more">
+                    ${verdict && verdict !== adviceLine ? `<div class="card-sub mb-8">结论</div><div class="muted" style="font-size:12.5px">${escapeHtml(verdict)}</div>` : ""}
+                    ${matched ? `<div class="card-sub mb-8 mt-12">技能匹配</div><div class="job-meta">${matched}</div>` : ""}
+                    ${missing ? `<div class="card-sub mb-8 mt-12">缺口</div><div class="pills">${missing}</div>` : ""}
+                    ${pros ? `<div class="card-sub mb-8 mt-12">优点</div>${pros}` : ""}
+                    ${cons ? `<div class="card-sub mb-8 mt-12">缺点</div>${cons}` : ""}
+                    <div class="card-sub mb-8 mt-12">招呼语 <span class="muted" style="font-size:11px">可直接改，改完点保存</span></div>
+                    <textarea class="input mono greeting-edit" rows="2" style="width:100%;font-size:12.5px">${escapeHtml(draft)}</textarea>
+                    <div class="btn-row mt-8">
+                      <button class="btn sm ghost btn-save-greet">保存招呼语</button>
+                      <button class="btn sm primary btn-send-one">发送</button>
+                      <span class="muted send-status" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
+                    </div>
+                    ${m.error ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>` : ""}
+                  </div>` : ""}
               </div>
             </div>
           </div>`;
       })
       .join("");
 
-    $("an-results").querySelectorAll("[data-jid]").forEach((card) => {
+    box.querySelectorAll(".match-card").forEach((card) => {
       const jid = card.dataset.jid;
-      card.querySelector(".btn-save-greet").addEventListener("click", async () => {
-        const text = card.querySelector(".greeting-edit").value;
-        try {
-          await api.patch(`/api/match/${analysisId}/greeting`, {
-            encrypt_job_id: jid,
-            greeting: text,
-          });
+
+      card.querySelector(".btn-toggle-more").addEventListener("click", () => {
+        if (expanded.has(jid)) expanded.delete(jid);
+        else expanded.add(jid);
+        renderMatches();
+      });
+
+      const ta = card.querySelector(".greeting-edit");
+      if (ta) {
+        ta.addEventListener("input", () => greetDrafts.set(jid, ta.value));
+      }
+      const saveBtn = card.querySelector(".btn-save-greet");
+      if (saveBtn) {
+        saveBtn.addEventListener("click", async () => {
+          const text = card.querySelector(".greeting-edit").value;
+          try {
+            await api.patch(`/api/match/${analysisId}/greeting`, {
+              encrypt_job_id: jid,
+              greeting: text,
+            });
+            const m = matches.find((x) => x.encrypt_job_id === jid);
+            if (m) m.greeting = text;
+            greetDrafts.delete(jid);
+            toast("招呼语已保存", "ok");
+          } catch (err) {
+            toast(err.message || "保存失败", "bad");
+          }
+        });
+      }
+      const sendBtn = card.querySelector(".btn-send-one");
+      if (sendBtn) {
+        sendBtn.addEventListener("click", () => {
           const m = matches.find((x) => x.encrypt_job_id === jid);
-          if (m) m.greeting = text;
-          toast("招呼语已保存", "ok");
-        } catch (err) {
-          toast(err.message || "保存失败", "bad");
-        }
-      });
-      card.querySelector(".btn-send-one").addEventListener("click", () => {
-        const m = matches.find((x) => x.encrypt_job_id === jid);
-        if (m) confirmAndSend([m]);
-      });
+          if (m) confirmAndSend([m]);
+        });
+      }
     });
+
+    box.scrollTop = keepScroll;
   }
 
   function deliverLabel(m) {
@@ -422,9 +508,12 @@ export async function renderMatch(root) {
             const data = await api.get("/api/match/analyses/" + b.dataset.load);
             analysisId = data.analysis_id;
             matches = data.matches || [];
+            expanded.clear();
+            greetDrafts.clear();
             $("an-sub").textContent = `历史 · ${fmtTime(data.created_at)} · ${matches.length} 条`;
             renderMatches();
             renderJobs();
+            $("results-card").scrollIntoView({ behavior: "smooth", block: "start" });
             toast("已载入历史分析", "ok");
           } catch (err) {
             toast(err.message || "载入失败", "bad");
@@ -439,6 +528,8 @@ export async function renderMatch(root) {
             if (analysisId === b.dataset.del) {
               analysisId = null;
               matches = [];
+              expanded.clear();
+              greetDrafts.clear();
               renderMatches();
             }
             loadHistory();
@@ -454,6 +545,7 @@ export async function renderMatch(root) {
   await loadResumes();
   await loadJobs();
   await loadHistory();
+  await restoreTask();
 
   return () => clearInterval(pollTimer);
 }

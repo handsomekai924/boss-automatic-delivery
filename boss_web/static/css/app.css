@@ -910,6 +910,19 @@ details.acc .acc-body {
 }
 .match-row .match-main { flex: 1; min-width: 0; }
 .match-row h4 { margin: 0 0 4px; font-size: 15px; }
+.match-row h4.match-title {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.match-more {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--stroke);
+}
 .greeting-box {
   margin-top: 10px;
   padding: 12px 14px;
@@ -954,8 +967,24 @@ details.acc .acc-body {
 .gap-8  { gap: 8px; }
 .gap-12 { gap: 12px; }
 .mt-8  { margin-top: 8px; }
+.mt-12 { margin-top: 12px; }
 .mt-16 { margin-top: 16px; }
 .mt-24 { margin-top: 24px; }
+.scroll-y { overflow-y: auto; overscroll-behavior: contain; }
+.flex-shrink-0 { flex-shrink: 0; }
+
+/* 匹配舱左右两栏同高：外壳定高，内部滚动区吃掉剩余高度 */
+.panel-col {
+  display: flex;
+  flex-direction: column;
+  height: 62vh;
+  min-height: 420px;
+}
+.panel-col > :not(.scroll-y) { flex: 0 0 auto; }
+.panel-col > .scroll-y {
+  flex: 1;
+  min-height: 0;
+}
 .mb-8  { margin-bottom: 8px; }
 .mb-16 { margin-bottom: 16px; }
 .mb-24 { margin-bottom: 24px; }
