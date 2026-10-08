@@ -29,6 +29,9 @@ docs/
 # 用户点名的导出物（`python -m boss_filter export --out filters.json` 的示例名）
 filters.json
 
+# 设计过程产物（surface brief / review 截图 / build state），不发到浏览器
+.impeccable/
+
 # 真浏览器配置（CDP 取 __zp_stoken__ 用，动了 Chrome 就废）
 .chrome_profile/
 

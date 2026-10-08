@@ -63,16 +63,24 @@ export async function renderJobs(root) {
         </div>
         <div class="field">
           <label>城市（省 / 市 / 区 级联）</label>
-          <div class="hot-row" id="city-hot"></div>
-          <div class="cascader" id="city-cascader">
-            <div class="cascader-head">
+          <div class="cascader-field" id="city-field">
+            <button type="button" class="cascader-trigger" id="city-trigger" aria-haspopup="true" aria-expanded="false">
               <span class="cascader-path" id="city-path">未选择 = 站点当前城市</span>
-              <button class="btn sm ghost" id="city-clear" type="button">清除</button>
-            </div>
-            <div class="cascader-cols">
-              <div class="cascader-col" id="city-col-0"></div>
-              <div class="cascader-col" id="city-col-1"></div>
-              <div class="cascader-col" id="city-col-2"></div>
+              <span class="cascader-caret">▾</span>
+            </button>
+            <div class="cascader-pop hidden" id="city-pop">
+              <div class="hot-row" id="city-hot"></div>
+              <div class="cascader">
+                <div class="cascader-cols">
+                  <div class="cascader-col" id="city-col-0"></div>
+                  <div class="cascader-col" id="city-col-1"></div>
+                  <div class="cascader-col" id="city-col-2"></div>
+                </div>
+              </div>
+              <div class="cascader-foot">
+                <button class="btn sm ghost" id="city-clear" type="button">清除</button>
+                <button class="btn sm primary" id="city-done" type="button">完成</button>
+              </div>
             </div>
           </div>
         </div>
@@ -198,6 +206,8 @@ export async function renderJobs(root) {
           cityPath = [...cityPath.slice(0, level), node];
           renderCityCascader();
           updateFilterSummary();
+          // 选到叶子（没有下级）就算选完，自动收起；省/市还得继续往下钻
+          if (!(node.children || []).length) setCityOpen(false);
         });
       });
       // 回填已选项时滚进可视区，别让高亮落在折下
@@ -242,6 +252,7 @@ export async function renderJobs(root) {
         cityPath = byCode || [{ code, name: p.dataset.name, children: [] }];
         renderCityCascader();
         updateFilterSummary();
+        setCityOpen(false);
       });
     });
   }
@@ -316,10 +327,36 @@ export async function renderJobs(root) {
 
   $("f-query").addEventListener("input", updateFilterSummary);
   $("f-salary").addEventListener("change", updateFilterSummary);
+
+  // 城市级联平时只占一行，点击触发按钮才弹出浮层
+  const cityField = $("city-field");
+  const cityTrigger = $("city-trigger");
+  const cityPop = $("city-pop");
+
+  function setCityOpen(open) {
+    cityPop.classList.toggle("hidden", !open);
+    cityTrigger.classList.toggle("open", open);
+    cityTrigger.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  const isCityOpen = () => !cityPop.classList.contains("hidden");
+
+  cityTrigger.addEventListener("click", () => setCityOpen(!isCityOpen()));
+  cityPop.addEventListener("click", (e) => e.stopPropagation());
+  function onDocClick(e) {
+    if (isCityOpen() && !cityField.contains(e.target)) setCityOpen(false);
+  }
+  function onDocKey(e) {
+    if (e.key === "Escape") setCityOpen(false);
+  }
+  document.addEventListener("click", onDocClick);
+  document.addEventListener("keydown", onDocKey);
+
+  $("city-done").addEventListener("click", () => setCityOpen(false));
   $("city-clear").addEventListener("click", () => {
     cityPath = [];
     renderCityCascader();
     updateFilterSummary();
+    setCityOpen(false);
   });
 
   function renderPills(cond) {
@@ -797,5 +834,7 @@ export async function renderJobs(root) {
   return () => {
     clearInterval(pollTimer);
     clearInterval(descPollTimer);
+    document.removeEventListener("click", onDocClick);
+    document.removeEventListener("keydown", onDocKey);
   };
 }
