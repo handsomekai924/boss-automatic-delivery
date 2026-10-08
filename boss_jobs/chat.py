@@ -16,7 +16,7 @@
 ``createMessage.presence(...)``                           :func:`encode_presence`
 ===========================================  ==========================================
 
-四个必须踩对的点：
+五个必须踩对的点：
 
 1. **握手要带登录 Cookie**——不带的 WebSocket 升级请求被网关回 **HTTP 403**。
 2. **MQTT 用户名是 ``<token>|0``、密码是 ``wt``**：``token`` 来自
@@ -27,6 +27,8 @@
    （见 :meth:`boss_jobs.client.JobClient.fetch_boss_data`），而且要
    **先 ``friend/add`` 建了会话**才查得到。
 4. **``from`` 里必须带 ``source``**，**``mid`` 必须落在服务端的消息 id 数轴上**。
+5. **正文帧的 ``retain`` 要 ``false``**（站点前端是 ``true``）——留着 ``true``
+   会让一条消息在对方那里**变成两条**，见 :data:`config.CHAT_RETAIN`。
 
 第 4 条踩了很久，值得单独说。一开始本模块发的文本帧 ``from`` 只有 ``uid``，
 ``mid`` 用的是当前毫秒；结果网关收到**立刻把连接关掉**（网页里
@@ -615,8 +617,9 @@ class ChatSocket:
             quote_id=quote_id,
         )
         try:
-            # retain 用 CHAT_RETAIN（默认 False，非站点前端的 true）——保留消息
-            # 会让收件人订阅/同步时再收一遍，变成两条，见 :data:`config.CHAT_RETAIN`。
+            # retain 必须 False：站点前端传 true，但那样一条消息会在对方那里
+            # 变成两条（留存的那份被收件人订阅/同步时再投一遍）。2026-10-09
+            # 实测确认。见 :data:`config.CHAT_RETAIN`。
             info = self._client.publish(
                 C.CHAT_TOPIC, frame, qos=1, retain=C.CHAT_RETAIN
             )
