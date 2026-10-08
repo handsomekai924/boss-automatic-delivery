@@ -5,6 +5,10 @@ import { toast, modal, escapeHtml, scoreRing, fmtTime } from "../ui.js";
 
 const PAGE_SIZE = 20;
 
+//: 「一键发送全部」的评分阈值兜底值（读不到 /api/deliver/config 时用它，
+//: 正常情况以落库的 doc('deliver_config') 为准）
+const MIN_SCORE_DEFAULT = 70;
+
 export async function renderMatch(root) {
   root.innerHTML = `
     <h1 class="hero-title">匹配 <span class="grad">舱</span></h1>
@@ -36,9 +40,14 @@ export async function renderMatch(root) {
       </div>
       <div class="flex between center wrap gap-12">
         <div class="btn-row">
-          <button class="btn primary" id="btn-send-all">一键发送全部</button>
+          <button class="btn primary" id="btn-send-all">一键发送全部 (<span id="send-all-n">0</span>)</button>
           <button class="btn" id="btn-send-sel">发送选中 (<span id="send-sel-n">0</span>)</button>
         </div>
+        <label class="flex center gap-8">
+          <span class="muted" style="font-size:12.5px">评分阈值</span>
+          <input type="number" class="input" id="send-min-score" value="70" min="0" max="100" step="1" style="width:76px">
+          <span class="muted" style="font-size:11.5px">≥ 该分数才进「一键发送全部」，改完自动保存</span>
+        </label>
         <span class="muted" style="font-size:12px">在下方「匹配结果」里展开单条可单独改招呼语 / 发送</span>
       </div>
     </div>
@@ -95,6 +104,8 @@ export async function renderMatch(root) {
   let analysisId = null;
   let pollTimer = null;
   let taskId = null;
+  let deliverTimer = null;    // 发送任务轮询
+  let deliverTaskId = null;
   const expanded = new Set();      // 展开中的 match（encrypt_job_id）
   const greetDrafts = new Map();   // 手改中的招呼语草稿，轮询重绘不丢
 
@@ -184,6 +195,50 @@ export async function renderMatch(root) {
   function updateSelCount() {
     $("sel-count").textContent = `已选 ${selected.size}`;
     $("send-sel-n").textContent = String(selected.size);
+  }
+
+  // ---------- 一键发送的评分阈值 ----------
+  function minScore() {
+    const v = parseInt($("send-min-score").value, 10);
+    if (Number.isNaN(v)) return MIN_SCORE_DEFAULT;
+    return Math.min(100, Math.max(0, v));
+  }
+
+  /** 「一键发送全部」的目标：评分 ≥ 阈值 + 有招呼语 + 未发送。 */
+  function sendAllTargets() {
+    const min = minScore();
+    return matches.filter(
+      (m) => (m.match_score || 0) >= min && !m.delivered_at && (m.greeting || "").trim()
+    );
+  }
+
+  function updateSendCounts() {
+    $("send-all-n").textContent = String(sendAllTargets().length);
+  }
+
+  $("send-min-score").addEventListener("input", updateSendCounts);
+  $("send-min-score").addEventListener("change", saveMinScore);
+
+  /** 阈值落状态库 doc('deliver_config')：刷新 / 换机器都跟着走。 */
+  async function loadMinScore() {
+    try {
+      const cfg = await api.get("/api/deliver/config");
+      if (typeof cfg.min_score === "number") {
+        $("send-min-score").value = String(cfg.min_score);
+        updateSendCounts();
+      }
+    } catch { /* 读不到就用默认 70 */ }
+  }
+
+  async function saveMinScore() {
+    const v = minScore();
+    $("send-min-score").value = String(v);  // 越界 / 空值收回合法区间
+    updateSendCounts();
+    try {
+      await api.put("/api/deliver/config", { min_score: v });
+    } catch (err) {
+      toast(err.message || "阈值保存失败", "bad");
+    }
   }
 
   $("btn-select-page").addEventListener("click", () => {
@@ -328,6 +383,7 @@ export async function renderMatch(root) {
   function renderMatches() {
     const box = $("an-results");
     const keepScroll = box.scrollTop;
+    updateSendCounts();  // 「一键发送全部」的待发条数随匹配结果走
 
     if (!matches.length) {
       box.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>还没有匹配结果</p></div>`;
@@ -431,15 +487,102 @@ export async function renderMatch(root) {
   }
 
   function deliverLabel(m) {
-    if (m.delivered_at) return m.deliver_status === "failed" ? `失败：${m.deliver_error || ""}` : "已发送";
+    if (m.deliver_status === "failed") return `失败：${m.deliver_error || ""}`;
+    if (m.delivered_at) return "已发送";
     return m.deliver_status === "sending" ? "发送中…" : "";
   }
 
-  // ---------- 发送（C6 接入前：确认弹窗后提示） ----------
+  // ---------- 发送：三种粒度共用一个任务（C6） ----------
+  async function startDeliver(targets) {
+    if (!analysisId) return toast("先跑一次匹配再发送", "warn");
+    if (deliverTaskId) return toast("已有发送任务在跑，等它结束", "warn");
+    try {
+      const s = await api.post("/api/deliver/start", {
+        analysis_id: analysisId,
+        encrypt_job_ids: targets.map((m) => m.encrypt_job_id),
+      });
+      deliverTaskId = s.task_id;
+      toast(`开始发送 · 待发 ${s.total || 0} 条，跳过 ${s.skipped || 0} 条已发送`, "ok");
+      applyDeliverSnapshot(s);
+      startDeliverPoll();
+    } catch (err) {
+      toast(err.message || "发送启动失败", "bad");
+    }
+  }
+
+  /** 把发送任务的每条状态贴回对应的匹配结果行。 */
+  function applyDeliverSnapshot(s) {
+    let touched = false;
+    (s.items || []).forEach((it) => {
+      if (it.status === "skipped") return;  // 已发送过，保持原样
+      const m = matches.find((x) => x.encrypt_job_id === it.encrypt_job_id);
+      if (!m) return;
+      m.deliver_status = it.status;
+      if (it.delivered_at) m.delivered_at = it.delivered_at;
+      if (it.error) m.deliver_error = it.error;
+      else if (it.status !== "failed") delete m.deliver_error;
+      touched = true;
+    });
+    if (touched) renderMatches();
+  }
+
+  function startDeliverPoll() {
+    clearInterval(deliverTimer);
+    deliverTimer = setInterval(async () => {
+      let s = null;
+      try {
+        s = await api.get("/api/deliver/status");
+      } catch {
+        return;
+      }
+      if (!s || !s.task_id) {
+        stopDeliverPoll();
+        return;
+      }
+      deliverTaskId = s.task_id;
+      applyDeliverSnapshot(s);
+      if (["done", "error", "cancelled"].includes(s.status)) {
+        stopDeliverPoll();
+        if (s.status === "done") {
+          toast(`发送完成 · 成功 ${s.ok || 0} / 失败 ${s.failed || 0} / 跳过 ${s.skipped || 0}`, "ok");
+        } else if (s.status === "error") {
+          toast(s.error || "发送中断", "bad");
+        } else {
+          toast("发送已取消", "warn");
+        }
+      }
+    }, 1000);
+  }
+
+  function stopDeliverPoll() {
+    clearInterval(deliverTimer);
+    deliverTimer = null;
+    deliverTaskId = null;
+  }
+
+  /** 刷新回来接上还在跑的发送任务（跟匹配任务一样的待遇）。 */
+  async function restoreDeliver() {
+    let s = null;
+    try {
+      s = await api.get("/api/deliver/status");
+    } catch {
+      return;
+    }
+    if (!s || !s.task_id) return;
+    applyDeliverSnapshot(s);
+    if (s.status === "running") {
+      deliverTaskId = s.task_id;
+      startDeliverPoll();
+      toast("已接上进行中的发送任务", "ok");
+    }
+  }
+
+  // ---------- 发送入口（确认弹窗 → startDeliver） ----------
   $("btn-send-all").addEventListener("click", () => {
-    const targets = matches.filter((m) => !m.delivered_at && (m.greeting || "").trim());
-    if (!targets.length) return toast("没有「有招呼语且未发送」的条目", "warn");
-    confirmAndSend(targets);
+    const min = minScore();
+    const targets = sendAllTargets();
+    if (!targets.length) return toast(`没有「评分 ≥ ${min} 且有招呼语且未发送」的条目`, "warn");
+    confirmAndSend(targets, `筛选条件：评分 ≥ ${min}`);
   });
   $("btn-send-sel").addEventListener("click", () => {
     const targets = matches.filter((m) => selected.has(m.encrypt_job_id) && !m.delivered_at && (m.greeting || "").trim());
@@ -447,12 +590,13 @@ export async function renderMatch(root) {
     confirmAndSend(targets);
   });
 
-  function confirmAndSend(targets) {
+  function confirmAndSend(targets, scopeNote = "") {
     const rows = targets
       .map(
         (m) => `
         <div style="padding:10px 0;border-bottom:1px solid var(--stroke)">
-          <div><strong>${escapeHtml(m.job_name)}</strong> <span class="muted">@ ${escapeHtml(m.brand_name)}</span></div>
+          <div><strong>${escapeHtml(m.job_name)}</strong> <span class="muted">@ ${escapeHtml(m.brand_name)}</span>
+            <span class="pill accent" style="margin-left:6px">评分 ${m.match_score || 0}</span></div>
           <div class="greeting-box mt-8" style="font-size:12px">${escapeHtml(m.greeting || "（无招呼语）")}</div>
         </div>`
       )
@@ -461,6 +605,7 @@ export async function renderMatch(root) {
       title: `确认发送 · 共 ${targets.length} 条`,
       body: `
         <div class="banner warn mb-12">将发送<strong>标准打招呼</strong>。招呼语仅预览，本期不随请求发出。</div>
+        ${scopeNote ? `<div class="muted mb-8" style="font-size:12px">${escapeHtml(scopeNote)}</div>` : ""}
         ${rows}
         <div class="btn-row mt-16">
           <button class="btn primary" id="m-confirm">确认发送</button>
@@ -475,7 +620,7 @@ export async function renderMatch(root) {
       no.addEventListener("click", () => document.querySelector(".modal-close")?.click());
       ok.addEventListener("click", () => {
         document.querySelector(".modal-close")?.click();
-        toast("发送通道将在下一步接入（JobClient.greet + deliver_task）", "warn");
+        startDeliver(targets);
       });
     }, 0);
   }
@@ -543,9 +688,15 @@ export async function renderMatch(root) {
   }
 
   await loadResumes();
+  await loadMinScore();
   await loadJobs();
   await loadHistory();
   await restoreTask();
+  await restoreDeliver();
+  updateSendCounts();
 
-  return () => clearInterval(pollTimer);
+  return () => {
+    clearInterval(pollTimer);
+    clearInterval(deliverTimer);
+  };
 }

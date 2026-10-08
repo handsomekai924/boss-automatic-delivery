@@ -29,6 +29,10 @@ ANALYZE_INTERVAL = 0.6
 #: 分析批量默认看多少个职位
 DEFAULT_ANALYZE_TOP_K = 20
 
+#: 一键投递的默认评分阈值：匹配分 ≥ 它的岗位才进「一键发送全部」
+#: （用户可在界面上改，改完落状态库 ``doc('deliver_config')``）
+DEFAULT_DELIVER_MIN_SCORE = 70
+
 # ---- LLM 系统固定参数（不开放给界面改）----
 #: 采样温度
 LLM_TEMPERATURE = 0.7

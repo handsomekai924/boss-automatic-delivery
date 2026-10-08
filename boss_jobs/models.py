@@ -219,6 +219,23 @@ class Job:
         return bool(self.encrypt_job_id and self.job_name and self.brand_name)
 
     @property
+    def encrypt_boss_id(self) -> str:
+        """打招呼要用的 ``encryptBossId``（招聘方加密 id）。
+
+        列表接口回的字段里就有，但 todo.md 那张表没列它，所以**不单开列**——
+        需要时从 :attr:`raw_json` 现读（见 todo.md 3.1 A1）。
+        """
+        if not self.raw_json:
+            return ""
+        try:
+            data = json.loads(self.raw_json)
+        except ValueError:
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        return clean_text(data.get("encryptBossId"))
+
+    @property
     def summary(self) -> str:
         """一行人读摘要（CLI 用）。"""
         return (

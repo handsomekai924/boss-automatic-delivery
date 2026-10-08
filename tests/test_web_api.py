@@ -34,6 +34,55 @@ def test_auth_status(client: TestClient):
     assert "logged_in" in r.json()
 
 
+def test_slider_refresh_unknown_task_404(client: TestClient):
+    r = client.post("/api/auth/slider/nope/refresh")
+    assert r.status_code == 404
+
+
+def test_slider_refresh_换新挑战重建帮助页(client: TestClient):
+    """「重新加载」必须换一张新 challenge：极验票据一次性，重载旧的必然 onError。"""
+    from boss_login.verify import SliderChallenge
+    from boss_web.services import login_task as lt
+
+    calls: list[int] = []
+
+    def refresher() -> SliderChallenge:
+        calls.append(1)
+        return SliderChallenge(
+            captcha_type=1, captcha_name="极验验证", gt="gt-x", challenge=f"ch-{len(calls)}"
+        )
+
+    task = lt.LoginTask(task_id="refresh-1", phone="13800138000")
+    task.status = lt.ST_NEED_SLIDER
+    task.slider_html = "<html>old</html>"
+    task.slider_refresher = refresher
+    lt.login_tasks._tasks[task.task_id] = task
+    try:
+        r = client.post(f"/api/auth/slider/{task.task_id}/refresh")
+        assert r.status_code == 200
+        assert calls == [1]
+        assert task.slider_needed is True
+        # 新帮助页里嵌的是刚换的挑战
+        page = client.get(f"/api/auth/slider/{task.task_id}")
+        assert page.status_code == 200
+        assert "ch-1" in page.text
+        assert "old" not in page.text
+    finally:
+        lt.login_tasks._tasks.pop(task.task_id, None)
+
+
+def test_slider_refresh_without_active_slider_conflicts(client: TestClient):
+    from boss_web.services import login_task as lt
+
+    task = lt.LoginTask(task_id="refresh-2", phone="13800138000")
+    lt.login_tasks._tasks[task.task_id] = task
+    try:
+        r = client.post(f"/api/auth/slider/{task.task_id}/refresh")
+        assert r.status_code == 409
+    finally:
+        lt.login_tasks._tasks.pop(task.task_id, None)
+
+
 def test_jobs_list(client: TestClient):
     r = client.get("/api/jobs?limit=5")
     assert r.status_code == 200

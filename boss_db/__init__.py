@@ -4,7 +4,7 @@
 职位另有一份 ``jobs.db``。现在**只有一份库** ``data/boss.db``：
 
 ``doc``
-    单例文档（会话 / 搜索条件 / stoken / LLM 配置）。它们本身就是「一份文档」，
+    单例文档（会话 / 搜索条件 / stoken / LLM 配置 / 投递配置）。它们本身就是「一份文档」，
     字段由各模块自己的 dataclass 管，所以整包存 JSON，不拆列。
     payload 就是当年那个文件的正文，迁移 = 把文本搬进一行。
 
@@ -54,6 +54,7 @@ DOC_SESSION: Final[str] = "session"
 DOC_SEARCH_FILTER: Final[str] = "search_filter"
 DOC_STOKEN: Final[str] = "stoken"
 DOC_LLM_CONFIG: Final[str] = "llm_config"
+DOC_DELIVER_CONFIG: Final[str] = "deliver_config"
 
 #: 迁移闸门字段
 _MIGRATED_FLAG: Final[str] = "legacy_imported"
@@ -614,6 +615,7 @@ __all__ = [
     "DOC_SEARCH_FILTER",
     "DOC_STOKEN",
     "DOC_LLM_CONFIG",
+    "DOC_DELIVER_CONFIG",
     "resolve_db_path",
     "db",
     "acquire",

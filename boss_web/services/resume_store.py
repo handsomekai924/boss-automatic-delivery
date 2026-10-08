@@ -361,10 +361,11 @@ def load_analysis(analysis_id: str) -> dict[str, Any]:
     return json.loads(str(row["payload"]))
 
 
-def update_greeting(analysis_id: str, encrypt_job_id: str, greeting: str) -> dict[str, Any]:
-    """只改 payload 里某一条 match 的招呼语，回改后的那条。
+def _patch_match(analysis_id: str, encrypt_job_id: str, **fields: Any) -> dict[str, Any]:
+    """改 payload 里某一条 match 的字段，回改后的那条。
 
     找不到 analysis → ``FileNotFoundError``；找不到那条 match → ``KeyError``。
+    招呼语与发送结果都走这里——一次读改写，别开两套。
     """
     payload = load_analysis(analysis_id)
     matches = payload.get("matches")
@@ -372,7 +373,7 @@ def update_greeting(analysis_id: str, encrypt_job_id: str, greeting: str) -> dic
         matches = []
     for item in matches:
         if isinstance(item, dict) and item.get("encrypt_job_id") == encrypt_job_id:
-            item["greeting"] = greeting
+            item.update(fields)
             break
     else:
         raise KeyError(encrypt_job_id)
@@ -386,6 +387,39 @@ def update_greeting(analysis_id: str, encrypt_job_id: str, greeting: str) -> dic
     return next(
         m for m in matches if isinstance(m, dict) and m.get("encrypt_job_id") == encrypt_job_id
     )
+
+
+def update_greeting(analysis_id: str, encrypt_job_id: str, greeting: str) -> dict[str, Any]:
+    """只改 payload 里某一条 match 的招呼语，回改后的那条。"""
+    return _patch_match(analysis_id, encrypt_job_id, greeting=greeting)
+
+
+#: 发送状态（写进 match 的 ``deliver_status``）
+DELIVER_SENDING = "sending"
+DELIVER_OK = "ok"
+DELIVER_FAILED = "failed"
+
+
+def update_delivery(
+    analysis_id: str,
+    encrypt_job_id: str,
+    *,
+    deliver_status: str,
+    delivered_at: float | None = None,
+    deliver_error: str = "",
+) -> dict[str, Any]:
+    """把一次发送的结果写回某条 match，回改后的那条。
+
+    ``delivered_at`` 只在**成功**时给（前端拿它判断「已发送、别重发」）；
+    失败就留空串状态，行内显示原因。
+    """
+    fields: dict[str, Any] = {
+        "deliver_status": deliver_status,
+        "deliver_error": deliver_error,
+    }
+    if delivered_at is not None:
+        fields["delivered_at"] = delivered_at
+    return _patch_match(analysis_id, encrypt_job_id, **fields)
 
 
 def list_analyses() -> list[dict[str, Any]]:

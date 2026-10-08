@@ -45,6 +45,11 @@ ENDPOINTS: Final[dict[str, str]] = {
     #: ``__zp_stoken__``（缺了回 code 37，跟搜索一样），query 带
     #: ``securityId`` + ``lid`` 两参就够。正文在 ``zpData.jobInfo.postDescription``。
     "job_detail": "/wapi/zpgeek/job/detail.json",
+    #: 打招呼 / 加好友（POST，form）。**路径与参数形态已从站点前端 chunk 确认，
+    #: 尚未实测**：query 带 ``securityId`` + ``jobId`` + ``lid``；body 是
+    #: ``application/x-www-form-urlencoded``，透传 ``encryptBossId`` / ``sessionId``
+    #: 等字段。见 :meth:`boss_jobs.client.JobClient.greet`。
+    "friend_add": "/wapi/zpgeek/friend/add.json",
 }
 
 #: 推荐页 ``pageType`` 10/45 → type=1（全职流），36 → type=2（兼职流）
@@ -110,6 +115,18 @@ DEFAULT_PAGE_INTERVAL: Final[float] = 1.0
 #: 补抓职位详情（JD）的条间隔（秒）。
 #: **1 秒**：实测 0.3s 会被安全网关当过频（连环 code 37），1s 是人手点击的量级。
 DETAIL_INTERVAL: Final[float] = 1.0
+
+#: 打招呼（发送）之间的条间隔（秒）。同 DETAIL_INTERVAL 一个道理：
+#: 1s 是人手点「立即沟通」的节奏，既不像脚本刷屏，也不至于慢到没法用。
+DELIVER_INTERVAL: Final[float] = 1.0
+
+#: 打招呼请求 body 里放**招呼语正文**的字段名。**默认 ``None`` = 不发正文**。
+#:
+#: 本期只发标准打招呼（todo.md C6 已拍板）：正文字段名（``content`` /
+#: ``greeting`` / ``sayHi``）没有从站点前端 chunk 里挖到，猜错了会被服务端忽略
+#: 或者报错。招呼语照常生成 / 展示 / 手改 / 落库，只差把它塞进请求那一行。
+#: 实测出正确字段名后，把这里改成字段名即升级为「带招呼语发送」。
+GREETING_FIELD: Final[str | None] = None
 
 #: 撞上安全网关 code 37 时先歇多久再拿同一枚令牌重试（秒）。
 #: 37 有时只是「请求太快」，先退避；歇完还 37 才轮到强制换新（换新自己

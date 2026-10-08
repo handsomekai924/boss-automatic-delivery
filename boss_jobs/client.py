@@ -104,6 +104,21 @@ class JobDetail:
         return bool(self.job_desc)
 
 
+@dataclass(frozen=True)
+class GreetResult:
+    """一次打招呼（``friend/add.json``）的结果。
+
+    接口回 ``code 0`` 即算成功（失败会由 :meth:`JobClient._request_json` 抛
+    :class:`~boss_jobs.errors.JobApiError`，所以能构造出这个对象就是成功了）。
+
+    :param message: 服务端回的话术（成功时通常是无意义文案，留作日志）
+    :param raw: 整包响应，便于排查
+    """
+
+    message: str = ""
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
 class JobClient:
     """职位列表客户端。
 
@@ -200,6 +215,17 @@ class JobClient:
         return clean_page(payload, page=int(params.get("page", 1)))
 
     def _get_json_with_stoken_retry(self, path: str, params: dict[str, Any], action: str) -> Any:
+        return self._request_with_stoken_retry(
+            lambda suffix: self._get_json(path, params=params, action=action + suffix),
+            action=action,
+        )
+
+    def _request_with_stoken_retry(
+        self,
+        call: Callable[[str], dict[str, Any]],
+        *,
+        action: str,
+    ) -> dict[str, Any]:
         """打一发；撞 code 37 时**先歇一下拿同一枚重试**，还不行才强制换新。
 
         37 有两类原因：令牌不对、或者**请求太快 / 被安全网关拦着**。
@@ -209,10 +235,13 @@ class JobClient:
         - 先退避 2s 拿同一枚重试（「太快了」这一支）；
         - 还 37 再 ``ensure(force=True)``；**没真换到新令牌**（换新冷却中）
           就不再打第三发，把上一个 37 抛给调用方去停整批。
+
+        :param call: 收一个后缀（拼进日志/action）并真的打一发；GET 搜索、POST
+            打招呼都走这儿，重试策略一处维护。
         """
         self._ensure_stoken()
         try:
-            return self._get_json(path, params=params, action=action)
+            return call("")
         except JobApiError as exc:
             if not exc.is_browser_check or self.stoken_provider is None:
                 raise
@@ -225,7 +254,7 @@ class JobClient:
         )
         self._sleep(C.BROWSER_CHECK_BACKOFF)
         try:
-            return self._get_json(path, params=params, action=action + "（歇会儿后）")
+            return call("（歇会儿后）")
         except JobApiError as exc:
             if not exc.is_browser_check or self.stoken_provider is None:
                 raise
@@ -241,7 +270,7 @@ class JobClient:
                 C.STOKEN_COOKIE,
             )
             raise first
-        return self._get_json(path, params=params, action=action + "（补令牌后）")
+        return call("（补令牌后）")
 
     def _get_cookie(self, name: str) -> str:
         jar = getattr(self._http, "cookies", None)
@@ -311,6 +340,73 @@ class JobClient:
         if jar is None:
             return
         put_cookie(jar, name, value)
+
+    # ------------------------------------------------------------------ #
+    # 打招呼 / 加好友
+    # ------------------------------------------------------------------ #
+
+    def greet(
+        self,
+        *,
+        security_id: str,
+        encrypt_job_id: str,
+        lid: str = "",
+        encrypt_boss_id: str = "",
+        session_id: str = "",
+        greeting: str = "",
+        extra: Mapping[str, Any] | None = None,
+    ) -> GreetResult:
+        """发一条打招呼（``POST /wapi/zpgeek/friend/add.json``）。
+
+        形态**从站点前端 chunk 确认、尚未实测**（见
+        :data:`config.ENDPOINTS`）：query 带 ``securityId`` / ``jobId`` / ``lid``，
+        body 走 ``x-www-form-urlencoded`` 透传 ``encryptBossId`` / ``sessionId``。
+
+        **本期只发标准打招呼**：``greeting`` 只在
+        :data:`config.GREETING_FIELD` 配了字段名时才塞进 body（默认为
+        ``None`` = 不发）。正文字段名实测出来改那一个常量即可。
+
+        跟搜索 / 详情一样要 ``__zp_stoken__``，走同一套「先退避再换新」的重试。
+
+        :param security_id: 职位的 ``securityId``（列表 item 里有）
+        :param encrypt_job_id: 职位加密 id（``jobId`` 参数）
+        :param lid: 列表 / 详情里的 ``lid``，有就带
+        :param encrypt_boss_id: ``raw_json.encryptBossId``（
+            :attr:`~boss_jobs.models.Job.encrypt_boss_id`）
+        :param session_id: 详情响应下发的 ``zpData.sessionId``，有就带
+        :param greeting: 招呼语正文；:data:`config.GREETING_FIELD` 为 ``None`` 时不发
+        :param extra: 额外的 form 字段（透传，值为 ``None`` 的丢掉）
+        :raises JobApiError: code 36（账号风控，要人工处理）、code 1/7（登录失效）
+            等非成功码
+        """
+        if not security_id:
+            raise ValueError("security_id 不能为空")
+        if not encrypt_job_id:
+            raise ValueError("encrypt_job_id 不能为空")
+
+        params: dict[str, Any] = {"securityId": security_id, "jobId": encrypt_job_id}
+        if lid:
+            params["lid"] = lid
+
+        body: dict[str, Any] = {}
+        if encrypt_boss_id:
+            body["encryptBossId"] = encrypt_boss_id
+        if session_id:
+            body["sessionId"] = session_id
+        if greeting and C.GREETING_FIELD:
+            body[C.GREETING_FIELD] = greeting
+        if extra:
+            body.update({str(k): v for k, v in extra.items() if v is not None})
+
+        action = f"打招呼 {encrypt_job_id}"
+        path = self.endpoints["friend_add"]
+        payload = self._request_with_stoken_retry(
+            lambda suffix: self._request_json(
+                "POST", path, params=params, data=body, action=action + suffix
+            ),
+            action=action,
+        )
+        return GreetResult(message=str(payload.get("message") or ""), raw=payload)
 
     # ------------------------------------------------------------------ #
     # 翻页：抓 → 洗 → 存 → 睡
@@ -582,6 +678,22 @@ class JobClient:
         params: Mapping[str, Any] | None = None,
         action: str = "",
     ) -> dict[str, Any]:
+        return self._request_json("GET", path, params=params, action=action)
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        data: Mapping[str, Any] | None = None,
+        action: str = "",
+    ) -> dict[str, Any]:
+        """打一发（GET / POST…）并把业务码翻译成异常。
+
+        ``data`` 非空时按 ``application/x-www-form-urlencoded`` 发（``requests``
+        对 dict 的默认行为），打招呼那条 POST 用得上。
+        """
         url = self.base_url + path
         headers = getattr(self, "_default_headers", None)
         last_error: Exception | None = None
@@ -593,9 +705,10 @@ class JobClient:
                 self._sleep(delay)
             try:
                 raw = self._http.request(
-                    "GET",
+                    method,
                     url,
                     params=dict(params or {}),
+                    data=dict(data) if data else None,
                     headers=headers,
                     timeout=self.timeout,
                     allow_redirects=True,

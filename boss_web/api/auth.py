@@ -90,6 +90,17 @@ def slider_page(task_id: str) -> Response:
     return Response(content=task.slider_html, media_type="text/html; charset=utf-8")
 
 
+@router.post("/slider/{task_id}/refresh")
+def slider_refresh(task_id: str) -> dict[str, Any]:
+    """帮助页「重新加载」：换一张新的极验挑战再渲染（旧的 challenge 一次性）。"""
+    task = login_tasks.refresh_slider(task_id)
+    return {
+        "ok": True,
+        "status": task.status,
+        "page_url": f"/api/auth/slider/{task.task_id}",
+    }
+
+
 @router.post("/slider/{task_id}/solution")
 def slider_solution(task_id: str, body: SliderSolutionBody) -> dict[str, Any]:
     task = login_tasks.solve_slider(task_id, body.as_payload())

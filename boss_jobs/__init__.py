@@ -27,7 +27,15 @@
 
 from __future__ import annotations
 
-from .client import CrawlReport, CrawlStats, JobClient, create_client, http_from_session
+from .client import (
+    CrawlReport,
+    CrawlStats,
+    GreetResult,
+    JobClient,
+    JobDetail,
+    create_client,
+    http_from_session,
+)
 from .config import (
     BASE_URL,
     CODE_BROWSER_CHECK,
@@ -35,7 +43,10 @@ from .config import (
     DEFAULT_DB_PATH,
     DEFAULT_MAX_PAGES,
     DEFAULT_PAGE_INTERVAL,
+    DELIVER_INTERVAL,
+    DETAIL_INTERVAL,
     ENDPOINTS,
+    GREETING_FIELD,
     PAGE_SIZE,
     STOKEN_COOKIE,
     STOKEN_ENV,
@@ -75,6 +86,8 @@ __all__ = [
     "http_from_session",
     "CrawlReport",
     "CrawlStats",
+    "GreetResult",
+    "JobDetail",
     # __zp_stoken__（真浏览器 CDP 取法，fetch 默认走这条）
     "CdpClient",
     "CdpStokenProvider",
@@ -113,7 +126,10 @@ __all__ = [
     "DEFAULT_DB_PATH",
     "DEFAULT_MAX_PAGES",
     "DEFAULT_PAGE_INTERVAL",
+    "DELIVER_INTERVAL",
+    "DETAIL_INTERVAL",
     "ENDPOINTS",
+    "GREETING_FIELD",
     "PAGE_SIZE",
     "STOKEN_COOKIE",
     "STOKEN_ENV",

@@ -1095,3 +1095,145 @@ def test_enrich_page_details_37失败后多躺一会(tmp_path):
         # 至少睡过：BROWSER_CHECK_BACKOFF（37 重试）+ BROWSER_CHECK_COOLOFF（失败后躺平）
         assert C.BROWSER_CHECK_BACKOFF in sleeper.calls
         assert C.BROWSER_CHECK_COOLOFF in sleeper.calls
+
+
+# --------------------------------------------------------------------------- #
+# greet（打招呼，POST friend/add.json）
+# --------------------------------------------------------------------------- #
+
+
+def test_greet_posts_form_with_query_params():
+    """打招呼：POST friend/add.json，query 带 securityId/jobId/lid，body 带 encryptBossId/sessionId。"""
+    http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
+    client = JobClient(http=http)
+    result = client.greet(
+        security_id="SEC1",
+        encrypt_job_id="J1",
+        lid="L1",
+        encrypt_boss_id="BOSS1",
+        session_id="SESS1",
+    )
+    assert result.message == "Success"
+    call = http.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("/wapi/zpgeek/friend/add.json")
+    assert call["params"] == {"securityId": "SEC1", "jobId": "J1", "lid": "L1"}
+    assert call["data"] == {"encryptBossId": "BOSS1", "sessionId": "SESS1"}
+
+
+def test_greet_不带的可选字段就不发():
+    """lid / encryptBossId / sessionId 都能空——空了就不进 query / body。"""
+    http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
+    client = JobClient(http=http)
+    client.greet(security_id="SEC1", encrypt_job_id="J1")
+    call = http.calls[0]
+    assert call["params"] == {"securityId": "SEC1", "jobId": "J1"}
+    assert call["data"] is None
+
+
+def test_greet_本期不发招呼语正文():
+    """GREETING_FIELD 还是 None：招呼语传进来了也**不**塞进 body（本期只发标准打招呼）。"""
+    from boss_jobs import config as C
+
+    assert C.GREETING_FIELD is None
+    http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
+    client = JobClient(http=http)
+    client.greet(security_id="SEC1", encrypt_job_id="J1", greeting="你好，我对这个岗位很感兴趣")
+    body = http.calls[0]["data"] or {}
+    assert "你好，我对这个岗位很感兴趣" not in body.values()
+
+
+def test_greet_配了正文字段就带上招呼语(monkeypatch):
+    """实测出正文字段名、把 GREETING_FIELD 填上之后，招呼语才随 body 发出去。"""
+    from boss_jobs import config as C
+
+    monkeypatch.setattr(C, "GREETING_FIELD", "content")
+    http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
+    client = JobClient(http=http)
+    client.greet(security_id="SEC1", encrypt_job_id="J1", greeting="您好")
+    assert http.calls[0]["data"]["content"] == "您好"
+
+
+def test_greet_extra_透传非空字段():
+    """extra 里的字段透传进 body；值为 None 的丢掉。"""
+    http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
+    client = JobClient(http=http)
+    client.greet(
+        security_id="SEC1",
+        encrypt_job_id="J1",
+        extra={"expectId": "E1", "drop": None},
+    )
+    assert http.calls[0]["data"] == {"expectId": "E1"}
+
+
+@pytest.mark.parametrize(
+    ("security_id", "encrypt_job_id"),
+    [("", "J1"), ("SEC1", "")],
+)
+def test_greet_缺关键参数直接报错(security_id, encrypt_job_id):
+    """securityId / jobId 是必填，缺一个就别浪费一发请求。"""
+    http = FakeHttp([])
+    client = JobClient(http=http)
+    with pytest.raises(ValueError):
+        client.greet(security_id=security_id, encrypt_job_id=encrypt_job_id)
+    assert http.calls == []
+
+
+def test_greet_code36_标记成账号风控():
+    """code 36 = 账号异常 / 人机验证：抛出来让上层**停整批**去人工处理。"""
+    http = FakeHttp([{"code": 36, "message": "您的账户存在异常行为", "zpData": {}}])
+    client = JobClient(http=http)
+    with pytest.raises(JobApiError) as ei:
+        client.greet(security_id="SEC1", encrypt_job_id="J1")
+    assert ei.value.code == 36
+    assert ei.value.is_risk_control
+    assert not ei.value.is_browser_check
+
+
+def test_greet_code37_标记成浏览器校验():
+    http = FakeHttp([{"code": 37, "message": "您的环境存在异常.", "zpData": {}}])
+    client = JobClient(http=http)
+    with pytest.raises(JobApiError) as ei:
+        client.greet(security_id="SEC1", encrypt_job_id="J1")
+    assert ei.value.is_browser_check
+
+
+def test_greet_撞37先歇会儿再用同一枚重试():
+    """跟搜索 / 详情同一套重试：先拿**同一枚**令牌退避重试，别急着换新。"""
+    from boss_jobs import config as C
+
+    tokens = []
+
+    class OnceProvider:
+        def ensure(self, *, force: bool = False):
+            tokens.append(force)
+            return "TOKEN-1"
+
+    http = FakeHttp(
+        [
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+            {"code": 0, "message": "Success", "zpData": {}},
+        ]
+    )
+    sleeper = RecordingSleeper()
+    client = JobClient(http=http, stoken_provider=OnceProvider(), sleeper=sleeper)
+    client.greet(security_id="SEC1", encrypt_job_id="J1")
+    assert tokens == [False]                        # 一次都没强制换新
+    assert sleeper.calls == [C.BROWSER_CHECK_BACKOFF]
+    assert [c["method"] for c in http.calls] == ["POST", "POST"]
+
+
+def test_greet_挂了stoken也能发():
+    """greet 跟搜索一样会先 ensure 令牌，cookie 里要出现 __zp_stoken__。"""
+    tokens = []
+
+    class FakeProvider:
+        def ensure(self, *, force: bool = False):
+            tokens.append(force)
+            return "TOKEN-G"
+
+    http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
+    client = JobClient(http=http, stoken_provider=FakeProvider())
+    client.greet(security_id="SEC1", encrypt_job_id="J1")
+    assert tokens == [False]
+    assert http.cookies.get("__zp_stoken__") == "TOKEN-G"
