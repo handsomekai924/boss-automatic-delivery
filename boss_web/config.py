@@ -26,6 +26,10 @@ LOGIN_WAIT_TIMEOUT = 300.0
 #: 简历分析时单次 LLM 调用之间的硬间隔（秒），压限流
 ANALYZE_INTERVAL = 0.6
 
+#: 匹配页并行度：一键匹配 / 匹配选中时同时在途的 LLM 调用数。
+#: 每条要等 LLM 好几秒，串行太慢；调小可缓解接口限流，调大更快但更容易撞 429。
+MATCH_CONCURRENCY = 4
+
 #: 分析批量默认看多少个职位
 DEFAULT_ANALYZE_TOP_K = 20
 

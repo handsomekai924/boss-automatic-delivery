@@ -1,4 +1,4 @@
-"""匹配任务：简历 vs 全库/勾选岗位，串行调 LLM，出匹配度 + 优缺点 + 招呼语。
+"""匹配任务：简历 vs 全库/勾选岗位，并行调 LLM，出匹配度 + 优缺点 + 招呼语。
 
 跟老的 :mod:`boss_web.services.resume_analyzer` **共用输出模板**（含 ``pros`` /
 ``cons``），差别在这边：
@@ -9,7 +9,7 @@
 - 范围是**全库全部岗位**或勾选的 job_id（C4 已拍板，不再 top_k 封顶）；
 - 结果写 ``analysis`` 表，每条 match 带 ``encrypt_job_id``，招呼语可后改。
 
-串行 + ``ANALYZE_INTERVAL`` 节流，可随时取消；单条失败只记流水，不拖垮整批。
+并行（最多 ``MATCH_CONCURRENCY`` 条同时在途），可随时取消；单条失败只记流水，不拖垮整批。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 from collections import Counter, deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Any, Sequence
 
 from boss_jobs.models import Job
@@ -185,52 +186,81 @@ class MatchTaskManager:
             return
 
         llm = LLMClient(cfg)
-        for job in jobs:
-            if task.cancel_flag:
-                task.status = STATUS_CANCELLED
-                task.ended_at = time.time()
-                _finalize(task, resume, cfg, llm_parse)
-                return
-            with task.lock:
-                task.current_job = job.job_name
-            task.push("job_start", {"job_name": job.job_name, "brand": job.brand_name})
-            try:
-                result = _match_one(llm, resume_brief, job)
-            except Exception as exc:  # noqa: BLE001 - 单个职位失败不拖垮整批
-                logger.warning("匹配职位 %s 失败：%s", job.job_name, exc)
-                result = {
-                    "match_score": 0,
-                    "matched_skills": [],
-                    "missing_skills": [],
-                    "verdict": "匹配失败",
-                    "pros": [],
-                    "cons": [],
-                    "advice": "",
-                    "greeting": "",
-                    "error": str(exc),
-                }
-            item = {
-                "encrypt_job_id": job.encrypt_job_id,
-                "job_name": job.job_name,
-                "brand_name": job.brand_name,
-                "location": job.location,
-                "salary_desc": job.salary_desc,
-                "job_experience": job.job_experience,
-                "job_degree": job.job_degree,
-                "brand_industry": job.brand_industry,
-                "brand_scale_name": job.brand_scale_name,
-                # 发送要用的（C6），顺手带上，免得到时候再翻 raw_json
-                "security_id": job.security_id,
-                "lid": job.lid,
-                **result,
-            }
-            with task.lock:
-                task.matches.append(item)
-                task.done += 1
-            task.push("job_done", {"job_name": job.job_name, "score": item.get("match_score")})
-            time.sleep(C.ANALYZE_INTERVAL)
-
+        self._run_parallel(task, llm, resume_brief, jobs)
         _finalize(task, resume, cfg, llm_parse)
+
+    def _run_parallel(
+        self,
+        task: MatchTask,
+        llm: LLMClient,
+        resume_brief: str,
+        jobs: list[Job],
+    ) -> None:
+        """并发跑：最多 :data:`boss_web.config.MATCH_CONCURRENCY` 条在途。
+
+        派活窗口略大于并发数（留点排队余量）；取消时立刻不再派新活，
+        已经在跑的那几条收完就收工，结果照常并入，不丢已完成的。
+        """
+        workers = max(1, int(C.MATCH_CONCURRENCY))
+        window = workers * 2
+        pending: dict[Any, Job] = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=task.task_id) as pool:
+            for job in jobs:
+                if task.cancel_flag:
+                    break
+                with task.lock:
+                    task.current_job = job.job_name
+                task.push("job_start", {"job_name": job.job_name, "brand": job.brand_name})
+                pending[pool.submit(self._match_job, task, llm, resume_brief, job)] = job
+                if len(pending) >= window:  # 窗口满了，收至少一条再派，取消才不会被大队列拖住
+                    for done in wait(pending, return_when=FIRST_COMPLETED).done:
+                        pending.pop(done)
+                        _collect(done)
+            for future in as_completed(list(pending)):
+                _collect(future)
+
+        if task.cancel_flag:
+            task.status = STATUS_CANCELLED
+
+    @staticmethod
+    def _match_job(task: MatchTask, llm: LLMClient, resume_brief: str, job: Job) -> None:
+        """跑一个职位并把结果落进任务；失败只记 ``error``，不抛。"""
+        if task.cancel_flag:  # 排队期间被取消，直接不跑
+            return
+        try:
+            result = _match_one(llm, resume_brief, job)
+        except Exception as exc:  # noqa: BLE001 - 单个职位失败不拖垮整批
+            logger.warning("匹配职位 %s 失败：%s", job.job_name, exc)
+            result = {
+                "match_score": 0,
+                "matched_skills": [],
+                "missing_skills": [],
+                "verdict": "匹配失败",
+                "pros": [],
+                "cons": [],
+                "advice": "",
+                "greeting": "",
+                "error": str(exc),
+            }
+        item = {
+            "encrypt_job_id": job.encrypt_job_id,
+            "job_name": job.job_name,
+            "brand_name": job.brand_name,
+            "location": job.location,
+            "salary_desc": job.salary_desc,
+            "job_experience": job.job_experience,
+            "job_degree": job.job_degree,
+            "brand_industry": job.brand_industry,
+            "brand_scale_name": job.brand_scale_name,
+            # 发送要用的（C6），顺手带上，免得到时候再翻 raw_json
+            "security_id": job.security_id,
+            "lid": job.lid,
+            **result,
+        }
+        with task.lock:
+            task.matches.append(item)
+            task.done += 1
+        task.push("job_done", {"job_name": job.job_name, "score": item.get("match_score")})
 
 
 match_tasks = MatchTaskManager()
@@ -239,6 +269,14 @@ match_tasks = MatchTaskManager()
 # --------------------------------------------------------------------------- #
 # 内部
 # --------------------------------------------------------------------------- #
+
+
+def _collect(future: Any) -> None:
+    """收一个 worker 的结果；worker 内已吞掉业务异常，这里只兜底。"""
+    try:
+        future.result()
+    except Exception:  # noqa: BLE001 - 兜底，别让一个 worker 拖停整批
+        logger.warning("匹配 worker 异常", exc_info=True)
 
 
 def _pick_jobs(task: MatchTask) -> list[Job]:

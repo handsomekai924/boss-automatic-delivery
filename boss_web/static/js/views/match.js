@@ -292,7 +292,7 @@ export async function renderMatch(root) {
       $("btn-match-sel").classList.add("hidden");
       $("btn-stop").classList.remove("hidden");
       $("an-sub").textContent = "匹配中…";
-      toast(`匹配已启动（共 ${task.total || "?"} 个职位，串行调 LLM）`, "ok");
+      toast(`匹配已启动（共 ${task.total || "?"} 个职位，并行调 LLM）`, "ok");
       startPoll();
     } catch (err) {
       toast(err.message, "bad");
