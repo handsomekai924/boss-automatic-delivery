@@ -36,8 +36,6 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    C.ensure_data_dirs()
-
     try:
         import uvicorn
     except ImportError:  # pragma: no cover - 依赖没装

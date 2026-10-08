@@ -3,16 +3,16 @@
     python -m boss_jobs fetch                      # 分页抓取，每页清洗入库，页间睡 1s
     python -m boss_jobs fetch --max-pages 3        # 只翻 3 页
     python -m boss_jobs fetch --interval 2.0       # 页间睡 2 秒（更保守）
-    python -m boss_jobs fetch --db my.db           # 指定库路径
+    python -m boss_jobs fetch --db my.db           # 指定状态库路径
     python -m boss_jobs stats                      # 看库里的汇总
     python -m boss_jobs list --city 广州 --limit 20
     python -m boss_jobs list --json                # 职位按 JSON 输出
 
-登录态默认读项目根目录的 ``session.json``（``boss_login`` 落的那份）。
+登录态默认读状态库 ``data/boss.db`` 的 ``doc('session')``（``boss_login`` 落的那份）。
 
 搜索流还会**自动**补 ``__zp_stoken__``：每次抓搜索页前判一次过期，过期了就
-拉起一台 Chrome（CDP）让站点自己算一枚、落盘到 ``stoken.json``、再镜像进
-``session.json``，下次直接用（令牌约 64 小时）。没有单独的「取令牌」命令。
+拉起一台 Chrome（CDP）让站点自己算一枚、落到 ``doc('stoken')``、再镜像进
+``doc('session')``，下次直接用（令牌约 64 小时）。没有单独的「取令牌」命令。
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import argparse
 import json
 import logging
 import sys
-from pathlib import Path
 
 from . import __version__
 from .cdp_stoken import CHROME_BIN_ENV
@@ -31,7 +30,6 @@ from .config import (
     DEFAULT_DB_PATH,
     DEFAULT_MAX_PAGES,
     DEFAULT_PAGE_INTERVAL,
-    DEFAULT_SESSION_PATH,
     STOKEN_COOKIE,
     STOKEN_ENV,
 )
@@ -39,8 +37,8 @@ from .errors import JobApiError, JobDataError, JobError, JobTransportError
 from .stoken import StokenError
 from .store import open_store
 
-# 筛选条件的配置文件（没有就留空 = 全部「不限」）
-from boss_filter import DEFAULT_FILTER_PATH, JobSearchFilter, load_search_filter
+# 筛选条件：不传 --filter 就用状态库里那份；传了就只读那份 JSON（不写库）
+from boss_filter import JobSearchFilter, load_search_filter, search_filter_from_file
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -60,14 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=None, help="请求超时秒数")
     parser.add_argument("--retries", type=int, default=None, help="网络层重试次数")
     parser.add_argument(
-        "--session",
-        default=str(DEFAULT_SESSION_PATH),
-        help=f"登录态文件（默认 {DEFAULT_SESSION_PATH}）",
-    )
-    parser.add_argument(
         "--db",
-        default=str(DEFAULT_DB_PATH),
-        help=f"SQLite 路径（默认 {DEFAULT_DB_PATH}）",
+        default=None,
+        help=f"状态库路径（默认 {DEFAULT_DB_PATH}，可用环境变量 BOSS_DB 覆盖）",
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -90,8 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--filter",
         default=None,
         help=(
-            "搜索条件配置文件（JSON）。"
-            f"默认 {DEFAULT_FILTER_PATH}；文件不存在 = 条件全空（不限），不报错"
+            "本次抓取用这份 JSON 条件（只读，不写库）。"
+            "不传则用状态库里存的条件；都没有 = 全部「不限」，走推荐流"
         ),
     )
     fetch.add_argument("--json", action="store_true", help="抓完把统计按 JSON 输出")
@@ -124,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         if exc.is_session_expired:
             print(
                 f"✗ 登录态失效：{exc.message}\n"
-                f"  会话文件：{args.session}\n"
+                f"  状态库：{args.db or DEFAULT_DB_PATH}\n"
                 f"  重新登录：python -m boss_login login",
                 file=sys.stderr,
             )
@@ -132,9 +125,9 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"✗ 撞上安全网关（code {exc.code}）：{exc.message}\n"
                 f"  缺的是 {STOKEN_COOKIE} 安全网关令牌。本工具会自动拉起 Chrome（CDP）\n"
-                f"  让站点自己算一枚补上并落盘（见 boss_jobs.cdp_stoken），\n"
+                f"  让站点自己算一枚补上并落到状态库（见 boss_jobs.cdp_stoken），\n"
                 f"  仍被拒多半是登录态失效，或那台 Chrome 站点也不认。\n"
-                f"  急用的话，也可以从浏览器拷一枚塞进 session.json 的 cookies，"
+                f"  急用的话，也可以从浏览器拷一枚塞进状态库 doc('session') 的 cookies，"
                 f"或设 {STOKEN_ENV} 环境变量。",
                 file=sys.stderr,
             )
@@ -153,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             f"✗ 取 {STOKEN_COOKIE} 失败：{exc}\n"
             f"  这枚令牌要真浏览器才生成得出来（Chrome + CDP，见 boss_jobs.cdp_stoken）。\n"
             f"  装好 Google Chrome，或用 {CHROME_BIN_ENV} 指到它的可执行文件；\n"
-            f"  也可以手工从浏览器拷一枚塞进 session.json 的 cookies，或设 {STOKEN_ENV} 环境变量。",
+            f"  也可以手工从浏览器拷一枚塞进状态库 doc('session') 的 cookies，或设 {STOKEN_ENV} 环境变量。",
             file=sys.stderr,
         )
         return EXIT_ERROR
@@ -177,13 +170,18 @@ def main(argv: list[str] | None = None) -> int:
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
     client = _build_client(args)
-    # 筛选条件来自配置文件；没有文件 = 全空 = 不限（走推荐流，不搜关键词）
-    search_filter = load_search_filter(args.filter)
+    # --filter 是「这次就用这份」的只读入参；不传则用库里的条件。
+    # 两边都没有 = 全空 = 不限（走推荐流，不搜关键词）。
+    if args.filter:
+        search_filter = search_filter_from_file(args.filter)
+        source_note = f"搜索流 search/joblist（条件文件 {args.filter}）"
+    else:
+        search_filter = load_search_filter(args.db)
+        source_note = "搜索流 search/joblist（库里的搜索条件）"
+
     if search_filter.is_blank:
         search_filter = None          # 空条件没有筛选语义，走推荐流
         source_note = "推荐流 special/zone（无筛选条件）"
-    else:
-        source_note = f"搜索流 search/joblist（条件文件 {args.filter or DEFAULT_FILTER_PATH}）"
 
     with open_store(args.db) as store:
         report = client.crawl(
@@ -204,7 +202,7 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
             "inserted": stats.inserted,
             "updated": stats.updated,
             "stopped_reason": stats.stopped_reason,
-            "db_path": str(Path(args.db)),
+            "db_path": str(store.path),
             "jobs_in_db": store.count_jobs(),
         }
 
@@ -282,7 +280,7 @@ def _build_client(args: argparse.Namespace) -> JobClient:
     if args.retries is not None:
         kwargs["retries"] = args.retries
     return create_client(
-        session_path=args.session,
+        session_path=args.db,
         base_url=args.base_url,
         **kwargs,
     )

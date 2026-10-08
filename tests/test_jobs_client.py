@@ -413,18 +413,18 @@ def test_retries_then_succeeds():
 
 
 def test_http_from_session_loads_cookies(tmp_path):
-    session_path = tmp_path / "session.json"
-    session_path.write_text(
-        json.dumps(
-            {
-                "token": "",
-                "cookies": {"wt2": "abc", "bst": "def"},
-                "phone_masked": "176****6772",
-                "user": {},
-                "saved_at": 1.0,
-            }
+    from boss_login.session import StoredSession, save_session
+
+    session_path = tmp_path / "session.db"
+    save_session(
+        StoredSession(
+            token="",
+            cookies={"wt2": "abc", "bst": "def"},
+            phone_masked="176****6772",
+            user={},
+            saved_at=1.0,
         ),
-        encoding="utf-8",
+        session_path,
     )
     # 用假会话验灌 Cookie 的逻辑；真 requests.Session 见下一个用例
     fake = FakeHttp([])
@@ -442,27 +442,25 @@ def test_http_from_session_explains_missing_session(tmp_path):
 
 
 def test_create_client_uses_session(tmp_path):
-    session_path = tmp_path / "session.json"
-    session_path.write_text(
-        json.dumps({"token": "", "cookies": {"wt2": "x"}, "saved_at": 1.0}),
-        encoding="utf-8",
-    )
+    from boss_login.session import StoredSession, save_session
+
+    session_path = tmp_path / "session.db"
+    save_session(StoredSession(token="", cookies={"wt2": "x"}, saved_at=1.0), session_path)
     client = create_client(session_path=session_path, page_interval=2.5, sleeper=lambda _s: None)
     assert client.page_interval == 2.5
     assert cookie_map(client._http) == {"wt2": "x"}
 
 
 # --------------------------------------------------------------------------- #
-# __zp_stoken__：显式参数 → session.json → 环境变量
+# __zp_stoken__：显式参数 → 状态库里的会话 → 环境变量
 # --------------------------------------------------------------------------- #
 
 
 def write_session(tmp_path, cookies: dict[str, str]):
-    session_path = tmp_path / "session.json"
-    session_path.write_text(
-        json.dumps({"token": "", "cookies": cookies, "saved_at": 1.0}),
-        encoding="utf-8",
-    )
+    from boss_login.session import StoredSession, save_session
+
+    session_path = tmp_path / "session.db"
+    save_session(StoredSession(cookies=cookies, saved_at=1.0), session_path)
     return session_path
 
 
@@ -616,7 +614,7 @@ def test_cli_fetch_writes_db(tmp_path, monkeypatch):
     )
     db_path = tmp_path / "cli.db"
     code = cli.main(
-        ["--db", str(db_path), "--session", str(tmp_path / "s.json"), "fetch", "--interval", "0"]
+        ["--db", str(db_path), "fetch", "--interval", "0"]
     )
     assert code == 0
     with JobStore(db_path) as store:
@@ -635,7 +633,7 @@ def test_cli_fetch_reports_browser_check(tmp_path, monkeypatch, capsys):
         ),
     )
     code = cli.main(
-        ["--db", str(tmp_path / "x.db"), "--session", str(tmp_path / "s.json"), "fetch"]
+        ["--db", str(tmp_path / "x.db"), "fetch"]
     )
     assert code == 1
     err = capsys.readouterr().err
@@ -654,7 +652,7 @@ def test_cli_fetch_reports_risk_control(tmp_path, monkeypatch, capsys):
         ),
     )
     code = cli.main(
-        ["--db", str(tmp_path / "x.db"), "--session", str(tmp_path / "s.json"), "fetch"]
+        ["--db", str(tmp_path / "x.db"), "fetch"]
     )
     assert code == 1
     err = capsys.readouterr().err
@@ -685,17 +683,17 @@ def _capturing_http(captured):
     return _Httplet(_request)
 
 
-def test_cli_fetch_条件文件_有筛选就走搜索流(tmp_path, monkeypatch, capsys):
-    """配置文件里写了条件 → 打 search/joblist，并把条件带进查询串。"""
-    monkeypatch.setenv("BOSS_SEARCH_FILTER", str(tmp_path / "f.json"))
-    (tmp_path / "f.json").write_text(
+def test_cli_fetch_filter文件_有筛选就走搜索流(tmp_path, monkeypatch, capsys):
+    """--filter 指定的 JSON 里写了条件 → 打 search/joblist，并把条件带进查询串。"""
+    f = tmp_path / "f.json"
+    f.write_text(
         '{"query": "python", "city": "101280100", "salary": "405"}', encoding="utf-8"
     )
     captured = {}
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session", lambda *a, **k: _capturing_http(captured)
     )
-    code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1"])
+    code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1", "--filter", str(f)])
     assert code == 0
     assert "search/joblist" in captured["url"]
     assert captured["params"]["query"] == "python"
@@ -705,8 +703,28 @@ def test_cli_fetch_条件文件_有筛选就走搜索流(tmp_path, monkeypatch, 
     assert "搜索流" in out
 
 
-def test_cli_fetch_条件文件不存在_留空走推荐流(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("BOSS_SEARCH_FILTER", str(tmp_path / "没有.json"))
+def test_cli_fetch_库里的条件_走搜索流(tmp_path, monkeypatch, capsys):
+    """不传 --filter 就用状态库里存的那份条件。"""
+    import boss_db
+
+    db = tmp_path / "d.db"
+    boss_db.doc_set(
+        boss_db.DOC_SEARCH_FILTER, {"query": "go", "city": "101010100"}, db
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session", lambda *a, **k: _capturing_http(captured)
+    )
+    code = cli.main(["--db", str(db), "fetch", "--max-pages", "1"])
+    assert code == 0
+    assert "search/joblist" in captured["url"]
+    assert captured["params"]["query"] == "go"
+    out = capsys.readouterr().out
+    assert "搜索流" in out
+    assert "库里的搜索条件" in out
+
+
+def test_cli_fetch_两边都没有条件_走推荐流(tmp_path, monkeypatch, capsys):
     captured = {}
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session", lambda *a, **k: _capturing_http(captured)

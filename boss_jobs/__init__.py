@@ -5,7 +5,7 @@
     岗位名称 / 公司名称 / 工作地点 / 薪资待遇
     工作经验要求 / 学历要求 / 公司行业 / 公司规模
 
-用法（登录态复用 ``boss_login`` 落盘的 ``session.json``）::
+用法（登录态复用 ``boss_login`` 落盘的 ``doc('session')``）::
 
     python -m boss_jobs fetch                 # 翻页抓，每页洗完就入库，页间睡 1s
     python -m boss_jobs fetch --max-pages 3
@@ -17,7 +17,7 @@
     from boss_jobs import create_client, open_store
 
     client = create_client()                  # 带登录态
-    with open_store() as store:               # 默认项目根 jobs.db
+    with open_store() as store:               # 默认 data/boss.db
         report = client.crawl(store=store)    # 抓一页存一页，页间睡 1 秒
     print(report.stats.kept_count)
 
@@ -35,7 +35,6 @@ from .config import (
     DEFAULT_DB_PATH,
     DEFAULT_MAX_PAGES,
     DEFAULT_PAGE_INTERVAL,
-    DEFAULT_SESSION_PATH,
     ENDPOINTS,
     PAGE_SIZE,
     STOKEN_COOKIE,
@@ -114,7 +113,6 @@ __all__ = [
     "DEFAULT_DB_PATH",
     "DEFAULT_MAX_PAGES",
     "DEFAULT_PAGE_INTERVAL",
-    "DEFAULT_SESSION_PATH",
     "ENDPOINTS",
     "PAGE_SIZE",
     "STOKEN_COOKIE",

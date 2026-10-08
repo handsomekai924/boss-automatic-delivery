@@ -20,11 +20,15 @@
 
     cond = get_filter_conditions(html_path=".saved_web/求职_找工作_招聘信息-BOSS直聘.html")
 
-搜索条件的**用户配置**走磁盘文件（没有就留空 = 全部「不限」）::
+搜索条件的**用户配置**落在状态库 ``data/boss.db``（没有就留空 = 全部「不限」）::
 
     from boss_filter import load_search_filter
-    f = load_search_filter()            # 读 search_filter.json，没有就是全空
+    f = load_search_filter()            # 读库里的 doc('search_filter')，没有就是全空
     f.to_params()                       # → {'page': '1', 'pageSize': '15', 'scene': '1'}
+
+    # 用户点名的 JSON 文件只读一次，不写库（CLI --filter my.json）
+    from boss_filter import search_filter_from_file
+    f = search_filter_from_file("my.json")
 
 CLI::
 
@@ -36,7 +40,7 @@ CLI::
 from __future__ import annotations
 
 from .client import FilterClient, get_filter_conditions, load_industries, parse_conditions_payload
-from .config import BASE_URL, DEFAULT_FILTER_PATH, DEFAULT_SAVED_HTML, ENDPOINTS, FILTER_ENV, PROJECT_ROOT
+from .config import BASE_URL, DEFAULT_DB_PATH, DEFAULT_SAVED_HTML, ENDPOINTS, PROJECT_ROOT
 from .errors import (
     FilterApiError,
     FilterDataError,
@@ -66,6 +70,7 @@ from .search import (
     load_search_filter,
     save_search_filter,
     search_filter_from_dict,
+    search_filter_from_file,
 )
 
 __version__ = "0.1.0"
@@ -81,11 +86,12 @@ __all__ = [
     "IndustryGroup",
     "JobSearchFilter",
     "ResolvedSearchFilter",
-    # 搜索条件配置文件
+    # 搜索条件（状态库 + 用户点名的 JSON）
     "filter_path",
     "load_search_filter",
     "save_search_filter",
     "search_filter_from_dict",
+    "search_filter_from_file",
     # 异常
     "FilterApiError",
     "FilterDataError",
@@ -105,10 +111,9 @@ __all__ = [
     "options_from_rows",
     # 常量
     "BASE_URL",
-    "DEFAULT_FILTER_PATH",
+    "DEFAULT_DB_PATH",
     "DEFAULT_SAVED_HTML",
     "ENDPOINTS",
-    "FILTER_ENV",
     "PROJECT_ROOT",
     "__version__",
 ]

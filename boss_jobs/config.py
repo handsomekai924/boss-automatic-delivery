@@ -3,7 +3,7 @@
 ⚠️ 关于接口地址的可信度
 --------------------------------------------------------------------------------
 **已实测确认**（2026-09-30，Cookie 取自 ``boss_login`` 落盘的登录会话
-``session.json``，直接打真实站点）：
+（``data/boss.db`` 的 ``doc('session')``），直接打真实站点）：
 
   GET /wapi/zpgeek/pc/special/zone/joblist.json?page=…&type=1
       → 200 + {"code":0,"message":"Success","zpData":{"jobList":[…],"hasMore":…}}
@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Final
+
+import boss_db
 
 BASE_URL: Final[str] = "https://www.zhipin.com"
 
@@ -110,13 +112,12 @@ DEFAULT_MAX_PAGES: Final[int] = 0
 # 入库
 # --------------------------------------------------------------------------- #
 
-#: SQLite 路径 = 项目根目录下的 ``jobs.db``。按 :mod:`boss_jobs.store` 的
-#: ``__file__`` 定位，跟 cwd 无关。
+#: 项目根（``F:\boss``），跟 cwd 无关。
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
-DEFAULT_DB_PATH: Final[Path] = PROJECT_ROOT / "jobs.db"
 
-#: 登录态文件（``boss_login`` 写的那份）。默认路径同源。
-DEFAULT_SESSION_PATH: Final[Path] = PROJECT_ROOT / "session.json"
+#: 状态库路径。职位、登录态、筛选条件、stoken、LLM 配置、简历、分析全在这一份
+#: ``data/boss.db`` 里（见 :mod:`boss_db`）。环境变量 ``BOSS_DB`` 可覆盖。
+DEFAULT_DB_PATH: Final[Path] = boss_db.DEFAULT_DB_PATH
 
 # --------------------------------------------------------------------------- #
 # 薪资字体反混淆

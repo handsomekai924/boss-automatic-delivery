@@ -1,4 +1,10 @@
-"""共享夹具：给集成测试和 CLI 测试提供同一个假服务端。"""
+"""共享夹具：给集成测试和 CLI 测试提供同一个假服务端。
+
+一条规矩：**测试绝不碰真状态库、也绝不真拉 Chrome**。``isolated_db`` 把
+``BOSS_DB`` 指到临时目录，整套 ``load_*/save_*/clear_*`` 自动跟着走（它们
+都是调用时才解析路径），顺手把 CDP 换新换成假令牌。要真跑端到端，用
+``tools/wire_search.py``。
+"""
 
 from __future__ import annotations
 
@@ -37,26 +43,21 @@ def clean_store():
 
 
 @pytest.fixture(autouse=True)
-def no_real_chrome(monkeypatch, tmp_path):
-    """测试里绝不真拉 Chrome，也绝不写项目里的真 ``stoken.json`` / ``session.json``。
+def isolated_db(monkeypatch, tmp_path):
+    """一处隔离：整个测试跑在 ``tmp_path/boss.db`` 上，收尾把连接都关掉。
 
-    ``fetch`` 默认会为 ``__zp_stoken__`` 起一台带调试口的 Chrome，并把令牌落到
-    项目根（见 :mod:`boss_jobs.cdp_stoken`）。那条路要真浏览器，还会污染真账本，
-    所以统一把换新动作换成假令牌、把落盘路径挪进临时目录。要真跑端到端，用
-    ``tools/wire_search.py``。
+    ``fetch`` 默认会为 ``__zp_stoken__`` 起一台带调试口的 Chrome。那条路要真
+    浏览器，所以统一把换新动作换成假令牌（落盘仍然走真 ``StokenStore``）。
     """
+    import boss_db
+
+    monkeypatch.setenv(boss_db.DB_ENV, str(tmp_path / "boss.db"))
     monkeypatch.setattr(
         "boss_jobs.cdp_stoken.CdpStokenProvider._acquire_from_chrome",
         lambda self: "0138FAKECDP",
     )
-    monkeypatch.setenv("BOSS_STOKEN_STORE", str(tmp_path / "stoken.json"))
-    monkeypatch.setattr(
-        "boss_jobs.cdp_stoken.DEFAULT_STORE_PATH", tmp_path / "stoken.json"
-    )
-    # CLI 默认 --session 指向项目根 session.json；测试里挪走，免得把假令牌镜像进去
-    fake_session = tmp_path / "session.json"
-    monkeypatch.setattr("boss_jobs.config.DEFAULT_SESSION_PATH", fake_session)
-    monkeypatch.setattr("boss_jobs.cli.DEFAULT_SESSION_PATH", fake_session)
+    yield
+    boss_db.close_all()
 
 
 @pytest.fixture

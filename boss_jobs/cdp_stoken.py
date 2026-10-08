@@ -18,12 +18,12 @@ Chrome 本来就是站点的原生环境，指纹、时区、UA 全自洽，不�
 2. 先试连已有的调试端口 ``127.0.0.1:9222``；连不上就用**独立的 user-data-dir**
    拉起一台（``--remote-debugging-port`` 在默认 profile 上会被 Chrome 拒绝，
    这里专门开一个 ``.chrome_profile``，跟日常那台 Chrome 互不打架）。
-3. ``Storage.setCookies`` 把 ``session.json`` 里的登录 Cookie 灌进去
+3. ``Storage.setCookies`` 把状态库里 ``doc('session')`` 的登录 Cookie 灌进去
    ——免得每次都要手工登一遍。
 4. ``Target.createTarget`` 打开 ``https://www.zhipin.com/web/geek/jobs``，
    让站点自己的前端把 ``__zp_stoken__`` 算出来写进 Cookie（3840 分钟）。
 5. 轮询 ``Storage.getCookies`` 把它读出来，连同 ``expires`` 一起落到
-   ``stoken.json``。
+   状态库的 ``doc('stoken')`` 行。
 
 ⚠️ 边界
 --------------------------------------------------------------------------------
@@ -49,6 +49,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -56,6 +57,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+
+import boss_db
 
 from . import config as C
 from .stoken import STOKEN_MAX_AGE, StokenError
@@ -71,10 +74,9 @@ __all__ = [
     "CdpClient",
     "CdpStokenProvider",
     "DEFAULT_CDP_PORT",
-    "DEFAULT_STORE_PATH",
+    "DEFAULT_DB_PATH",
     "StokenRecord",
     "StokenStore",
-    "STOKEN_STORE_ENV",
     "TOKEN_PAGE",
     "connect_or_launch",
     "find_chrome",
@@ -96,10 +98,9 @@ DEFAULT_CHROME_PROFILE: Path = C.PROJECT_ROOT / ".chrome_profile"
 #: 抓完是否留着 Chrome（``0``/``false`` = 关掉）。默认留着，下次秒连
 CHROME_KEEP_ENV: str = "BOSS_CDP_KEEP"
 
-#: 令牌落盘位置（含 minted_at / expires_at，用来判过期）。
-#: ``BOSS_STOKEN_STORE`` 可覆盖——测试里就指到临时目录，别写真账本。
-STOKEN_STORE_ENV: str = "BOSS_STOKEN_STORE"
-DEFAULT_STORE_PATH: Path = C.PROJECT_ROOT / "stoken.json"
+#: 令牌账本落在状态库的哪一行（含 minted_at / expires_at，用来判过期）。
+#: 库路径走 ``BOSS_DB`` / 显式参数，见 :func:`boss_db.resolve_db_path`。
+DEFAULT_DB_PATH: Path = boss_db.DEFAULT_DB_PATH
 
 #: 快过期就提前换新的余量（秒）
 EXPIRY_MARGIN: int = 5 * 60
@@ -212,56 +213,48 @@ class StokenRecord:
 
 
 class StokenStore:
-    """``stoken.json`` 的读写：一次 fetch 一份过期账本。
+    """``doc('stoken')`` 的读写：一次 fetch 一份过期账本。
 
-    跟 ``session.json`` 分开放是有意的——``session.json`` 的 ``cookies``
-    是纯 ``str → str``，塞不进过期时间；而过期判断恰恰是最关键的那一环。
-    取出来的 token 会另外**镜像**一份进 ``session.json``，让
+    跟登录态分开放是有意的——``doc('session')`` 的 ``cookies`` 是纯
+    ``str → str``，塞不进过期时间；而过期判断恰恰是最关键的那一环。
+    取出来的 token 会另外**镜像**一份进 ``doc('session')``，让
     :func:`boss_jobs.client.http_from_session` 老规矩继续生效。
+
+    :param path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
     """
 
     def __init__(self, path: Path | str | None = None) -> None:
-        if path is not None:
-            self.path = Path(path)
-        else:
-            env = os.environ.get(STOKEN_STORE_ENV, "").strip()
-            self.path = Path(env) if env else DEFAULT_STORE_PATH
+        self.path = boss_db.resolve_db_path(path)
 
     def load(self) -> StokenRecord | None:
         try:
-            raw = self.path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+            raw = boss_db.doc_get_raw(boss_db.DOC_STOKEN, self.path)
+        except (OSError, sqlite3.Error) as exc:  # 读盘失败不该拦主流程
+            logger.warning("读 %s 的 %s 失败（当没有）：%s", self.path, boss_db.DOC_STOKEN, exc)
             return None
-        except OSError as exc:  # pragma: no cover - 读盘失败不该拦主流程
-            logger.warning("读 %s 失败（当没有）：%s", self.path, exc)
+        if raw is None:
             return None
         try:
             payload = json.loads(raw)
         except ValueError:
-            logger.warning("%s 不是合法 JSON，丢弃重取", self.path)
+            logger.warning("状态库里的 %s 不是合法 JSON，丢弃重取", boss_db.DOC_STOKEN)
             return None
         return StokenRecord.from_dict(payload)
 
     def save(self, record: StokenRecord) -> None:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(record.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            tmp.replace(self.path)
-        except OSError as exc:  # pragma: no cover
+            resolved = boss_db.doc_set(boss_db.DOC_STOKEN, record.to_dict(), self.path)
+        except (OSError, sqlite3.Error) as exc:
             logger.warning("写 %s 失败（不拦主流程）：%s", self.path, exc)
         else:
-            logger.debug("已落盘 %s（%s，剩 %.0f 分钟）", self.path, record.source, record.ttl_left / 60)
+            logger.debug(
+                "已落盘 %s（%s，剩 %.0f 分钟）", resolved, record.source, record.ttl_left / 60
+            )
 
     def clear(self) -> None:
         try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:  # pragma: no cover
+            boss_db.doc_delete(boss_db.DOC_STOKEN, self.path)
+        except (OSError, sqlite3.Error):
             pass
 
 
@@ -337,7 +330,7 @@ def launch_chrome(
 
     ⚠️ 必须独立 profile：Chrome 136+ 直接拒绝对默认 profile 开
     ``--remote-debugging-port``。独立 profile 的登录态由本模块每次从
-    ``session.json`` 灌进去，不用手工登。
+    状态库 ``doc('session')`` 灌进去，不用手工登。
     """
     chrome = chrome or find_chrome()
     port = port or _port()
@@ -529,7 +522,7 @@ class CdpClient:
         domain: str = ".zhipin.com",
         path: str = "/",
     ) -> int:
-        """把 ``session.json`` 里的登录 Cookie 灌进 Chrome（免手工登）。
+        """把 ``doc('session')`` 里的登录 Cookie 灌进 Chrome（免手工登）。
 
         只灌真正的登录态，``__zp_stoken__`` 不灌——那枚要让站点自己算，
         否则指纹还是对不上。
@@ -566,7 +559,7 @@ class CdpClient:
             time.sleep(interval)
         raise StokenError(
             f"等了 {timeout:.0f}s 也没等到站点写出 {name}。"
-            f"多半是登录态没灌进去（session.json 过期？）或页面没跑起来。"
+            f"多半是登录态没灌进去（``doc('session')`` 过期？）或页面没跑起来。"
         )
 
     # ------------------------------------------------------------------ #
@@ -649,8 +642,8 @@ class CdpStokenProvider:
 
     :param http: 带 ``cookies`` 的会话（``requests.Session``）。
         里面的登录 Cookie 会被灌进 Chrome，好让站点认得你。
-    :param store: 过期账本；不传就用项目根 ``stoken.json``
-    :param session_path: 镜像进 ``session.json`` 的路径；``None`` = 不镜像
+    :param store: 过期账本；不传就用 ``BOSS_DB`` 的 ``doc('stoken')``
+    :param session_path: 镜像进 ``doc('session')`` 的库路径；``None`` = 不镜像
     :param acquire: 换新令牌的实现（测试里替换掉真 Chrome）
     """
 
@@ -679,7 +672,7 @@ class CdpStokenProvider:
 
         顺序：
 
-        1. 账本里还新鲜 → 直接用（顺手写回 Cookie / ``session.json``）；
+        1. 账本里还新鲜 → 直接用（顺手写回 Cookie / ``doc('session')``）；
         2. 账本没有、但会话里已经有人（手工拷的）→ 信它，等撞 37 再说；
         3. 其余（过期 / ``force``）→ 拉 Chrome 换新，落盘。
         """
@@ -772,7 +765,7 @@ class CdpStokenProvider:
         put_cookie(self.http.cookies, C.STOKEN_COOKIE, token, expires=int(expires_at))
 
     def _mirror_session(self, token: str) -> None:
-        """把 token 写回 ``session.json``，让 ``http_from_session`` 老规矩继续生效。"""
+        """把 token 写回 ``doc('session')``，让 ``http_from_session`` 老规矩继续生效。"""
         if not self.session_path:
             return
         try:

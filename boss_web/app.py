@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
-    C.ensure_data_dirs()
-
     app = FastAPI(
         title="BOSS 控制台",
         version=__import__("boss_web", fromlist=["__version__"]).__version__,

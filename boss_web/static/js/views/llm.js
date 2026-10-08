@@ -6,7 +6,7 @@ import { toast, escapeHtml } from "../ui.js";
 export async function renderLLM(root) {
   root.innerHTML = `
     <h1 class="hero-title">模型 <span class="grad">链路</span></h1>
-    <p class="hero-sub">OpenAI 兼容协议（DeepSeek / Kimi / 本地 vLLM 都行）。Key 只存本地 <span class="mono">data/llm_config.json</span>，回显时打码。模型名从接口在线拉取。</p>
+    <p class="hero-sub">OpenAI 兼容协议（DeepSeek / Kimi / 本地 vLLM 都行）。Key 只存本地 <span class="mono">data/boss.db</span>，回显时打码。模型名从接口在线拉取。</p>
 
     <div class="bento">
       <div class="card span-7 glow">

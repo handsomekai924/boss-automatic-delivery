@@ -159,9 +159,11 @@ class LoginTaskManager:
 
     def status_payload(self) -> dict[str, Any]:
         """``GET /api/auth/status`` 用：本地会话 + 当前任务。"""
+        import boss_db
+
         from boss_login.session import load_session
 
-        path = self._session_path or _default_session_path()
+        path = boss_db.resolve_db_path(self._session_path)
         stored = load_session(path)
         task = self.current()
         return {
@@ -330,9 +332,10 @@ class LoginTaskManager:
 
     def _finish_ok(self, task: LoginTask, client: Any, result: LoginResult) -> None:
         try:
-            persist_login(client, result, session_path=self._session_path or _default_session_path())
+            # 不给 session_path = 写默认状态库（BOSS_DB / data/boss.db）
+            persist_login(client, result, session_path=self._session_path)
         except Exception as exc:  # noqa: BLE001 - 落盘失败不该把登录说成失败
-            logger.warning("登录成功但写 session.json 失败：%s", exc)
+            logger.warning("登录成功但写状态库失败：%s", exc)
         with task.lock:
             task.result = {
                 "logged_in": True,
@@ -347,12 +350,6 @@ class LoginTaskManager:
             task.error = message
             task.set_status(ST_ERROR)
         task.record("error", {"message": message})
-
-
-def _default_session_path() -> Any:
-    from boss_login.session import DEFAULT_SESSION_PATH
-
-    return DEFAULT_SESSION_PATH
 
 
 # 模块级单例，app 启动时直接用

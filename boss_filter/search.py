@@ -19,12 +19,13 @@ industry/scale/stage`` 是多选，``city/jobType/salary`` 是单选。
 from __future__ import annotations
 
 import json
-import os
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .config import DEFAULT_FILTER_PATH, FILTER_ENV
+import boss_db
+
 from .models import FilterConditions, normalize_code
 
 
@@ -365,13 +366,12 @@ TEMPLATE_KEYS: tuple[str, ...] = (
 
 
 def filter_path(path: Path | str | None = None) -> Path:
-    """配置文件路径：显式参数 → ``BOSS_SEARCH_FILTER`` → 项目根 ``search_filter.json``。"""
-    if path:
-        return Path(path)
-    env = os.environ.get(FILTER_ENV, "").strip()
-    if env:
-        return Path(env)
-    return DEFAULT_FILTER_PATH
+    """状态库路径：显式参数 → ``BOSS_DB`` → ``data/boss.db``。
+
+    搜索条件是库里的一行（``doc('search_filter')``），不是单独的配置文件了。
+    用户点名的 JSON 文件走 :func:`search_filter_from_file`。
+    """
+    return boss_db.resolve_db_path(path)
 
 
 def _to_codes(value: Any) -> tuple[str, ...]:
@@ -415,10 +415,35 @@ def search_filter_from_dict(data: Mapping[str, Any]) -> JobSearchFilter:
     return JobSearchFilter(**fields)
 
 
-def load_search_filter(path: Path | str | None = None) -> JobSearchFilter:
-    """从配置文件读筛选条件。**文件不存在就留空**，不报错。
+def search_filter_from_file(path: Path | str) -> JobSearchFilter:
+    """只读用户点名的 JSON 文件（CLI ``--filter my.json`` 用），**不写库**。
 
-    配置文件是一个 JSON 对象，键跟站点查询串对齐，值留空 = 该维度「不限」::
+    这是「本次抓取就用这份条件」的运行期入参，不是持久状态，所以仍走文件。
+    格式同 :func:`search_filter_from_dict`。
+
+    :raises ValueError: 文件读不了、不是 JSON、或不是 JSON 对象
+    """
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise ValueError(f"筛选条件配置 {p} 不存在") from None
+    except OSError as exc:
+        raise ValueError(f"读不了筛选条件配置 {p}：{exc}") from exc
+
+    if not text.strip():
+        return JobSearchFilter()
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"筛选条件配置 {p} 不是合法 JSON：{exc}") from exc
+    return search_filter_from_dict(data)
+
+
+def load_search_filter(path: Path | str | None = None) -> JobSearchFilter:
+    """从状态库读筛选条件。**库里没有就留空**（= 全部「不限」），不报错。
+
+    库里存的是一个 JSON 对象，键跟站点查询串对齐，值留空 = 该维度「不限」::
 
         {
           "query": "python",
@@ -435,24 +460,21 @@ def load_search_filter(path: Path | str | None = None) -> JobSearchFilter:
     code 取值见 :class:`~boss_filter.models.FilterConditions`，
     ``python -m boss_filter export`` 能把整张表导出来对照。
 
-    :param path: 配置文件路径；不传按 :func:`filter_path` 定位
-    :return: 文件在就按文件装配（可全空）；不在就 :class:`JobSearchFilter()` 全空
-    :raises ValueError: 文件不是 JSON 对象、或 pageSize 形状不对
+    :param path: 状态库路径；不传按 :func:`filter_path` 定位
+    :return: 库里有就按那行装配（可全空）；没有就 :class:`JobSearchFilter()` 全空
+    :raises ValueError: payload 不是 JSON 对象、或 pageSize 形状不对
     """
-    p = filter_path(path)
     try:
-        text = p.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return JobSearchFilter()
-    except OSError as exc:
-        raise ValueError(f"读不了筛选条件配置 {p}：{exc}") from exc
+        raw = boss_db.doc_get_raw(boss_db.DOC_SEARCH_FILTER, path)
+    except (OSError, sqlite3.Error) as exc:
+        raise ValueError(f"读不了状态库 {filter_path(path)}：{exc}") from exc
 
-    if not text.strip():
+    if raw is None or not raw.strip():
         return JobSearchFilter()
     try:
-        data = json.loads(text)
+        data = json.loads(raw)
     except ValueError as exc:
-        raise ValueError(f"筛选条件配置 {p} 不是合法 JSON：{exc}") from exc
+        raise ValueError(f"状态库里的筛选条件不是合法 JSON：{exc}") from exc
     return search_filter_from_dict(data)
 
 
@@ -460,8 +482,7 @@ def save_search_filter(
     search_filter: JobSearchFilter,
     path: Path | str | None = None,
 ) -> Path:
-    """把筛选条件写回配置文件（camelCase，空值留空串/空数组）。"""
-    p = filter_path(path)
+    """把筛选条件写回状态库（camelCase，空值留空串/空数组）。返回库路径。"""
     data = {
         "query": search_filter.query,
         "city": search_filter.city,
@@ -476,5 +497,4 @@ def save_search_filter(
         "stage": list(search_filter.stage),
         "pageSize": search_filter.page_size,
     }
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return p
+    return boss_db.doc_set(boss_db.DOC_SEARCH_FILTER, data, path)

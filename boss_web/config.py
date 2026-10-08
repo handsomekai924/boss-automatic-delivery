@@ -1,4 +1,8 @@
-"""网页控制台的路径与默认参数。"""
+"""网页控制台的路径与默认参数。
+
+状态（登录态 / 搜索条件 / stoken / LLM 配置 / 简历 / 分析 / 职位）全在
+状态库 ``data/boss.db`` 里，见 :mod:`boss_db`；这里只留静态资源与运行参数。
+"""
 
 from __future__ import annotations
 
@@ -7,11 +11,8 @@ from pathlib import Path
 #: 项目根目录（``F:\boss``），与 cwd 无关
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-#: 运行时数据（简历 / 分析结果 / LLM 配置）——gitignore 掉
+#: 运行时数据目录（状态库 ``boss.db`` 所在处）——gitignore 掉
 DATA_DIR = PROJECT_ROOT / "data"
-RESUMES_DIR = DATA_DIR / "resumes"
-ANALYSES_DIR = DATA_DIR / "analyses"
-LLM_CONFIG_PATH = DATA_DIR / "llm_config.json"
 
 #: 静态资源
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -35,9 +36,3 @@ LLM_TEMPERATURE = 0.7
 LLM_MAX_TOKENS = 2048
 #: 单次请求超时（秒）
 LLM_TIMEOUT = 120.0
-
-
-def ensure_data_dirs() -> None:
-    """把运行时目录建出来（幂等）。"""
-    for path in (DATA_DIR, RESUMES_DIR, ANALYSES_DIR):
-        path.mkdir(parents=True, exist_ok=True)

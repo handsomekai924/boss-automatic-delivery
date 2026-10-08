@@ -6,6 +6,10 @@ dist/
 dist-firefox/
 release/
 
+# Python 缓存
+__pycache__/
+*.py[cod]
+
 # IDE / 编辑器
 .idea/
 .vscode/
@@ -22,14 +26,15 @@ Thumbs.db
 .scratch/
 docs/
 
-# 其他
-session.json
+# 用户点名的导出物（`python -m boss_filter export --out filters.json` 的示例名）
 filters.json
-stoken.json
-jobs.db
-search_filter.json
+
+# 真浏览器配置（CDP 取 __zp_stoken__ 用，动了 Chrome 就废）
 .chrome_profile/
 
-# Web 控制台运行时数据
+# 职位库旧档 / 回滚副本（数据已进 data/boss.db，核对后自行删）
+jobs.db
+jobs.db.migrated
+
+# Web 控制台运行时数据（状态库 boss.db 所在处；llm_config 之类的旧账本也落在这里面）
 data/
-llm_config.json

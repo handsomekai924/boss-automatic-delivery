@@ -3,7 +3,7 @@
 每拿完一页就调 :meth:`JobStore.save_page`——**清洗和入库是同一步**，
 不做「先攒完再批量写」。这样中途断网/被风控，已到手的页也已经落盘。
 
-两张表：
+两张表（DDL 在 :mod:`boss_db`，跟登录态/筛选条件同一个库）：
 
 ``jobs``
     职位主表，主键 ``encrypt_job_id``（接口的全站唯一 id）。
@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from . import config as C
+import boss_db
+
 from .models import Job, PageResult
 
 logger = logging.getLogger(__name__)
@@ -43,57 +44,6 @@ class SaveOutcome:
     def total(self) -> int:
         return self.inserted + self.updated
 
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS jobs (
-    encrypt_job_id     TEXT PRIMARY KEY,
-    job_name           TEXT NOT NULL,
-    brand_name         TEXT NOT NULL,
-    location           TEXT NOT NULL DEFAULT '',
-    salary_desc        TEXT NOT NULL DEFAULT '',
-    job_experience     TEXT NOT NULL DEFAULT '',
-    job_degree         TEXT NOT NULL DEFAULT '',
-    brand_industry     TEXT NOT NULL DEFAULT '',
-    brand_scale_name   TEXT NOT NULL DEFAULT '',
-    city_name          TEXT NOT NULL DEFAULT '',
-    area_district      TEXT NOT NULL DEFAULT '',
-    business_district  TEXT NOT NULL DEFAULT '',
-    brand_stage_name   TEXT NOT NULL DEFAULT '',
-    job_labels         TEXT NOT NULL DEFAULT '[]',
-    skills             TEXT NOT NULL DEFAULT '[]',
-    welfare_list       TEXT NOT NULL DEFAULT '[]',
-    boss_name          TEXT NOT NULL DEFAULT '',
-    boss_title         TEXT NOT NULL DEFAULT '',
-    expect_id          TEXT NOT NULL DEFAULT '',
-    job_type           INTEGER NOT NULL DEFAULT 0,
-    job_valid_status   INTEGER NOT NULL DEFAULT 1,
-    security_id        TEXT NOT NULL DEFAULT '',
-    lid                TEXT NOT NULL DEFAULT '',
-    page               INTEGER NOT NULL DEFAULT 0,
-    raw_json           TEXT NOT NULL DEFAULT '',
-    fetched_at         TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_jobs_brand  ON jobs(brand_name);
-CREATE INDEX IF NOT EXISTS idx_jobs_city   ON jobs(city_name);
-CREATE INDEX IF NOT EXISTS idx_jobs_page   ON jobs(page);
-CREATE INDEX IF NOT EXISTS idx_jobs_salary ON jobs(salary_desc);
-
-CREATE TABLE IF NOT EXISTS fetch_pages (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    page           INTEGER NOT NULL,
-    raw_count      INTEGER NOT NULL DEFAULT 0,
-    kept_count     INTEGER NOT NULL DEFAULT 0,
-    dropped_count  INTEGER NOT NULL DEFAULT 0,
-    inserted_count INTEGER NOT NULL DEFAULT 0,
-    updated_count  INTEGER NOT NULL DEFAULT 0,
-    has_more       INTEGER NOT NULL DEFAULT 0,
-    note           TEXT NOT NULL DEFAULT '',
-    fetched_at     TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_fetch_pages_page ON fetch_pages(page);
-"""
 
 _INSERT_JOB = """
 INSERT INTO jobs (
@@ -148,21 +98,22 @@ INSERT INTO fetch_pages (
 
 
 class JobStore:
-    """SQLite 职位库。
+    """状态库里的职位表。
 
-    :param path: 数据库文件路径；``":memory:"`` 走内存库（测试用）
+    :param path: 库文件路径；省略 = ``BOSS_DB`` = ``data/boss.db``（调用时才解析，
+        所以测试只改一个环境变量就能全局隔离）。``":memory:"`` 走内存库（测试用）。
     """
 
-    def __init__(self, path: Path | str = C.DEFAULT_DB_PATH) -> None:
-        if str(path) == ":memory:":
-            self.path = Path(":memory:")
+    def __init__(self, path: Path | str | None = None) -> None:
+        self.path = boss_db.resolve_db_path(path)
+        if str(self.path) == ":memory:":
+            # 内存库必须跟 doc 助手共用一个连接，否则各看各的空库
+            self._conn = boss_db.acquire(self.path)
+            self._owns_conn = False
         else:
-            self.path = Path(path)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path))
-        self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+            # 文件库各自开连接：web 线程池会并发建 JobStore，共用一个连接不安全
+            self._conn = boss_db.connect(self.path)
+            self._owns_conn = True
 
     # ------------------------------------------------------------------ #
     # 写入
@@ -334,7 +285,9 @@ class JobStore:
     # ------------------------------------------------------------------ #
 
     def close(self) -> None:
-        self._conn.close()
+        if self._owns_conn:
+            self._conn.close()
+        # :memory: 是跟 doc 助手共享的连接，留着给下一个使用者
 
     def __enter__(self) -> "JobStore":
         return self
@@ -422,8 +375,8 @@ def _now() -> str:
 
 
 def open_store(path: Path | str | None = None) -> JobStore:
-    """按默认路径（或指定路径）打开职位库。"""
-    return JobStore(path or C.DEFAULT_DB_PATH)
+    """按默认库（或指定路径）打开职位表。省略 ``path`` 就是 ``BOSS_DB`` / ``data/boss.db``。"""
+    return JobStore(path)
 
 
 def saved_jobs(store: JobStore, results: Sequence[PageResult]) -> int:

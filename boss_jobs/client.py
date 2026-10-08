@@ -1,7 +1,7 @@
 """职位列表的线上接口客户端。
 
 调的是真实 wapi 路径（见 :mod:`boss_jobs.config`），不是界面模拟。
-登录态复用 ``boss_login`` 落盘的 Cookie（``session.json``）——
+登录态复用 ``boss_login`` 落盘的 Cookie（状态库 ``doc('session')``）——
 职位列表**要登录**，Cookie 过期时接口回 code 7。
 
 核心是 :meth:`JobClient.crawl`：**抓一页 → 立刻清洗 → 立刻入库 → 睡够间隔
@@ -417,7 +417,7 @@ def http_from_session(
     ``__zp_stoken__``（安全网关令牌）的取值顺序：
 
     1. 显式传进来的 ``stoken``
-    2. ``session.json`` 的 ``cookies.__zp_stoken__``
+    2. ``doc('session')`` 的 ``cookies.__zp_stoken__``
     3. 环境变量 :data:`config.STOKEN_ENV`（``BOSS_ZP_STOKEN``）
 
     都没有就**先不带**——搜索类接口会回 code 37，由
@@ -426,12 +426,15 @@ def http_from_session(
     """
     from boss_login.session import load_session  # 延迟导入，避免硬依赖
 
-    path = Path(session_path) if session_path else C.DEFAULT_SESSION_PATH
+    import boss_db
+
+    # None → BOSS_DB → data/boss.db（调用时才解析，测试只改一个环境变量就隔离）
+    path = boss_db.resolve_db_path(session_path)
     stored = load_session(path)
     if stored.is_empty:
         raise JobApiError(
             7,
-            f"本地没有登录态：{path} 不存在、为空，或 token/Cookie 都没有。"
+            f"本地没有登录态：状态库 {path} 里没有，或 token/Cookie 都没有。"
             f"先跑 `python -m boss_login login` 落一份。",
         )
 
@@ -440,7 +443,7 @@ def http_from_session(
         if hasattr(sess, "cookies") and hasattr(sess.cookies, "set"):
             sess.cookies.set(name, value)
 
-    # 取值顺序：显式参数 → session.json → 环境变量。先定序再落盘，
+    # 取值顺序：显式参数 → doc('session') → 环境变量。先定序再落盘，
     # 这样显式传进来的一定盖得过会话里旧的那份。
     from .stoken import put_cookie  # 延迟导入
 
@@ -472,17 +475,21 @@ def create_client(
 
     ``auto_stoken=True``（默认）时挂上 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`：
     每次搜索前判一次 ``__zp_stoken__`` 过期，过期了自动拉 Chrome（CDP）换新并
-    落盘（``stoken.json`` + 镜像进 ``session.json``）。这是**真浏览器**自算，
+    落盘（``doc('stoken')`` + 镜像进 ``doc('session')``）。这是**真浏览器**自算，
     不是 Node 硬算——后者指纹对不上，服务端不认，见 :mod:`boss_jobs.cdp_stoken`。
     """
+    import boss_db
+
     http = http_from_session(session_path, stoken=stoken)
     provider = None
     if auto_stoken:
         from .cdp_stoken import CdpStokenProvider  # 延迟导入
 
+        # create_client 总要镜像一份回登录态；None 也要解析到 BOSS_DB，
+        # 不能靠 CdpStokenProvider 的「不给就不镜像」契约。
         provider = CdpStokenProvider(
             http=http,
-            session_path=session_path or C.DEFAULT_SESSION_PATH,
+            session_path=boss_db.resolve_db_path(session_path),
         )
     return JobClient(
         base_url=base_url,

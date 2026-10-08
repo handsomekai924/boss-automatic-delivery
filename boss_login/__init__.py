@@ -37,7 +37,7 @@ from .errors import (
 )
 from .models import ApiResponse, LoginResult, SmsCodeTicket, UserInfo, mask_phone
 from .session import (
-    DEFAULT_SESSION_PATH,
+    DEFAULT_DB_PATH,
     StoredSession,
     clear_session,
     load_session,
@@ -101,7 +101,7 @@ __all__ = [
     # 常量
     "BASE_URL",
     "CODE_LENGTH",
-    "DEFAULT_SESSION_PATH",
+    "DEFAULT_DB_PATH",
     "ENDPOINTS",
     "RESEND_COOLDOWN_SECONDS",
     "SMS_SCENES",
@@ -111,12 +111,13 @@ __all__ = [
 
 def create_client(
     *,
-    session_path: Path | str = DEFAULT_SESSION_PATH,
+    session_path: Path | str | None = None,
     load_stored: bool = True,
     **client_kwargs,
 ) -> ZhipinLoginClient:
     """创建客户端，并把上次保存的 Cookie / token 注入会话。
 
+    :param session_path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
     :param load_stored: 为 ``False`` 时忽略本地登录态，强制走新的登录流程。
     """
     client = ZhipinLoginClient(**client_kwargs)
@@ -139,9 +140,12 @@ def persist_login(
     client: ZhipinLoginClient,
     result: LoginResult,
     *,
-    session_path: Path | str = DEFAULT_SESSION_PATH,
+    session_path: Path | str | None = None,
 ) -> Path:
-    """把登录结果落盘（token + Cookie + 脱敏手机号），供下次复用。"""
+    """把登录结果落盘到状态库（token + Cookie + 脱敏手机号），供下次复用。
+
+    :param session_path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    """
     cookies = result.cookies or _cookies_of(client)
     return save_session(
         StoredSession(

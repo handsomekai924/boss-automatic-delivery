@@ -1,4 +1,4 @@
-"""LLM 配置存取：``data/llm_config.json``（gitignore），API 回显时打码。
+"""LLM 配置存取：状态库 ``data/boss.db`` 的 ``doc('llm_config')``，API 回显时打码。
 
 可配置的只有 **api_key / base_url / model** 三项。
 温度、max_tokens、超时是系统固定参数（见 :mod:`boss_web.config`），
@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import sqlite3
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
+
+import boss_db
 
 from .. import config as C
 
@@ -34,7 +36,7 @@ class LLMConfig:
         return bool(self.api_key and self.base_url and self.model)
 
     def normalize(self) -> "LLMConfig":
-        """把采样参数拉回系统常量（历史配置文件里可能还留着旧值）。"""
+        """把采样参数拉回系统常量（历史配置里可能还留着旧值）。"""
         return LLMConfig(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -70,34 +72,36 @@ def mask_key(key: str) -> str:
 
 
 def load_config(path: Path | str | None = None) -> LLMConfig:
-    p = Path(path or C.LLM_CONFIG_PATH)
-    if not p.exists():
+    """读状态库里的 LLM 配置；没有 / 坏了 → 空配置（不报错）。
+
+    :param path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    """
+    try:
+        raw = boss_db.doc_get_raw(boss_db.DOC_LLM_CONFIG, path)
+    except (OSError, sqlite3.Error) as exc:
+        logger.warning("状态库打不开，LLM 配置按空配置处理：%s", exc)
+        return LLMConfig()
+    if raw is None:
         return LLMConfig()
     try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        data = json.loads(raw)
+    except ValueError as exc:
         logger.warning("LLM 配置读不出来，按空配置处理：%s", exc)
         return LLMConfig()
-    if not isinstance(raw, dict):
+    if not isinstance(data, dict):
         return LLMConfig()
     known = {f.name for f in fields(LLMConfig)}
-    return LLMConfig(**{k: v for k, v in raw.items() if k in known}).normalize()
+    return LLMConfig(**{k: v for k, v in data.items() if k in known}).normalize()
 
 
 def save_config(cfg: LLMConfig, path: Path | str | None = None) -> Path:
-    p = Path(path or C.LLM_CONFIG_PATH)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(cfg.normalize().to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:  # pragma: no cover - Windows
-        pass
-    os.replace(tmp, p)
-    logger.info("LLM 配置已保存到 %s", p)
-    return p
+    """写回状态库；返回库路径。
+
+    :param path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    """
+    resolved = boss_db.doc_set(boss_db.DOC_LLM_CONFIG, cfg.normalize().to_dict(), path)
+    logger.info("LLM 配置已保存到 %s", resolved)
+    return resolved
 
 
 #: 用户可改的字段；其余一律忽略

@@ -105,10 +105,10 @@ def logout() -> dict[str, Any]:
         client.logout()
     except Exception:  # noqa: BLE001 - 远端登出失败也要清本地
         pass
-    from boss_login.session import DEFAULT_SESSION_PATH, clear_session
+    from boss_login.session import clear_session
 
     try:
-        clear_session(DEFAULT_SESSION_PATH)
+        clear_session()   # 省略 = BOSS_DB / data/boss.db
     except Exception:  # noqa: BLE001
         pass
     return {"logged_in": False}

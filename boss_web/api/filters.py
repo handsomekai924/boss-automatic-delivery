@@ -1,4 +1,4 @@
-"""筛选条件：选项表 + ``search_filter.json`` 读写。"""
+"""筛选条件：选项表 + 库里的搜索条件读写。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 class SearchFilterBody(BaseModel):
-    """与 ``search_filter.json`` 同款字段（空 = 不限）。"""
+    """与库里 ``doc('search_filter')`` 同款字段（空 = 不限）。"""
 
     query: str = ""
     city: str = ""

@@ -6,7 +6,7 @@ import { fmtTime } from "../ui.js";
 export async function renderHome(root) {
   root.innerHTML = `
     <h1 class="hero-title">星舰<span class="grad">控制台</span></h1>
-    <p class="hero-sub">登录 · 抓取职位 · 简历匹配 · 模型调用 —— 四条航段，一张面板。所有能力走真实接口，滑块由你本人拖。</p>
+    <p class="hero-sub">登录 · 抓取职位 · 简历匹配 · 模型调用 —— 四条航段，一张面板。</p>
 
     <div class="bento" id="bento">
       <div class="card span-5 lift" id="card-session">
@@ -25,7 +25,7 @@ export async function renderHome(root) {
       <div class="card span-4 lift" id="card-jobs">
         <div class="card-head">
           <h3 class="card-title">职位库</h3>
-          <span class="card-sub" id="jobs-sub">jobs.db</span>
+          <span class="card-sub" id="jobs-sub">data/boss.db</span>
         </div>
         <div class="stat-num" id="jobs-num">…</div>
         <div class="stat-label">已入库职位</div>

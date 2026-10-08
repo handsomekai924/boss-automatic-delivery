@@ -1,8 +1,8 @@
 """命令行层测试。
 
 单独成一个模块是有原因的：cli.py 曾经把一个不存在于 config 的名字导入进来
-（``from .config import DEFAULT_SESSION_PATH``），整套测试却全绿——因为没有任何
-一个测试 import 过 cli。库是对的，入口是坏的，而入口没人跑。
+（``from .config import DEFAULT_SESSION_PATH``，当时还没有这个名字），整套测试却
+全绿——因为没有任何一个测试 import 过 cli。库是对的，入口是坏的，而入口没人跑。
 这里把每个子命令都真的执行一遍，并核对退出码。
 """
 
@@ -27,7 +27,7 @@ def run(argv: list[str]) -> int:
 
 
 def base(server: str, session: Path, *rest: str) -> list[str]:
-    return ["--base-url", server, "--session-file", str(session), *rest]
+    return ["--base-url", server, "--db", str(session), *rest]
 
 
 def seed_code(server: str, phone: str, **kwargs) -> str:
@@ -54,8 +54,8 @@ def code_from_store(phone: str):
 
 @pytest.fixture
 def session(tmp_path: Path) -> Path:
-    # 指向临时文件，避免碰到真实用户的 ~/.boss_login/session.json
-    return tmp_path / "session.json"
+    # 指到临时状态库，避免碰到真实的 data/boss.db
+    return tmp_path / "boss.db"
 
 
 # --------------------------------------------------------------------------- #
@@ -93,34 +93,36 @@ class TestEntrypoint:
         )
         assert args.timeout == 5.0
         assert args.base_url == "http://127.0.0.1:9"
-        # 没给的仍然走顶层默认
-        assert args.session_file
+        # 没给的仍然是「不覆盖」——让 BOSS_DB / 默认库说了算
+        assert args.db is None
 
-    def test_default_session_path_is_importable(self):
+    def test_default_db_path_is_importable(self):
         """这个常量曾在家门口导错模块，直接钉住它。"""
-        from boss_login.cli import DEFAULT_SESSION_PATH
-        from boss_login.session import DEFAULT_SESSION_PATH as real
+        from boss_login.cli import DEFAULT_DB_PATH
+        from boss_login.session import DEFAULT_DB_PATH as real
 
-        assert DEFAULT_SESSION_PATH == real
+        assert DEFAULT_DB_PATH == real
 
-    def test_default_session_lives_in_project_root(self):
-        """登录态落在项目根目录，按包位置定位，不看 cwd。
+    def test_default_db_lives_in_project_data_dir(self):
+        """状态库落在项目根的 data/ 下，按包位置定位，不看 cwd。
 
         曾经在 ``~/.boss_login/`` 下，换个目录跑 ``python -m boss_login`` 就会
         读写错文件——whoami 报「本地没有登录态」，而登录明明刚成功。
         """
         import boss_login
-        from boss_login.session import DEFAULT_SESSION_PATH, PROJECT_ROOT
+        import boss_db
+        from boss_login.session import DEFAULT_DB_PATH, PROJECT_ROOT
 
         package_dir = Path(boss_login.__file__).resolve().parent
 
         assert PROJECT_ROOT == package_dir.parent, "PROJECT_ROOT 应该是包目录的上一级"
-        assert DEFAULT_SESSION_PATH == PROJECT_ROOT / "session.json"
-        assert DEFAULT_SESSION_PATH.is_absolute()
+        assert DEFAULT_DB_PATH == boss_db.DEFAULT_DB_PATH
+        assert DEFAULT_DB_PATH == PROJECT_ROOT / "data" / "boss.db"
+        assert DEFAULT_DB_PATH.is_absolute()
         # 不再藏在 home 下
-        assert not str(DEFAULT_SESSION_PATH).startswith(str(Path.home()))
+        assert not str(DEFAULT_DB_PATH).startswith(str(Path.home()))
         # 跟 cwd 无关：路径是由 __file__ 推出来的常量
-        assert str(DEFAULT_SESSION_PATH).startswith(str(package_dir.parent))
+        assert str(DEFAULT_DB_PATH).startswith(str(package_dir.parent))
 
 
 # --------------------------------------------------------------------------- #
@@ -140,16 +142,20 @@ class TestLoginCommand:
 
         # 落盘内容可被库读回来。真实站点鉴权靠 Cookie（响应体里没有 token），
         # 假服务端照办，所以凭证在 cookies 里。
-        stored = json.loads(session.read_text(encoding="utf-8"))
-        assert stored["phone_masked"] == "138****8000"
-        assert stored["token"] == ""
-        assert stored["cookies"]["zp_at"].startswith("mock-token-")
+        from boss_login.session import load_session
+
+        stored = load_session(session)
+        assert stored.phone_masked == "138****8000"
+        assert stored.token == ""
+        assert stored.cookies["zp_at"].startswith("mock-token-")
 
     def test_no_save_skips_writing_session(self, server, session):
         code = seed_code(server, PHONE)
         argv = base(server, session, "login", "--phone", PHONE, "--code", code, "--no-save")
         assert run(argv) == cli.EXIT_OK
-        assert not session.exists()
+        from boss_login.session import has_session_row
+
+        assert has_session_row(session) is False
 
     def test_eof_at_prompt_cancels_cleanly(self, server, session, monkeypatch, capsys):
         """交互式输入被中断时应干净退出，不是抛栈。"""
@@ -367,14 +373,15 @@ class TestSessionCommands:
         assert "本地没有登录态" in out
         # 一句话「没有登录态」没法排查：得说清查了哪儿、为什么不算登录
         assert str(session) in out
-        assert "文件不存在" in out
+        assert "库里没有登录态" in out
 
-    def test_whoami_on_empty_session_file(self, server, session, capsys):
-        session.parent.mkdir(parents=True, exist_ok=True)
-        session.write_text("{}", encoding="utf-8")
+    def test_whoami_on_empty_session_row(self, server, session, capsys):
+        from boss_login.session import StoredSession, save_session
+
+        save_session(StoredSession(), session)
         assert run(base(server, session, "whoami")) == cli.EXIT_ERROR
         out = capsys.readouterr().out
-        assert "文件存在" in out
+        assert "库里有登录态" in out
 
     def test_whoami_when_server_rejects_stale_session(self, server, session, capsys):
         """本地认、服务端不认——得说清是「需要重新登录」，不是「没有登录态」。"""
@@ -396,12 +403,15 @@ class TestSessionCommands:
         assert "138****8000" in out
 
     def test_logout_clears_session_and_server_state(self, server, session):
+        from boss_login.session import has_session_row, load_session
+
         code = seed_code(server, PHONE)
         run(base(server, session, "login", "--phone", PHONE, "--code", code))
-        assert session.exists()
+        assert has_session_row(session)
 
         assert run(base(server, session, "logout")) == cli.EXIT_OK
-        assert not session.exists()
+        assert has_session_row(session) is False
+        assert load_session(session).is_empty
         assert run(base(server, session, "whoami")) == cli.EXIT_ERROR
 
     def test_logout_when_nothing_saved(self, server, session, capsys):

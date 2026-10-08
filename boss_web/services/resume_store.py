@@ -1,7 +1,8 @@
-"""简历文件与分析结果的落盘。
+"""简历原文与分析结果的落库。
 
-简历原文存 ``data/resumes/{id}.md``，解析结果存 ``{id}.json``；
-匹配分析存 ``data/analyses/{id}.json``（带职位快照，删库也能回看）。
+简历原文存 ``resume`` 行的 ``content_md``，解析结果整包进 ``meta``；
+匹配分析存 ``analysis`` 行（带职位快照，删库也能回看）。库是
+``data/boss.db``——跟登录态 / 搜索条件 / 职位同一个。
 """
 
 from __future__ import annotations
@@ -12,10 +13,9 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
 
-from .. import config as C
+import boss_db
 
 logger = logging.getLogger(__name__)
 
@@ -164,131 +164,159 @@ def parse_resume(text: str, *, resume_id: str, title: str, source_path: str, cre
 
 
 # --------------------------------------------------------------------------- #
-# 存储
+# 存储（状态库 data/boss.db）
 # --------------------------------------------------------------------------- #
 
 
-def _resume_path(resume_id: str) -> Path:
-    return C.RESUMES_DIR / f"{resume_id}.md"
+def _source_name(filename: str) -> str:
+    return re.sub(r"[^\w.\-]+", "_", filename or "resume.md")[:60] or "resume.md"
 
 
-def _meta_path(resume_id: str) -> Path:
-    return C.RESUMES_DIR / f"{resume_id}.json"
+def _draft_from_row(row: Any) -> ResumeDraft:
+    """``resume`` 行 → :class:`ResumeDraft`（章节等嵌套字段在 ``meta`` 里）。"""
+    resume_id = str(row["resume_id"])
+    try:
+        meta = json.loads(str(row["meta"] or "{}"))
+    except ValueError:
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    return parse_resume(
+        str(row["content_md"] or ""),
+        resume_id=resume_id,
+        title=str(row["title"] or meta.get("title") or resume_id),
+        source_path=str(meta.get("source_path") or f"db://{resume_id}"),
+        created_at=float(row["created_at"] or 0.0),
+    )
 
 
 def save_resume(text: str, *, filename: str = "resume.md") -> ResumeDraft:
-    C.ensure_data_dirs()
     resume_id = "rs_" + uuid.uuid4().hex[:10]
-    safe = re.sub(r"[^\w.\-]+", "_", filename or "resume.md")[:60] or "resume.md"
+    safe = _source_name(filename)
     created = time.time()
-    path = _resume_path(resume_id)
-    path.write_text(text, encoding="utf-8")
     draft = parse_resume(
         text,
         resume_id=resume_id,
         title=safe,
-        source_path=str(path),
+        source_path=f"db://{resume_id}",
         created_at=created,
     )
-    _meta_path(resume_id).write_text(
-        json.dumps(draft.to_dict(include_raw=False), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    conn = boss_db.acquire()
+    with conn:
+        conn.execute(
+            "INSERT INTO resume (resume_id, title, source_name, created_at, content_md, meta) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                resume_id,
+                draft.title,
+                safe,
+                created,
+                text,
+                json.dumps(draft.to_dict(include_raw=False), ensure_ascii=False),
+            ),
+        )
     return draft
 
 
 def load_resume(resume_id: str) -> ResumeDraft:
-    path = _resume_path(resume_id)
-    if not path.exists():
+    conn = boss_db.acquire()
+    row = conn.execute(
+        "SELECT * FROM resume WHERE resume_id = ?", (resume_id,)
+    ).fetchone()
+    if row is None:
         raise FileNotFoundError(resume_id)
-    raw = path.read_text(encoding="utf-8")
-    meta_path = _meta_path(resume_id)
-    meta: dict[str, Any] = {}
-    if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except ValueError:
-            meta = {}
-    draft = parse_resume(
-        raw,
-        resume_id=resume_id,
-        title=str(meta.get("title") or resume_id),
-        source_path=str(path),
-        created_at=float(meta.get("created_at") or path.stat().st_mtime),
-    )
-    return draft
+    return _draft_from_row(row)
 
 
 def list_resumes() -> list[dict[str, Any]]:
-    C.ensure_data_dirs()
+    conn = boss_db.acquire()
+    rows = conn.execute(
+        "SELECT * FROM resume ORDER BY created_at DESC"
+    ).fetchall()
     items: list[dict[str, Any]] = []
-    for meta_file in sorted(C.RESUMES_DIR.glob("rs_*.json"), reverse=True):
+    for row in rows:
         try:
-            data = json.loads(meta_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        data.pop("raw", None)
-        items.append(data)
+            meta = json.loads(str(row["meta"] or "{}"))
+        except ValueError:
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.pop("raw", None)
+        meta.setdefault("resume_id", str(row["resume_id"]))
+        meta.setdefault("title", str(row["title"] or ""))
+        meta.setdefault("created_at", float(row["created_at"] or 0.0))
+        items.append(meta)
     return items
 
 
 def delete_resume(resume_id: str) -> bool:
-    existed = _resume_path(resume_id).exists() or _meta_path(resume_id).exists()
-    for p in (_resume_path(resume_id), _meta_path(resume_id)):
-        try:
-            p.unlink()
-        except OSError:
-            pass
-    return existed
+    conn = boss_db.acquire()
+    with conn:
+        cur = conn.execute("DELETE FROM resume WHERE resume_id = ?", (resume_id,))
+    return cur.rowcount > 0
 
 
 def save_analysis(payload: dict[str, Any]) -> str:
-    C.ensure_data_dirs()
     analysis_id = str(payload.get("analysis_id") or ("an_" + uuid.uuid4().hex[:10]))
     payload["analysis_id"] = analysis_id
-    path = C.ANALYSES_DIR / f"{analysis_id}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    matches = payload.get("matches") or []
+    scores = [m.get("match_score") or 0 for m in matches if isinstance(m, dict)]
+    scores = [s for s in scores if isinstance(s, (int, float))]
+    llm = payload.get("llm") or {}
+    conn = boss_db.acquire()
+    with conn:
+        conn.execute(
+            "INSERT INTO analysis (analysis_id, resume_id, resume_title, created_at, "
+            "status, model, base_url, job_count, top_score, payload) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                analysis_id,
+                str(payload.get("resume_id") or ""),
+                str(payload.get("resume_title") or ""),
+                float(payload.get("created_at") or time.time()),
+                str(payload.get("status") or "done"),
+                str(llm.get("model") or ""),
+                str(llm.get("base_url") or ""),
+                len(matches),
+                float(max(scores) if scores else 0.0),
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
     return analysis_id
 
 
 def load_analysis(analysis_id: str) -> dict[str, Any]:
-    path = C.ANALYSES_DIR / f"{analysis_id}.json"
-    if not path.exists():
+    conn = boss_db.acquire()
+    row = conn.execute(
+        "SELECT payload FROM analysis WHERE analysis_id = ?", (analysis_id,)
+    ).fetchone()
+    if row is None:
         raise FileNotFoundError(analysis_id)
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(str(row["payload"]))
 
 
 def list_analyses() -> list[dict[str, Any]]:
-    C.ensure_data_dirs()
-    items: list[dict[str, Any]] = []
-    for path in sorted(C.ANALYSES_DIR.glob("an_*.json"), reverse=True):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        items.append(
-            {
-                "analysis_id": data.get("analysis_id", path.stem),
-                "resume_id": data.get("resume_id"),
-                "resume_title": data.get("resume_title"),
-                "created_at": data.get("created_at"),
-                "job_count": len(data.get("matches") or []),
-                "top_score": _top_score(data),
-                "status": data.get("status", "done"),
-            }
-        )
-    return items
-
-
-def _top_score(data: dict[str, Any]) -> float:
-    scores = [m.get("match_score") or 0 for m in (data.get("matches") or [])]
-    return max(scores) if scores else 0.0
+    conn = boss_db.acquire()
+    rows = conn.execute(
+        "SELECT analysis_id, resume_id, resume_title, created_at, job_count, "
+        "top_score, status FROM analysis ORDER BY created_at DESC"
+    ).fetchall()
+    return [
+        {
+            "analysis_id": str(row["analysis_id"]),
+            "resume_id": row["resume_id"],
+            "resume_title": row["resume_title"],
+            "created_at": row["created_at"],
+            "job_count": int(row["job_count"] or 0),
+            "top_score": float(row["top_score"] or 0.0),
+            "status": row["status"],
+        }
+        for row in rows
+    ]
 
 
 def delete_analysis(analysis_id: str) -> bool:
-    path = C.ANALYSES_DIR / f"{analysis_id}.json"
-    try:
-        path.unlink()
-        return True
-    except OSError:
-        return False
+    conn = boss_db.acquire()
+    with conn:
+        cur = conn.execute("DELETE FROM analysis WHERE analysis_id = ?", (analysis_id,))
+    return cur.rowcount > 0

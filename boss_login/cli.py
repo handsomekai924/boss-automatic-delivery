@@ -15,8 +15,9 @@ import argparse
 import json
 import logging
 import sys
-from pathlib import Path
 from typing import Any
+
+import boss_db
 
 from . import __version__, create_client, persist_login
 from .client import normalize_phone
@@ -31,7 +32,7 @@ from .errors import (
     TransportError,
     ValidationError,
 )
-from .session import DEFAULT_SESSION_PATH, clear_session, load_session
+from .session import DEFAULT_DB_PATH, clear_session, has_session_row, load_session
 from .verify import (
     SliderChallenge,
     SliderHelperError,
@@ -111,9 +112,9 @@ def _add_global_options(parser: argparse.ArgumentParser, *, suppress_defaults: b
         help="输出调试日志（含请求重试细节）",
     )
     parser.add_argument(
-        "--session-file",
-        default=str(DEFAULT_SESSION_PATH) if not suppress_defaults else default,
-        help=f"登录态文件路径（默认 {DEFAULT_SESSION_PATH}）",
+        "--db",
+        default=None if not suppress_defaults else default,
+        help=f"状态库路径（默认 {DEFAULT_DB_PATH}，可用环境变量 BOSS_DB 覆盖）",
     )
     parser.add_argument(
         "--timeout",
@@ -167,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         endpoints["login_by_sms"] = args.endpoint_login
 
     client = create_client(
-        session_path=args.session_file,
+        session_path=args.db,
         timeout=args.timeout,
         endpoints=endpoints or None,
         **({"base_url": args.base_url} if args.base_url else {}),
@@ -287,29 +288,29 @@ def _cmd_login(args: argparse.Namespace, client: Any) -> int:
     if args.no_save:
         print("  本地登录态未保存（--no-save）")
     else:
-        path = persist_login(client, result, session_path=args.session_file)
+        path = persist_login(client, result, session_path=args.db)
         print(f"  登录态已保存至 {path}")
     return EXIT_OK
 
 
 def _cmd_whoami(args: argparse.Namespace, client: Any) -> int:
-    path = Path(args.session_file) if args.session_file else DEFAULT_SESSION_PATH
-    stored = load_session(args.session_file)
+    path = boss_db.resolve_db_path(args.db)
+    stored = load_session(args.db)
 
     if not client.is_logged_in():
-        # 一句话「没有登录态」没法排查：是文件没落盘，还是落了但凭证不认？
+        # 一句话「没有登录态」没法排查：是库里没落，还是落了但凭证不认？
         print("✗ 本地没有登录态，请先执行：python -m boss_login login --phone <手机号>")
         print(f"  查过的位置：{path}")
-        if not path.exists():
-            print("  原因：文件不存在——登录流程没有落盘。")
+        if not has_session_row(args.db):
+            print("  原因：库里没有登录态——登录流程没有落盘。")
             print("  多半是 login 那步就抛了错（比如接口回了成功却没换到凭证）。")
             print("  把 login 命令的完整输出贴出来，对着响应形状改。")
         elif stored.is_empty:
-            print("  原因：文件存在，但里面既没有 token 也没有 Cookie。")
+            print("  原因：库里有登录态，但里面既没有 token 也没有 Cookie。")
         else:
             names = sorted(stored.cookies)
             print(
-                f"  原因：文件里 token={'有' if stored.token else '无'}、"
+                f"  原因：库里 token={'有' if stored.token else '无'}、"
                 f"Cookie={names or '（无）'}，但没有一个是已知鉴权 Cookie。"
             )
             print(f"  已知鉴权 Cookie 名：{list(AUTH_COOKIES)}")
@@ -321,7 +322,7 @@ def _cmd_whoami(args: argparse.Namespace, client: Any) -> int:
     except SessionExpired as exc:
         print("✗ 本地有登录态，但服务端已不认（需要重新登录）")
         print(f"  服务端返回：{exc}")
-        print(f"  登录态文件：{path}")
+        print(f"  状态库：{path}")
         return EXIT_ERROR
 
     print("✓ 当前登录用户")
@@ -341,7 +342,7 @@ def _cmd_logout(args: argparse.Namespace, client: Any) -> int:
             cookies.clear()
     else:
         client.logout()
-    removed = clear_session(args.session_file)
+    removed = clear_session(args.db)
     print("✓ 已退出登录" + ("，本地登录态已清除" if removed else "（本地本就没有登录态）"))
     return EXIT_OK
 

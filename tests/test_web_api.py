@@ -5,14 +5,12 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from boss_web import config as C
 from boss_web import create_app
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    # LLM 配置读写指到临时文件，别把真实的 data/llm_config.json 冲掉
-    monkeypatch.setattr(C, "LLM_CONFIG_PATH", tmp_path / "llm_config.json")
+def client():
+    # 状态库由 conftest 的 isolated_db 统一指到 tmp_path
     return TestClient(create_app())
 
 

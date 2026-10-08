@@ -1,4 +1,7 @@
-"""LLM 配置与客户端的单元测试（离线，网络层可注入）。"""
+"""LLM 配置与客户端的单元测试（离线，网络层可注入）。
+
+配置落状态库 ``doc('llm_config')``；这里传的 ``p`` 是**库路径**。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import json
 
 import pytest
 
+import boss_db
 from boss_web import config as C
 from boss_web.services.llm_client import LLMClient, extract_json
 from boss_web.services.llm_config_store import (
@@ -53,7 +57,7 @@ def test_mask_key():
 
 
 def test_save_load_roundtrip(tmp_path):
-    p = tmp_path / "llm_config.json"
+    p = tmp_path / "boss.db"
     cfg = LLMConfig(api_key="sk-secret", base_url="https://x/v1", model="m1", temperature=0.3)
     save_config(cfg, p)
     loaded = load_config(p)
@@ -69,7 +73,7 @@ def test_save_load_roundtrip(tmp_path):
 
 
 def test_update_keeps_old_key(tmp_path):
-    p = tmp_path / "llm_config.json"
+    p = tmp_path / "boss.db"
     save_config(LLMConfig(api_key="sk-old", model="m"), p)
     cfg = update_config({"api_key": "", "model": "m2"}, p)
     assert cfg.api_key == "sk-old"
@@ -78,7 +82,7 @@ def test_update_keeps_old_key(tmp_path):
 
 def test_update_ignores_sampling_params(tmp_path):
     """温度 / max_tokens / 超时是系统固定值，传进来也要被丢掉。"""
-    p = tmp_path / "llm_config.json"
+    p = tmp_path / "boss.db"
     save_config(LLMConfig(api_key="sk-a", model="m1"), p)
     cfg = update_config(
         {
@@ -93,27 +97,26 @@ def test_update_ignores_sampling_params(tmp_path):
     assert cfg.temperature == C.LLM_TEMPERATURE
     assert cfg.max_tokens == C.LLM_MAX_TOKENS
     assert cfg.timeout == C.LLM_TIMEOUT
-    # 落盘的也是常量
-    raw = json.loads(p.read_text(encoding="utf-8"))
+    # 落库的也是常量
+    raw = boss_db.doc_get(boss_db.DOC_LLM_CONFIG, p)
     assert raw["temperature"] == C.LLM_TEMPERATURE
     assert raw["max_tokens"] == C.LLM_MAX_TOKENS
 
 
 def test_load_normalizes_legacy_values(tmp_path):
-    """历史配置文件里若写过采样参数，读出来也要被拉齐。"""
-    p = tmp_path / "llm_config.json"
-    p.write_text(
-        json.dumps(
-            {
-                "api_key": "sk-x",
-                "base_url": "https://x/v1",
-                "model": "m",
-                "temperature": 1.5,
-                "max_tokens": 99,
-                "timeout": 7.0,
-            }
-        ),
-        encoding="utf-8",
+    """历史配置里若写过采样参数，读出来也要被拉齐。"""
+    p = tmp_path / "boss.db"
+    boss_db.doc_set(
+        boss_db.DOC_LLM_CONFIG,
+        {
+            "api_key": "sk-x",
+            "base_url": "https://x/v1",
+            "model": "m",
+            "temperature": 1.5,
+            "max_tokens": 99,
+            "timeout": 7.0,
+        },
+        p,
     )
     cfg = load_config(p)
     assert cfg.temperature == C.LLM_TEMPERATURE

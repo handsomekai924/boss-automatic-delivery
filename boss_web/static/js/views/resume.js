@@ -54,7 +54,7 @@ export async function renderResume(root) {
     <div class="card mt-24 hidden" id="history-card">
       <div class="card-head">
         <h3 class="card-title">历史分析</h3>
-        <span class="card-sub">data/analyses</span>
+        <span class="card-sub">data/boss.db</span>
       </div>
       <div id="history-list"></div>
     </div>

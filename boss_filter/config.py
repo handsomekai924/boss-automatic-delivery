@@ -26,6 +26,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+import boss_db
+
 BASE_URL: Final[str] = "https://www.zhipin.com"
 
 #: 职位推荐页（``/web/geek/jobs``，即 ``.saved_web`` 存的那页）的 Referer。
@@ -117,15 +119,14 @@ HTML_OPTION_PATTERNS: Final[dict[str, str]] = {
 HTML_INDUSTRY_MARKER: Final[str] = "condition-industry-select"
 
 # --------------------------------------------------------------------------- #
-# 筛选条件配置文件
+# 搜索条件的落盘位置
 # --------------------------------------------------------------------------- #
 
 #: 项目根目录（跟 cwd 无关）
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
-#: 用户的搜索条件配置文件。**没有它就留空**（= 全部「不限」，走站点默认），
-#: 不报错。格式见 :func:`boss_filter.search.load_search_filter`。
-DEFAULT_FILTER_PATH: Final[Path] = PROJECT_ROOT / "search_filter.json"
-
-#: 想换个位置放配置文件时设它（覆盖上面的默认路径）
-FILTER_ENV: Final[str] = "BOSS_SEARCH_FILTER"
+#: 状态库路径。用户的搜索条件存在库里 ``doc('search_filter')`` 那一行
+#: （见 :mod:`boss_db`）；环境变量 ``BOSS_DB`` 可覆盖。
+#: 用户点名的 JSON 文件（``--filter my.json``）不走这里，见
+#: :func:`boss_filter.search.search_filter_from_file`。
+DEFAULT_DB_PATH: Final[Path] = boss_db.DEFAULT_DB_PATH

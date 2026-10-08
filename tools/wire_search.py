@@ -2,19 +2,21 @@
 
 跑一遍真实站点的搜索流水线，并把每一段的耗时打出来：
 
-    1. 装配会话（session.json）
+    1. 装配会话（状态库 data/boss.db 的 doc('session')）
     2. **全自动**获取 ``__zp_stoken__``（拉 Chrome，CDP，让站点自己算一枚并落盘）
     3. 拿筛选条件（boss_filter.get_filter_conditions）
-    4. 装配 JobSearchFilter（**配置文件** → 查询串）
+    4. 装配 JobSearchFilter（**库里的条件** → 查询串）
     5. fetch_search_page 抓一页搜索结果并清洗
 
-筛选条件来自配置文件 ``search_filter.json``（没有就留空 = 全部「不限」），
-命令行参数只做覆盖。``__zp_stoken__`` 的来源见 :mod:`boss_jobs.cdp_stoken`。
+筛选条件默认读状态库里那份（没有就留空 = 全部「不限」）；``--filter my.json``
+可指定一份 JSON（只读，不写库），命令行其余参数只做覆盖。
+``__zp_stoken__`` 的来源见 :mod:`boss_jobs.cdp_stoken`。
 
 用法::
 
-    python tools/wire_search.py                          # 读 search_filter.json
-    python tools/wire_search.py --query python --city 广州   # 覆盖配置里的值
+    python tools/wire_search.py                          # 读库里的搜索条件
+    python tools/wire_search.py --filter my.json         # 用这份 JSON 条件
+    python tools/wire_search.py --query python --city 广州   # 覆盖条件里的值
     python tools/wire_search.py --skip-stoken             # 只测条件装配
 """
 
@@ -22,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from dataclasses import replace
@@ -33,11 +34,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from boss_filter import (  # noqa: E402
-    DEFAULT_FILTER_PATH,
-    FILTER_ENV,
     JobSearchFilter,
     get_filter_conditions,
     load_search_filter,
+    search_filter_from_file,
 )
 from boss_filter.models import FilterConditions  # noqa: E402
 from boss_jobs import STOKEN_COOKIE, create_client  # noqa: E402
@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--filter",
         default=None,
-        help=f"搜索条件配置文件（默认 {DEFAULT_FILTER_PATH}；没有就留空 = 不限）",
+        help="本次用这份 JSON 条件（只读，不写库）；不传则用状态库里那份",
     )
     parser.add_argument("--query", default=None, help="搜索关键词（覆盖配置）")
     parser.add_argument("--city", default=None, help="城市 code 或中文名（覆盖配置）")
@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
         stoken=args.stoken or None,
         auto_stoken=not args.skip_stoken and not args.stoken,
     )
-    session_span = timer.mark("会话装配 session.json")
+    session_span = timer.mark("会话装配 状态库 doc('session')")
 
     # 2. __zp_stoken__ 全自动获取
     stoken_len = 0
@@ -203,9 +203,13 @@ def main(argv: list[str] | None = None) -> int:
         conditions = get_filter_conditions(html_path=str(ROOT / ".saved_web" / "求职_找工作_招聘信息-BOSS直聘.html"))
     filter_span = timer.mark("拿筛选条件 get_filter_conditions")
 
-    # 4. JobSearchFilter 装配：配置文件打底 + 命令行覆盖
-    base = load_search_filter(args.filter)
-    filter_file = args.filter or os.environ.get(FILTER_ENV) or str(DEFAULT_FILTER_PATH)
+    # 4. JobSearchFilter 装配：库里的条件打底 + 命令行覆盖
+    if args.filter:
+        base = search_filter_from_file(args.filter)
+        filter_file = args.filter
+    else:
+        base = load_search_filter()
+        filter_file = "库里的搜索条件"
     search_filter, build_source = build_filter(
         base,
         conditions,

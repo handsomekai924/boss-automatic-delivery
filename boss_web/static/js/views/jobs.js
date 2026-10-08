@@ -30,7 +30,7 @@ export async function renderJobs(root) {
         </div>
         <div class="flex center gap-12 mb-16">
           <label class="pill ${"on"}" id="use-search">
-            <input type="checkbox" checked hidden> 使用搜索流（走 search_filter.json）
+            <input type="checkbox" checked hidden> 使用搜索流（走库里的搜索条件）
           </label>
         </div>
         <div class="progress mb-8"><i id="crawl-bar" style="width:0%"></i></div>
