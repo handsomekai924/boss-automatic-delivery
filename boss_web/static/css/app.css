@@ -1025,7 +1025,7 @@ details.acc .acc-body {
 /* 滑块 iframe */
 .slider-frame {
   width: 100%;
-  min-height: 320px;
+  height: 460px;
   border: 1px solid var(--stroke);
   border-radius: var(--r-m);
   background: #f5f7fa;

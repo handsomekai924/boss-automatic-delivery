@@ -4,7 +4,14 @@ import { api } from "../api.js";
 import { toast, modal, el, escapeHtml } from "../ui.js";
 import { refreshBridge } from "../app.js";
 
+//: 模块级状态：整页刷新/新开标签会重新求值（false），页内路由来回切不会（保持 true）。
+//: 用它区分「刷新页面」与「页内切走再切回」——前者当放弃，后者接上原有流程。
+let bootstrapped = false;
+
 export async function renderLogin(root) {
+  const freshPageLoad = !bootstrapped;
+  bootstrapped = true;
+
   root.innerHTML = `
     <h1 class="hero-title">接入 <span class="grad">BOSS 会话</span></h1>
     <p class="hero-sub">短信验证码 + 极验滑块都在这个页面完成。滑块由<strong>你本人拖动</strong>官方组件，系统只做票据管道，不认缺口、不伪造轨迹。</p>
@@ -18,8 +25,8 @@ export async function renderLogin(root) {
 
         <div class="track" id="track">
           <div class="node on" data-step="1"><i></i><span>手机号</span></div>
-          <div class="node" data-step="2"><i></i><span>验证码</span></div>
-          <div class="node" data-step="3"><i></i><span>滑块</span></div>
+          <div class="node" data-step="2"><i></i><span>滑块</span></div>
+          <div class="node" data-step="3"><i></i><span>验证码</span></div>
           <div class="node" data-step="4"><i></i><span>完成</span></div>
         </div>
 
@@ -36,7 +43,15 @@ export async function renderLogin(root) {
           </div>
           <div class="btn-row">
             <button class="btn primary" id="btn-send">发送验证码</button>
-            <span class="muted" style="font-size:12px">触发滑块时会自动弹出验证层</span>
+            <span class="muted" style="font-size:12px">点击后若命中人机验证，会自动弹出滑块</span>
+          </div>
+        </div>
+
+        <div id="step-slider" class="hidden">
+          <div class="banner warn">人机验证中：请在弹窗里拖动滑块，完成后弹窗会自动关闭并进入下一步。</div>
+          <div class="btn-row">
+            <button class="btn primary" id="btn-reopen-slider">打开滑块验证</button>
+            <button class="btn ghost" id="btn-abandon">放弃</button>
           </div>
         </div>
 
@@ -48,7 +63,7 @@ export async function renderLogin(root) {
           </div>
           <div class="btn-row">
             <button class="btn primary" id="btn-login">登录</button>
-            <button class="btn ghost" id="btn-cancel">取消本次</button>
+            <button class="btn ghost" id="btn-cancel">放弃本次</button>
           </div>
         </div>
 
@@ -78,19 +93,22 @@ export async function renderLogin(root) {
   let taskId = null;
   let pollTimer = null;
   let sliderModal = null;
+  let sliderAutoClose = false; // 程序化关闭弹窗时置位，免得被当成「用户放弃」
+  let currentTask = null;      // 最近一次任务快照，供「打开滑块验证」重开弹窗用
+  let currentStep = 1;
+  let lastStatus = null;
 
-  function setStep(n) {
+  function goStep(n) {
+    currentStep = n;
     root.querySelectorAll("#track .node").forEach((node) => {
       const s = Number(node.dataset.step);
       node.classList.toggle("on", s === n);
       node.classList.toggle("done", s < n);
     });
     $("step-phone").classList.toggle("hidden", n !== 1);
-    $("step-code").classList.toggle("hidden", n !== 2);
+    $("step-slider").classList.toggle("hidden", n !== 2);
+    $("step-code").classList.toggle("hidden", n !== 3);
     $("step-done").classList.toggle("hidden", n !== 4);
-    if (n === 3) {
-      $("step-code").classList.remove("hidden");
-    }
   }
 
   function renderEvents(events) {
@@ -122,12 +140,19 @@ export async function renderLogin(root) {
     }
   }
 
+  function closeSlider() {
+    if (!sliderModal) return;
+    sliderAutoClose = true; // 告诉 onClose：这是程序化关闭，不是用户放弃
+    sliderModal.close();
+    sliderModal = null;
+  }
+
   function openSlider(task) {
     const url = `/api/auth/slider/${task.task_id}`;
-    if (sliderModal) sliderModal.close();
+    if (sliderModal) return;
     const body = el(`
       <div>
-        <div class="banner warn">请拖动下面的滑块完成验证</div>
+        <div class="banner warn">请拖动下面的滑块完成验证，拖完后弹窗会自动关闭</div>
         <iframe class="slider-frame" src="${url}" title="滑块验证"></iframe>
         <div class="muted mt-8" style="font-size:12px">
           弹层里的页面会自动把票据回传。若卡住，可
@@ -141,44 +166,90 @@ export async function renderLogin(root) {
       wide: true,
       onClose: () => {
         sliderModal = null;
+        if (sliderAutoClose) {
+          sliderAutoClose = false;
+          return;
+        }
+        // 用户手动关闭弹窗 = 放弃本次登录，回到手机号阶段
+        abandonLogin("已关闭滑块验证，本次登录已放弃。");
       },
     });
-    body.querySelector("#btn-retry-slider").addEventListener("click", () => {
+    body.querySelector("#btn-retry-slider").addEventListener("click", async () => {
       const f = body.querySelector("iframe");
-      f.src = url;
+      try {
+        // 极验的 challenge 一次性：重载旧页面必然报错，得先换一张新的。
+        await api.post(`/api/auth/slider/${task.task_id}/refresh`);
+        f.src = `${url}?t=${Date.now()}`; // 换新挑战，顺便破缓存
+      } catch (err) {
+        toast(err.message || "刷新滑块失败", "bad");
+      }
     });
+  }
+
+  async function abandonLogin(message) {
+    const id = taskId;
+    taskId = null;
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    closeSlider();
+    goStep(1);
+    if (id) {
+      try {
+        await api.post("/api/auth/cancel", { task_id: id });
+      } catch { /* 任务已结束就算了 */ }
+    }
+    if (message) toast(message, "warn");
   }
 
   function applyTask(task) {
     if (!task || !task.task_id) return;
     taskId = task.task_id;
+    currentTask = task;
     $("gate-state").textContent = task.status;
     renderEvents(task.events);
 
     const st = task.status;
-    if (st === "need_code") {
-      setStep(2);
+    const prev = lastStatus;
+    lastStatus = st;
+
+    if (st === "need_slider") {
+      // 第二步：人机验证。后端已把帮助页挂出来，这里弹窗给人拖。
+      goStep(2);
+      if (!sliderModal) openSlider(task);
+    } else if (st === "need_code") {
+      // 第三步：验证码已发出，等输入 + 点「登录」。
+      closeSlider();
+      goStep(3);
       $("code-hint").textContent = task.error
         ? task.error
         : `验证码已发送到 ${task.phone_masked || "你的手机"}`;
-    } else if (st === "need_slider") {
-      setStep(3);
-      if (!sliderModal) openSlider(task);
+    } else if (st === "logging_in") {
+      closeSlider();
+      goStep(3);
+    } else if (st === "pending" || st === "sending_sms") {
+      // 滑块刚通过 → 关掉弹窗、进入等验证码那一步；否则保持在滑块那一步。
+      if (prev === "need_slider") {
+        closeSlider();
+        goStep(3);
+      } else if (currentStep < 2) {
+        goStep(2);
+      }
     } else if (st === "done") {
-      setStep(4);
-      if (sliderModal) { sliderModal.close(); sliderModal = null; }
+      closeSlider();
+      goStep(4);
       toast("登录成功，会话已保存", "ok");
       refreshSession();
       refreshBridge();
     } else if (st === "error") {
-      setStep(1);
-      if (sliderModal) { sliderModal.close(); sliderModal = null; }
+      closeSlider();
+      goStep(1);
       toast(task.error || "登录失败", "bad");
     } else if (st === "cancelled") {
-      setStep(1);
+      closeSlider();
+      goStep(1);
       toast("已取消本次登录", "warn");
-    } else if (st === "logging_in") {
-      setStep(3);
     }
   }
 
@@ -201,7 +272,9 @@ export async function renderLogin(root) {
     try {
       const task = await api.post("/api/auth/sms", { phone, dial_code: $("dial").value.trim() || "86" });
       taskId = task.task_id;
-      setStep(2);
+      lastStatus = null;
+      // 点「发送验证码」先进滑块那一步；命中人机验证时后端会把弹窗挂出来。
+      goStep(2);
       applyTask(task);
       clearInterval(pollTimer);
       pollTimer = setInterval(poll, 900);
@@ -223,15 +296,18 @@ export async function renderLogin(root) {
     }
   });
 
-  $("btn-cancel").addEventListener("click", async () => {
-    if (!taskId) return;
-    try {
-      await api.post("/api/auth/cancel", { task_id: taskId });
-      setStep(1);
-      toast("已取消", "warn");
-    } catch (err) {
-      toast(err.message, "bad");
-    }
+  $("btn-cancel").addEventListener("click", () => {
+    abandonLogin("已放弃本次登录");
+  });
+
+  $("btn-abandon").addEventListener("click", () => {
+    abandonLogin("已放弃本次登录");
+  });
+
+  $("btn-reopen-slider").addEventListener("click", () => {
+    if (sliderModal) return;
+    if (!currentTask?.slider?.needed) return toast("当前没有待完成的滑块验证", "warn");
+    openSlider(currentTask);
   });
 
   const logoutBtn = $("btn-logout");
@@ -246,17 +322,23 @@ export async function renderLogin(root) {
 
   refreshSession();
 
-  // 若已有进行中的任务，接上
+  // 若已有进行中的任务：整页刷新时视为放弃，清掉残留；页内切回时接上。
   try {
     const st = await api.get("/api/auth/status");
-    if (st.task && !["done", "error", "cancelled"].includes(st.task.status)) {
-      applyTask(st.task);
-      pollTimer = setInterval(poll, 900);
+    const running = st.task && !["done", "error", "cancelled"].includes(st.task.status);
+    if (running) {
+      if (freshPageLoad) {
+        taskId = st.task.task_id;
+        await abandonLogin("页面已刷新，上一次登录已放弃。");
+      } else {
+        applyTask(st.task);
+        pollTimer = setInterval(poll, 900);
+      }
     }
   } catch { /* ignore */ }
 
   return () => {
     clearInterval(pollTimer);
-    if (sliderModal) sliderModal.close();
+    closeSlider();
   };
 }

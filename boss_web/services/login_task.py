@@ -35,12 +35,13 @@ from boss_login.models import LoginResult
 from boss_login.verify import (
     SliderChallenge,
     SliderSolution,
+    SliderSolver,
     build_helper_html,
     parse_solution,
 )
 
 from .. import config as C
-from ..errors import ConflictError, NotFoundError, ValidationWebError
+from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,8 @@ class LoginTask:
     slider_challenge: SliderChallenge | None = None
     slider_html: str | None = None
     slider_needed: bool = False
+    #: 重新拉一张滑块挑战的回调（帮助页「重新加载」用）；由 solver 挂上
+    slider_refresher: Callable[[], SliderChallenge] | None = None
 
     lock: threading.RLock = field(default_factory=threading.RLock)
     cancel_flag: bool = False
@@ -227,6 +230,36 @@ class LoginTaskManager:
         task.record("slider_solved", {"challenge": solution.challenge})
         return task
 
+    def refresh_slider(self, task_id: str) -> LoginTask:
+        """帮助页「重新加载」：换一张新的极验挑战，重建帮助页。
+
+        极验的 ``challenge`` 是一次性的——把旧帮助页重新加载会拿同一张已用过的
+        挑战去 initGeetest，组件必然 onError。所以这里重新拉一张，再渲染新页面。
+        """
+        task = self.get(task_id)
+        if task.finished:
+            raise ConflictError("本次登录已结束，请重新发起")
+        refresher = task.slider_refresher
+        if refresher is None:
+            raise ConflictError("当前没有待完成的滑块验证")
+        try:
+            challenge = refresher()
+        except BossLoginError as exc:
+            raise UpstreamError(f"重新拉取滑块挑战失败：{exc}") from exc
+        html = build_helper_html(
+            challenge,
+            post_url=f"/api/auth/slider/{task.task_id}/solution",
+        )
+        with task.lock:
+            task.slider_challenge = challenge
+            task.slider_html = html
+            task.slider_needed = True
+            task.slider_box.clear()
+            task.slider_event.clear()
+            task.set_status(ST_NEED_SLIDER)
+        task.record("slider_refreshed", {"gt": challenge.gt})
+        return task
+
     def cancel(self, task_id: str) -> LoginTask:
         task = self.get(task_id)
         with task.lock:
@@ -243,8 +276,15 @@ class LoginTaskManager:
     # 后台线程
     # ------------------------------------------------------------------ #
 
-    def _web_slider_solver(self, task: LoginTask) -> SliderSolution | None:
-        """``slider_solver`` 回调：挂出帮助页，等人拖完把票据送回来。"""
+    def _web_slider_solver(self, task: LoginTask, client: Any) -> SliderSolver:
+        """``slider_solver`` 回调：挂出帮助页，等人拖完把票据送回来。
+
+        ``client`` 给「重新加载」用：帮助页要换挑战时，得拿它回服务端重新拉一张
+        （极验 challenge 一次性，旧页面重载必然 onError）。
+        """
+        def fetch_challenge() -> SliderChallenge:
+            return client.fetch_slider_challenge()
+
         def solver(challenge: SliderChallenge) -> SliderSolution | None:
             if task.cancel_flag:
                 return None
@@ -256,6 +296,7 @@ class LoginTaskManager:
                 task.slider_challenge = challenge
                 task.slider_html = html
                 task.slider_needed = True
+                task.slider_refresher = fetch_challenge
                 task.slider_box.clear()
                 task.slider_event.clear()
                 task.set_status(ST_NEED_SLIDER)
@@ -271,7 +312,7 @@ class LoginTaskManager:
         return solver
 
     def _code_provider(self, task: LoginTask):
-        def provider(attempt: int, ticket: Any) -> str | None:
+        def provider(attempt: int, _ticket: Any) -> str | None:
             with task.lock:
                 task.attempts = max(task.attempts, attempt)
                 task.set_status(ST_NEED_CODE)
@@ -292,7 +333,7 @@ class LoginTaskManager:
         if self._session_path is not None:
             kwargs["session_path"] = self._session_path
         client = create_client(**kwargs)
-        solver = self._web_slider_solver(task)
+        solver = self._web_slider_solver(task, client)
 
         def on_event(name: str, payload: dict[str, Any]) -> None:
             task.record(name, payload)
@@ -345,7 +386,8 @@ class LoginTaskManager:
             task.set_status(ST_DONE)
         task.record("success", task.result)
 
-    def _finish_err(self, task: LoginTask, message: str) -> None:
+    @staticmethod
+    def _finish_err(task: LoginTask, message: str) -> None:
         with task.lock:
             task.error = message
             task.set_status(ST_ERROR)
