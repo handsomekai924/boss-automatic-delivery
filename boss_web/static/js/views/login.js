@@ -127,7 +127,7 @@ export async function renderLogin(root) {
     if (sliderModal) sliderModal.close();
     const body = el(`
       <div>
-        <div class="banner warn">请拖动下面的滑块完成验证 —— 答案在你手里，系统不会替你算。</div>
+        <div class="banner warn">请拖动下面的滑块完成验证</div>
         <iframe class="slider-frame" src="${url}" title="滑块验证"></iframe>
         <div class="muted mt-8" style="font-size:12px">
           弹层里的页面会自动把票据回传。若卡住，可

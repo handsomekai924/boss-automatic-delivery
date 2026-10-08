@@ -75,6 +75,7 @@ __all__ = [
     "CdpStokenProvider",
     "DEFAULT_CDP_PORT",
     "DEFAULT_DB_PATH",
+    "RENEW_COOLDOWN",
     "StokenRecord",
     "StokenStore",
     "TOKEN_PAGE",
@@ -104,6 +105,11 @@ DEFAULT_DB_PATH: Path = boss_db.DEFAULT_DB_PATH
 
 #: 快过期就提前换新的余量（秒）
 EXPIRY_MARGIN: int = 5 * 60
+
+#: 强制换新的冷却（秒）。撞 code 37 有时只是「请求太快」，
+#: 连环拉 Chrome 既慢（每次 ~3s）又更容易把风控惹出来；冷却期内
+#: 顶多把现有那枚写回 Cookie 重试一次，不真去换。
+RENEW_COOLDOWN: float = 5.0
 
 #: 等站点写出 token 的超时（秒）。真浏览器首次开页要拉 chunk，给宽点
 ACQUIRE_TIMEOUT: float = 40.0
@@ -656,6 +662,8 @@ class CdpStokenProvider:
     port: int | None = None
     chrome: str | None = None
     profile_dir: Path | str | None = None
+    #: 上次真去 Chrome 换新的时间戳（秒），给 :data:`RENEW_COOLDOWN` 用
+    _last_renew_at: float = 0.0
 
     def __post_init__(self) -> None:
         if self.store is None:
@@ -672,9 +680,16 @@ class CdpStokenProvider:
 
         顺序：
 
-        1. 账本里还新鲜 → 直接用（顺手写回 Cookie / ``doc('session')``）；
+        1. 账本里还新鲜 → 直接用（Cookie 里还不是这枚才写回去）；
         2. 账本没有、但会话里已经有人（手工拷的）→ 信它，等撞 37 再说；
         3. 其余（过期 / ``force``）→ 拉 Chrome 换新，落盘。
+
+        两处**刻意不动**，免得日志/状态库被刷屏：
+
+        - 已经是这枚令牌时不再 ``_persist``（否则每条请求都写一遍
+          ``doc('session')``，日志上就是一行行「登录态已保存」）；
+        - ``force`` 也有冷却（:data:`RENEW_COOLDOWN`）——37 有时只是「太快了」，
+          连环拉 Chrome 既慢又更容易撞风控。
         """
         record = self.store.load() if self.store else None
         if not force:
@@ -684,19 +699,37 @@ class CdpStokenProvider:
                     C.STOKEN_COOKIE,
                     record.ttl_left / 60,
                 )
-                self._persist(record.token, record.expires_at, record.minted_at, record.source)
+                if _read_cookie(self.http, C.STOKEN_COOKIE) != record.token:
+                    self._persist(record.token, record.expires_at, record.minted_at, record.source)
                 return record.token
             if record is None:
                 existing = _read_cookie(self.http, C.STOKEN_COOKIE)
                 if existing:
                     logger.debug("会话里已有 %s（手工拷的），先用着", C.STOKEN_COOKIE)
                     return existing
+
+        # force 的冷却：**本进程**刚换过就别再拉 Chrome，把现有那枚顶上就算。
+        # 刻意不拿 record.minted_at 当起点——那是落盘时间，手工拷的/上次进程留下的
+        # 都算，会把「真强制换新」也误杀掉。
+        if force and self._last_renew_at and record is not None and record.is_usable:
+            since = time.time() - self._last_renew_at
+            if since < RENEW_COOLDOWN:
+                logger.info(
+                    "%s 换新冷却中（%.0fs 前刚换过），先用现有这枚顶一下",
+                    C.STOKEN_COOKIE,
+                    since,
+                )
+                if _read_cookie(self.http, C.STOKEN_COOKIE) != record.token:
+                    self._persist(record.token, record.expires_at, record.minted_at, record.source)
+                return record.token
+
         # 过期 / 强制 / 压根没有
         reason = "强制换新" if force else ("已过期" if record else "还没有")
         logger.info("%s %s，拉 Chrome（CDP）重取一枚", C.STOKEN_COOKIE, reason)
         new = self._to_record(self.acquire())
         if not new.is_usable:
             raise StokenError(f"Chrome 那边没取到 {C.STOKEN_COOKIE}")
+        self._last_renew_at = time.time()
         self._persist(new.token, new.expires_at, new.minted_at, new.source)
         return new.token
 

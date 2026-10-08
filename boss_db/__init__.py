@@ -121,7 +121,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     lid                TEXT NOT NULL DEFAULT '',
     page               INTEGER NOT NULL DEFAULT 0,
     raw_json           TEXT NOT NULL DEFAULT '',
-    fetched_at         TEXT NOT NULL
+    fetched_at         TEXT NOT NULL,
+    -- 职位描述（JD 正文）：列表接口不回，靠 /wapi/zpgeek/job/detail.json 逐条补。
+    -- 旧库要能升级，见 _migrate_columns()（CREATE TABLE IF NOT EXISTS 不会补列）。
+    job_desc           TEXT NOT NULL DEFAULT '',
+    detail_fetched_at  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_brand  ON jobs(brand_name);
@@ -234,6 +238,30 @@ def close_all() -> None:
             pass
 
 
+#: 补列迁移表：``表名 → {列名: 建列 DDL 片段}``。``CREATE TABLE IF NOT EXISTS``
+#: 对已存在的表不会补列，老库升级只能靠 ALTER；PRAGMA 查缺再补，幂等。
+_COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
+    "jobs": {
+        "job_desc": "TEXT NOT NULL DEFAULT ''",
+        "detail_fetched_at": "TEXT NOT NULL DEFAULT ''",
+    },
+}
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """给老库补上后来加的列。新开库/已补过的库都是无操作。"""
+    for table, columns in _COLUMN_MIGRATIONS.items():
+        existing = {
+            str(row["name"])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, ddl in columns.items():
+            if name in existing:
+                continue
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            logger.info("状态库补列：%s.%s", table, name)
+
+
 def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
     is_memory = str(resolved) == ":memory:"
     created = False
@@ -249,6 +277,7 @@ def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SCHEMA)
+        _migrate_columns(conn)
         conn.commit()
     except sqlite3.Error:
         conn.close()

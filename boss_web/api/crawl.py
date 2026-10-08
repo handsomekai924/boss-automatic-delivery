@@ -17,6 +17,8 @@ class CrawlBody(BaseModel):
     interval: float = Field(1.0, ge=0.0, le=30.0)
     start_page: int = Field(1, ge=1)
     use_search: bool = True
+    #: 每页入库后顺带补 JD（默认开；每页约 +4.5s）
+    fetch_details: bool = True
 
 
 @router.get("/status")
@@ -31,6 +33,7 @@ def start(body: CrawlBody) -> dict[str, Any]:
         interval=body.interval,
         start_page=body.start_page,
         use_search=body.use_search,
+        fetch_details=body.fetch_details,
     )
     return task.snapshot()
 

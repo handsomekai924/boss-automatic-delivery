@@ -192,3 +192,59 @@ def test_clean_pages_stitches_across_pages():
     jobs = clean_pages(pages)
     assert [j.encrypt_job_id for j in jobs] == ["p1", "p2"]
     assert [j.page for j in jobs] == [1, 2]
+
+
+# --------------------------------------------------------------------------- #
+# 职位描述（JD）
+# --------------------------------------------------------------------------- #
+
+
+def test_clean_desc_strips_html_and_keeps_lines():
+    from boss_jobs.models import clean_desc
+
+    raw = "<p>岗位职责：</p><br>1. 写代码&nbsp;&nbsp;\n\n\n\n2. 测试"
+    assert clean_desc(raw) == "岗位职责：\n\n1. 写代码\n\n2. 测试"
+
+
+def test_clean_desc_plain_text_passthrough():
+    from boss_jobs.models import clean_desc
+
+    assert clean_desc("岗位职责：\n1. 写代码") == "岗位职责：\n1. 写代码"
+    assert clean_desc(None) == ""
+    assert clean_desc(123) == "123"
+
+
+def test_extract_job_desc_reads_job_info():
+    """实测：正文在 ``zpData.jobInfo.postDescription``，不是顶层。"""
+    from boss_jobs.models import extract_job_desc
+
+    payload = {
+        "code": 0,
+        "zpData": {
+            "jobInfo": {"postDescription": "岗位职责：\n写代码"},
+            "postDescription": "顶层这格没有",
+        },
+    }
+    assert extract_job_desc(payload) == "岗位职责：\n写代码"
+
+
+def test_extract_job_desc_falls_back_to_top_level():
+    from boss_jobs.models import extract_job_desc
+
+    assert extract_job_desc({"zpData": {"postDescription": "顶层兜底"}}) == "顶层兜底"
+    assert extract_job_desc({"zpData": {}}) == ""
+    assert extract_job_desc({"code": 1}) == ""
+
+
+def test_job_to_dict_includes_desc():
+    job = Job.from_api(
+        {
+            "encryptJobId": "x1",
+            "jobName": "岗位",
+            "brandName": "公司",
+        },
+        page=1,
+    )
+    data = job.to_dict()
+    assert data["job_desc"] == ""
+    assert data["detail_fetched_at"] == ""

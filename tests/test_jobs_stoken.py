@@ -390,14 +390,31 @@ def test_provider_apply_用requests认的expires():
 
 
 def test_fetch_search_page_撞37_自动补令牌重试():
-    provider = FakeProvider(token="0138AUTO")
+    class RenewingProvider:
+        """force=True 时回一枚**新**令牌（真换新的样子）。"""
+
+        def __init__(self) -> None:
+            self.ensure_calls: list[bool] = []
+
+        def ensure(self, *, force: bool = False) -> str:
+            self.ensure_calls.append(force)
+            return "0138NEW" if force else "0138OLD"
+
+    provider = RenewingProvider()
     http = FakeHttp(
         request_responses=[
             FakeResponse(challenge_payload()),                      # 第一次：37
-            FakeResponse({"code": 0, "zpData": {"jobList": [], "hasMore": False}}),  # 补完成功
+            FakeResponse(challenge_payload()),                      # 歇会儿再要，还 37
+            FakeResponse({"code": 0, "zpData": {"jobList": [], "hasMore": False}}),  # 换新后成功
         ]
     )
-    client = JobClient(base_url="https://example.test", http=http, stoken_provider=provider, retries=0)
+    client = JobClient(
+        base_url="https://example.test",
+        http=http,
+        stoken_provider=provider,
+        retries=0,
+        sleeper=lambda _s: None,
+    )
 
     class _F:
         def to_params(self):
@@ -409,9 +426,72 @@ def test_fetch_search_page_撞37_自动补令牌重试():
     result = client.fetch_search_page(_F())
 
     assert result.raw_count == 0
-    assert provider.ensure_calls == [False, True]      # 先判过期，撞 37 再强制换新
-    assert http.cookies.get("__zp_stoken__") == "0138AUTO"
-    assert len(http.request_calls) == 2                 # 补令牌后真的重试了一次
+    # 先判过期 → 撞 37 歇会儿拿同一枚再试 → 还 37 才强制换新
+    assert provider.ensure_calls == [False, True]
+    assert http.cookies.get("__zp_stoken__") == "0138NEW"
+    assert len(http.request_calls) == 3
+
+
+def test_fetch_search_page_撞37_换新没换到_不再打第三发():
+    """force 冷却中回的是**同一枚**：刚被拒过，再打一发纯属撞墙。"""
+    provider = FakeProvider(token="0138SAME")  # force 也只回同一枚
+    http = FakeHttp(
+        request_responses=[
+            FakeResponse(challenge_payload()),   # 第一次：37
+            FakeResponse(challenge_payload()),   # 歇会儿再要，还 37
+        ]
+    )
+    client = JobClient(
+        base_url="https://example.test",
+        http=http,
+        stoken_provider=provider,
+        retries=0,
+        sleeper=lambda _s: None,
+    )
+
+    class _F:
+        def to_params(self):
+            return {"query": "python", "page": 1}
+
+        def for_page(self, page):
+            return self
+
+    with pytest.raises(JobApiError) as excinfo:
+        client.fetch_search_page(_F())
+    assert excinfo.value.is_browser_check
+    assert provider.ensure_calls == [False, True]  # 尝试了 force
+    assert len(http.request_calls) == 2            # 但**没有**打第三发
+
+
+def test_fetch_search_page_撞37_歇会儿就好了_不换新():
+    """37 有时只是太快：退避重试成功就别去拉 Chrome 换新。"""
+    provider = FakeProvider(token="0138KEEP")
+    http = FakeHttp(
+        request_responses=[
+            FakeResponse(challenge_payload()),                      # 第一次：37
+            FakeResponse({"code": 0, "zpData": {"jobList": [], "hasMore": False}}),  # 歇完成功
+        ]
+    )
+    client = JobClient(
+        base_url="https://example.test",
+        http=http,
+        stoken_provider=provider,
+        retries=0,
+        sleeper=lambda _s: None,
+    )
+
+    class _F:
+        def to_params(self):
+            return {"query": "python", "page": 1}
+
+        def for_page(self, page):
+            return self
+
+    result = client.fetch_search_page(_F())
+
+    assert result.raw_count == 0
+    assert provider.ensure_calls == [False]        # 没有 force
+    assert len(http.request_calls) == 2
 
 
 def test_fetch_search_page_撞37_没挂provider_照旧报错():

@@ -810,3 +810,288 @@ def test_crawl_without_hooks_still_works(tmp_path):
     with JobStore(tmp_path / "n.db") as store:
         report = client.crawl(store=store, page_interval=0.0)
     assert report.stats.pages == 1
+
+
+# --------------------------------------------------------------------------- #
+# 职位详情（JD）
+# --------------------------------------------------------------------------- #
+
+
+def test_fetch_job_detail_hits_detail_endpoint():
+    http = FakeHttp(
+        [
+            {
+                "code": 0,
+                "zpData": {
+                    "jobInfo": {"postDescription": "岗位职责：\n写代码"},
+                    "lid": "L1",
+                },
+            }
+        ]
+    )
+    client = JobClient(http=http)
+    detail = client.fetch_job_detail(security_id="SEC1", lid="L1")
+    assert detail.job_desc == "岗位职责：\n写代码"
+    assert detail.has_desc
+    call = http.calls[0]
+    assert call["method"] == "GET"
+    assert "/wapi/zpgeek/job/detail.json" in call["url"]
+    assert call["params"] == {"securityId": "SEC1", "lid": "L1"}
+
+
+def test_fetch_job_detail_requires_security_id():
+    client = JobClient(http=FakeHttp([]))
+    with pytest.raises(ValueError):
+        client.fetch_job_detail(security_id="", lid="L1")
+
+
+def test_fetch_job_detail_ensures_stoken():
+    """实测：详情跟搜索一样要 __zp_stoken__，缺了回 code 37。"""
+    tokens = []
+
+    class FakeProvider:
+        def ensure(self, *, force: bool = False):
+            tokens.append(force)
+            return "TOKEN-1"
+
+    http = FakeHttp(
+        [
+            {"code": 0, "zpData": {"jobInfo": {"postDescription": "JD"}}},
+        ]
+    )
+    client = JobClient(http=http, stoken_provider=FakeProvider())
+    detail = client.fetch_job_detail(security_id="SEC1", lid="L1")
+    assert detail.job_desc == "JD"
+    assert tokens == [False]
+    assert http.cookies.get("__zp_stoken__") == "TOKEN-1"
+
+
+def test_fetch_job_detail_撞37先歇会儿再用同一枚重试():
+    """37 有时只是「请求太快」：先退避拿**同一枚**重试，别急着拉 Chrome。"""
+    from boss_jobs import config as C
+
+    tokens = []
+
+    class OnceProvider:
+        def ensure(self, *, force: bool = False):
+            tokens.append(force)
+            return "TOKEN-1"
+
+    http = FakeHttp(
+        [
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+            {"code": 0, "zpData": {"jobInfo": {"postDescription": "歇完再要到的 JD"}}},
+        ]
+    )
+    sleeper = RecordingSleeper()
+    client = JobClient(http=http, stoken_provider=OnceProvider(), sleeper=sleeper)
+    detail = client.fetch_job_detail(security_id="SEC1", lid="L1")
+    assert detail.job_desc == "歇完再要到的 JD"
+    assert tokens == [False]                       # 一次都没强制换新
+    assert sleeper.calls == [C.BROWSER_CHECK_BACKOFF]
+    assert len(http.calls) == 2
+
+
+def test_fetch_job_detail_歇完还37才强制换新():
+    tokens = []
+
+    class CountingProvider:
+        def ensure(self, *, force: bool = False):
+            tokens.append(force)
+            return f"TOKEN-{len(tokens)}"
+
+    http = FakeHttp(
+        [
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+            {"code": 0, "zpData": {"jobInfo": {"postDescription": "补令牌后的 JD"}}},
+        ]
+    )
+    client = JobClient(http=http, stoken_provider=CountingProvider(), sleeper=lambda _s: None)
+    detail = client.fetch_job_detail(security_id="SEC1", lid="L1")
+    assert detail.job_desc == "补令牌后的 JD"
+    assert tokens == [False, True]
+    assert len(http.calls) == 3
+
+
+def test_enrich_page_details_survives_single_failure(tmp_path):
+    """单条详情失败只记流水，下一条继续——不拖垮列表抓取。"""
+    from boss_jobs.models import Job, PageResult
+
+    jobs = (
+        Job.from_api({"encryptJobId": "a", "jobName": "A", "brandName": "甲", "securityId": "s-a", "lid": "l"}),
+        Job.from_api({"encryptJobId": "b", "jobName": "B", "brandName": "乙", "securityId": "s-b", "lid": "l"}),
+        Job.from_api({"encryptJobId": "c", "jobName": "C", "brandName": "丙", "securityId": "s-c", "lid": "l"}),
+    )
+    page = PageResult(page=1, jobs=jobs, has_more=False, raw_count=3)
+
+    http = FakeHttp(
+        [
+            {"code": 0, "zpData": {"jobInfo": {"postDescription": "A 的 JD"}}},
+            JobApiError(36, "账号异常", raw={}),  # 中间那条炸
+            {"code": 0, "zpData": {"jobInfo": {"postDescription": "C 的 JD"}}},
+        ]
+    )
+    client = JobClient(http=http, sleeper=lambda _s: None)
+    events = []
+    with JobStore(tmp_path / "jobs.db") as store:
+        store.save_page(page)
+        client._enrich_page_details(
+            page,
+            store=store,
+            interval=0.0,
+            on_detail=events.append,
+        )
+
+        assert [e["event"] for e in events] == ["detail_done", "detail_error", "detail_done"]
+        assert store.get_job("a").job_desc == "A 的 JD"
+        assert store.get_job("b").job_desc == ""  # 失败那条没写
+        assert store.get_job("c").job_desc == "C 的 JD"
+
+
+def test_enrich_page_details_已有描述不再重复获取(tmp_path):
+    """重抓一页时，已入库且已有 JD 的不该再打详情接口。"""
+    from boss_jobs.models import Job, PageResult
+
+    jobs = (
+        Job.from_api({"encryptJobId": "a", "jobName": "A", "brandName": "甲", "securityId": "s-a", "lid": "l"}),
+        Job.from_api({"encryptJobId": "b", "jobName": "B", "brandName": "乙", "securityId": "s-b", "lid": "l"}),
+        Job.from_api({"encryptJobId": "c", "jobName": "C", "brandName": "丙", "securityId": "s-c", "lid": "l"}),
+    )
+    page = PageResult(page=1, jobs=jobs, has_more=False, raw_count=3)
+
+    http = FakeHttp(
+        [
+            # 只给 b 准备一条——a / c 已有描述，不该再发请求
+            {"code": 0, "zpData": {"jobInfo": {"postDescription": "B 的 JD"}}},
+        ]
+    )
+    client = JobClient(http=http, sleeper=lambda _s: None)
+    events = []
+    with JobStore(tmp_path / "jobs.db") as store:
+        store.save_page(page)
+        store.update_job_desc("a", "A 早抓过了", fetched_at="2026-10-08 10:00:00")
+        store.update_job_desc("c", "C 也早抓过了", fetched_at="2026-10-08 10:00:00")
+
+        client._enrich_page_details(page, store=store, interval=0.0, on_detail=events.append)
+
+        kinds = [e["event"] for e in events]
+        assert kinds == ["detail_skipped", "detail_done", "detail_skipped"]
+        assert len(http.calls) == 1            # 只打了 1 次详情
+        assert store.get_job("a").job_desc == "A 早抓过了"   # 没被覆盖
+        assert store.get_job("b").job_desc == "B 的 JD"
+        assert store.get_job("c").job_desc == "C 也早抓过了"
+
+
+def test_fetch_job_detail_换新冷却没换到_不再打第三发():
+    """force 冷却中 ensure 回的是**同一枚**：刚被拒过，再打一发纯属撞墙。"""
+    tokens = []
+
+    class CooldownProvider:
+        """假装换新冷却中——force 也只回同一枚令牌。"""
+
+        def ensure(self, *, force: bool = False):
+            tokens.append(force)
+            return "TOKEN-SAME"
+
+    http = FakeHttp(
+        [
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+        ]
+    )
+    client = JobClient(http=http, stoken_provider=CooldownProvider(), sleeper=lambda _s: None)
+    with pytest.raises(JobApiError) as excinfo:
+        client.fetch_job_detail(security_id="SEC1", lid="L1")
+    assert excinfo.value.is_browser_check
+    assert tokens == [False, True]         # 确实尝试了 force
+    assert len(http.calls) == 2            # 但**没有**打第三发
+
+
+def test_enrich_page_details_连环撞37就停批(tmp_path):
+    """连着撞 N 次 code 37 = 整段被限速了，停掉补 JD，别拿剩下的去探墙。"""
+    from boss_jobs import config as C
+    from boss_jobs.models import Job, PageResult
+
+    jobs = tuple(
+        Job.from_api(
+            {"encryptJobId": f"{name}", "jobName": name, "brandName": "甲",
+             "securityId": f"s-{name}", "lid": "l"}
+        )
+        for name in ("a", "b", "c", "d", "e")
+    )
+    page = PageResult(page=1, jobs=jobs, has_more=False, raw_count=len(jobs))
+
+    # 每条都走完整的 37 重试梯（首打 + 歇会儿 + 不换新就不再打）＝
+    # 每条 2 发，够把脚本吃穿。第 4 条起脚本没了 → 也是 37 之外的错，
+    # 所以这里全给 37，看的是「连环 N 次就停」。
+    responses = [
+        {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+    ] * 20
+
+    class SameTokenProvider:
+        def ensure(self, *, force: bool = False):
+            return "TOKEN-SAME"  # 冷却：force 也不换
+
+    http = FakeHttp(responses)
+    client = JobClient(
+        http=http, stoken_provider=SameTokenProvider(), sleeper=lambda _s: None
+    )
+    events = []
+    with JobStore(tmp_path / "jobs.db") as store:
+        store.save_page(page)
+        client._enrich_page_details(
+            page, store=store, interval=0.0, on_detail=events.append
+        )
+
+        kinds = [e["event"] for e in events]
+        # C.BROWSER_CHECK_GIVEUP 条 detail_error 之后必须有一条 detail_stopped
+        # ——剩下那条（e）连试都不试
+        assert kinds.count("detail_error") == C.BROWSER_CHECK_GIVEUP
+        assert kinds[-1] == "detail_stopped"
+        assert kinds.count("detail_done") == 0
+        # 只碰了前 N 条（每条 2 发：首打 + 歇会儿重试），没碰剩下的
+        assert len(http.calls) == C.BROWSER_CHECK_GIVEUP * 2
+
+
+def test_enrich_page_details_37失败后多躺一会(tmp_path):
+    """单条 37 不停批时，下一条之前多睡 BROWSER_CHECK_COOLOFF——别撞着墙继续敲。"""
+    from boss_jobs import config as C
+    from boss_jobs.models import Job, PageResult
+
+    jobs = (
+        Job.from_api({"encryptJobId": "a", "jobName": "A", "brandName": "甲", "securityId": "s-a", "lid": "l"}),
+        Job.from_api({"encryptJobId": "b", "jobName": "B", "brandName": "乙", "securityId": "s-b", "lid": "l"}),
+    )
+    page = PageResult(page=1, jobs=jobs, has_more=False, raw_count=2)
+
+    class SameTokenProvider:
+        def ensure(self, *, force: bool = False):
+            return "TOKEN-SAME"
+
+    http = FakeHttp(
+        [
+            # a：37 → 歇 2s 重试 → 37 → force 不换新 → 抛
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+            # b：一把过
+            {"code": 0, "zpData": {"jobInfo": {"postDescription": "B 的 JD"}}},
+        ]
+    )
+    sleeper = RecordingSleeper()
+    client = JobClient(
+        http=http, stoken_provider=SameTokenProvider(), sleeper=sleeper
+    )
+    events = []
+    with JobStore(tmp_path / "jobs.db") as store:
+        store.save_page(page)
+        client._enrich_page_details(
+            page, store=store, interval=0.0, on_detail=events.append
+        )
+
+        kinds = [e["event"] for e in events]
+        assert kinds == ["detail_error", "detail_done"]
+        assert store.get_job("b").job_desc == "B 的 JD"
+        # 至少睡过：BROWSER_CHECK_BACKOFF（37 重试）+ BROWSER_CHECK_COOLOFF（失败后躺平）
+        assert C.BROWSER_CHECK_BACKOFF in sleeper.calls
+        assert C.BROWSER_CHECK_COOLOFF in sleeper.calls

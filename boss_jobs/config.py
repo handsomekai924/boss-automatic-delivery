@@ -41,7 +41,9 @@ ENDPOINTS: Final[dict[str, str]] = {
     #: 令牌由 :class:`boss_jobs.cdp_stoken.CdpStokenProvider` 全自动补（拉 Chrome
     #: 让站点自己算），见 :func:`boss_jobs.client.JobClient.fetch_search_page`。
     "job_search": "/wapi/zpgeek/search/joblist.json",
-    #: 职位详情。列表页已经带全 todo.md 要的字段，先留着备用。
+    #: 职位详情（JD 正文）。**已实测**（2026-10-08）：要登录 **且** 要
+    #: ``__zp_stoken__``（缺了回 code 37，跟搜索一样），query 带
+    #: ``securityId`` + ``lid`` 两参就够。正文在 ``zpData.jobInfo.postDescription``。
     "job_detail": "/wapi/zpgeek/job/detail.json",
 }
 
@@ -104,6 +106,26 @@ PAGE_SIZE: Final[int] = 15
 #: 翻页间隔（秒）。**每拿完一页就清洗入库，再睡这么久才要下一页**，
 #: 把请求频率压到人手滚动的量级，避免触发风控。
 DEFAULT_PAGE_INTERVAL: Final[float] = 1.0
+
+#: 补抓职位详情（JD）的条间隔（秒）。
+#: **1 秒**：实测 0.3s 会被安全网关当过频（连环 code 37），1s 是人手点击的量级。
+DETAIL_INTERVAL: Final[float] = 1.0
+
+#: 撞上安全网关 code 37 时先歇多久再拿同一枚令牌重试（秒）。
+#: 37 有时只是「请求太快」，先退避；歇完还 37 才轮到强制换新（换新自己
+#: 还有 ``RENEW_COOLDOWN`` 冷却，不会连环拉 Chrome）。
+BROWSER_CHECK_BACKOFF: Final[float] = 2.0
+
+#: 撞上安全网关 code 37 之后，下一条之前再多歇多久（秒）。
+#: 37 有时是「令牌不对」，有时是**整段 IP / 会话被限速**——后者多打一发只会
+#: 撞得更狠。失败后先躺平一会儿，再碰下一条。
+BROWSER_CHECK_COOLOFF: Final[float] = 5.0
+
+#: **连续**撞上 code 37 几次就停整批。
+#: 实测（2026-10-08）：安全网关的限速墙是「一小段窗口里放行几发，然后整段拦」，
+#: 撞墙后继续一条条砸只会把窗口越压越久。连环 3 次 = 这一轮大概率已经全线拦了，
+#: 停批让人歇几分钟，比拿几十发请求去探墙厚道得多（也不容易把账号风控惹出来）。
+BROWSER_CHECK_GIVEUP: Final[int] = 3
 
 #: 默认最多翻几页。0 = 一直翻到接口回空页。
 DEFAULT_MAX_PAGES: Final[int] = 0

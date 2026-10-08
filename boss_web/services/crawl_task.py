@@ -39,6 +39,10 @@ class CrawlTask:
             "kept_count": 0,
             "inserted": 0,
             "updated": 0,
+            "desc_done": 0,
+            "desc_ok": 0,
+            "desc_failed": 0,
+            "desc_skipped": 0,
         }
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
         self.cancel_flag = False
@@ -47,9 +51,25 @@ class CrawlTask:
     def push(self, payload: dict[str, Any]) -> None:
         with self.lock:
             self.events.append({"at": time.time(), **payload})
-            self.progress["pages"] = self.progress.get("pages", 0) + 1
+            # 只有翻页回调才带 page（见 JobClient.crawl 的 _push）；
+            # stoken / detail_* / finished / cancel_requested / error 这些不算页
+            if payload.get("page") is not None:
+                self.progress["pages"] = self.progress.get("pages", 0) + 1
             for key in ("raw_count", "kept_count", "inserted", "updated"):
                 self.progress[key] = self.progress.get(key, 0) + int(payload.get(key, 0) or 0)
+            # JD 补抓的流水（enrich_details 开着才有）
+            event = payload.get("event")
+            if event == "detail_done":
+                self.progress["desc_ok"] = self.progress.get("desc_ok", 0) + (
+                    1 if payload.get("has_desc") else 0
+                )
+                self.progress["desc_done"] = self.progress.get("desc_done", 0) + 1
+            elif event == "detail_error":
+                self.progress["desc_failed"] = self.progress.get("desc_failed", 0) + 1
+                self.progress["desc_done"] = self.progress.get("desc_done", 0) + 1
+            elif event == "detail_skipped":
+                # 已有描述，根本没打详情接口——不算 desc_done
+                self.progress["desc_skipped"] = self.progress.get("desc_skipped", 0) + 1
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -93,6 +113,7 @@ class CrawlTaskManager:
         interval: float = 1.0,
         start_page: int = 1,
         use_search: bool = True,
+        fetch_details: bool = True,
     ) -> CrawlTask:
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
@@ -103,6 +124,7 @@ class CrawlTaskManager:
                     "interval": interval,
                     "start_page": start_page,
                     "use_search": use_search,
+                    "fetch_details": fetch_details,
                 }
             )
             self._task = task
@@ -153,6 +175,8 @@ class CrawlTaskManager:
                     search_filter=search_filter,
                     on_progress=task.push,
                     should_stop=lambda: task.cancel_flag,
+                    # 抓取时顺带补 JD（已拍板）；单条失败不拖垮列表
+                    enrich_details=bool(params.get("fetch_details", True)),
                 )
             finally:
                 store.close()

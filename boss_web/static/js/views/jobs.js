@@ -96,7 +96,24 @@ export async function renderJobs(root) {
         <button class="btn" id="btn-select-all">全选本页</button>
         <button class="btn danger" id="btn-del-selected">删除所选</button>
         <button class="btn danger ghost" id="btn-clear">按条件清空</button>
+        <button class="btn" id="btn-fetch-desc" title="对还没抓到 JD 的职位逐条拉详情">补抓描述</button>
       </div>
+    </div>
+
+    <div class="card mb-16 hidden" id="desc-panel">
+      <div class="card-head">
+        <h3 class="card-title">补抓职位描述</h3>
+        <span class="card-sub" id="desc-phase">idle</span>
+      </div>
+      <div class="progress mb-8"><i id="desc-bar" style="width:0%"></i></div>
+      <div class="flex between center gap-12" style="flex-wrap:wrap">
+        <div class="muted mono" id="desc-msg" style="font-size:12px">待命</div>
+        <div class="btn-row">
+          <button class="btn danger hidden" id="btn-desc-stop">停止</button>
+          <button class="btn ghost" id="btn-desc-hide">收起</button>
+        </div>
+      </div>
+      <div class="ticker mt-12" id="desc-log" style="max-height:120px"><div class="ev muted">—</div></div>
     </div>
 
     <div class="job-grid" id="job-grid"></div>
@@ -421,7 +438,10 @@ export async function renderJobs(root) {
         $("crawl-phase").textContent = s.phase || s.status;
         $("crawl-msg").textContent =
           s.status === "running"
-            ? `第 ${p.pages || 0} 页 · 入库 +${p.inserted || 0} / 改 ${p.updated || 0}`
+            ? `第 ${p.pages || 0} 页 · 入库 +${p.inserted || 0} / 改 ${p.updated || 0}` +
+              (p.desc_done || p.desc_skipped
+                ? ` · JD ${p.desc_ok || 0}/${p.desc_done || 0}` + (p.desc_skipped ? `（跳过已有 ${p.desc_skipped}）` : "")
+                : "")
             : s.error || s.stopped_reason || s.status;
         const log = $("crawl-log");
         if (s.events && s.events.length) {
@@ -526,6 +546,13 @@ export async function renderJobs(root) {
           <div class="pills mb-16">${skills || "<span class='muted'>—</span>"}</div>
           <div class="card-sub mb-8">福利</div>
           <div class="pills mb-16">${welfare || "<span class='muted'>—</span>"}</div>
+          <div class="flex between center mb-8">
+            <div class="card-sub">职位描述</div>
+            <span class="pill ${j.job_desc ? "accent" : "static"}">${j.job_desc ? "已抓描述" : "无描述"}</span>
+          </div>
+          ${j.job_desc
+            ? `<details class="acc mb-16"><summary>展开 JD（${String(j.job_desc).length} 字）</summary><div class="acc-body" style="white-space:pre-wrap">${escapeHtml(j.job_desc)}</div></details>`
+            : `<div class="muted mb-16" style="font-size:12px">列表接口不带 JD；点右上「补抓描述」或在抓取时顺带补。</div>`}
           <div class="card-sub mb-8">Boss</div>
           <div>${escapeHtml(j.boss_name || "—")} · ${escapeHtml(j.boss_title || "")}</div>
           <div class="btn-row mt-24">
@@ -600,6 +627,139 @@ export async function renderJobs(root) {
     }
   });
 
+  // ---------- 手动补抓 JD ----------
+  let descPollTimer = null;
+
+  function fmtEta(sec) {
+    if (!isFinite(sec) || sec <= 0) return "—";
+    const s = Math.round(sec);
+    if (s < 60) return `${s} 秒`;
+    return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+  }
+
+  function renderDesc(s) {
+    const p = s.progress || {};
+    const total = p.total || 0;
+    const done = p.done || 0;
+    const interval = Number(p.interval || 1);
+    const running = s.status === "running";
+    const panel = $("desc-panel");
+    panel.classList.remove("hidden");
+    $("desc-phase").textContent = s.status;
+    $("desc-bar").style.width = (total ? Math.min(100, Math.round((done / total) * 100)) : running ? 5 : 100) + "%";
+    $("btn-desc-stop").classList.toggle("hidden", !running);
+    $("btn-fetch-desc").disabled = running;
+    $("btn-fetch-desc").textContent = running ? `补抓 ${done}/${total}` : "补抓描述";
+
+    const counts =
+      `已抓 ${done}/${total} · 有描述 ${p.ok || 0} · 空 ${p.skipped || 0} · 失败 ${p.failed || 0}` +
+      (p.already ? ` · 跳过已有 ${p.already}` : "");
+    // 撞安全网关停批时，从事件里捞出原因展示
+    const stopEvent = (s.events || []).find((e) => e.event === "stopped");
+    if (running) {
+      // 请求本身也要一点时间，按 interval + 0.6s 估剩余
+      const eta = fmtEta((total - done) * (interval + 0.6));
+      $("desc-msg").textContent =
+        `${counts} · 间隔 ${interval}s · 约剩 ${eta}` + (p.current ? ` · 当前：${p.current}` : "");
+    } else {
+      $("desc-msg").textContent =
+        counts +
+        (stopEvent
+          ? ` · ${stopEvent.reason || "已停"}`
+          : s.error
+            ? ` · ${s.error}`
+            : s.status === "cancelled"
+              ? " · 已取消"
+              : " · 完成");
+    }
+
+    const log = $("desc-log");
+    if (s.events && s.events.length) {
+      log.innerHTML = s.events
+        .slice(-20)
+        .map((e) => {
+          const t = e.at
+            ? new Date(e.at * 1000).toLocaleTimeString("zh-CN", { hour12: false })
+            : "";
+          const label =
+            e.event === "item_error"
+              ? `✗ ${e.job_name || ""} ${e.message || ""}`
+              : e.event === "item_done"
+                ? `${e.has_desc ? "✓" : "○"} ${e.job_name || ""}`
+                : e.event === "item_skipped"
+                  ? `– ${e.job_name || ""} ${e.reason || "跳过"}`
+                  : e.event === "stopped"
+                    ? `⛔ ${e.reason || "已停"}`
+                    : e.event || "";
+          return `<div class="ev"><time>${t}</time><span class="name">${escapeHtml(String(label))}</span></div>`;
+        })
+        .join("");
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+
+  function stopDescPoll() {
+    clearInterval(descPollTimer);
+    descPollTimer = null;
+    $("btn-fetch-desc").disabled = false;
+    $("btn-fetch-desc").textContent = "补抓描述";
+  }
+
+  function startDescPoll() {
+    clearInterval(descPollTimer);
+    descPollTimer = setInterval(async () => {
+      try {
+        const s = await api.get("/api/jobs/fetch-descriptions/status");
+        renderDesc(s);
+        if (["done", "error", "cancelled"].includes(s.status)) {
+          stopDescPoll();
+          const p = s.progress || {};
+          const stopEv = (s.events || []).find((e) => e.event === "stopped");
+          toast(
+            s.status === "done"
+              ? stopEv
+                ? stopEv.reason || "已停"
+                : `补抓完成：有描述 ${p.ok || 0} / 空 ${p.skipped || 0} / 失败 ${p.failed || 0}`
+              : s.status === "error"
+                ? "补抓出错：" + (s.error || "")
+                : "补抓已取消",
+            s.status === "error" ? "bad" : stopEv ? "warn" : "ok"
+          );
+          loadJobs();
+        }
+      } catch { /* ignore */ }
+    }, 1200);
+  }
+
+  $("btn-fetch-desc").addEventListener("click", async () => {
+    if (descPollTimer) return toast("补抓任务已在跑", "warn");
+    try {
+      // interval 不传 = 服务端默认 1s（防风控）
+      const task = await api.post("/api/jobs/fetch-descriptions", { limit: 0 });
+      toast(`补抓已启动（${task.progress?.total ?? "?"} 条）`, "ok");
+      renderDesc(task);
+      startDescPoll();
+    } catch (err) {
+      stopDescPoll();
+      toast(err.message, "bad");
+    }
+  });
+
+  $("btn-desc-stop").addEventListener("click", async () => {
+    try {
+      const s = await api.post("/api/jobs/fetch-descriptions/cancel");
+      renderDesc(s);
+      toast("已请求停止，抓完当前这条就收手", "warn");
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  });
+
+  $("btn-desc-hide").addEventListener("click", () => {
+    if (descPollTimer) return toast("还在跑，先停掉再收起", "warn");
+    $("desc-panel").classList.add("hidden");
+  });
+
   $("btn-prev").addEventListener("click", () => {
     offset = Math.max(0, offset - limit);
     loadJobs();
@@ -623,5 +783,19 @@ export async function renderJobs(root) {
     }
   } catch { /* ignore */ }
 
-  return () => clearInterval(pollTimer);
+  // 恢复进行中的补抓
+  try {
+    const s = await api.get("/api/jobs/fetch-descriptions/status");
+    if (s.task_id && s.status === "running") {
+      renderDesc(s);
+      startDescPoll();
+    } else if (s.task_id) {
+      renderDesc(s); // 上一轮结果留着看
+    }
+  } catch { /* ignore */ }
+
+  return () => {
+    clearInterval(pollTimer);
+    clearInterval(descPollTimer);
+  };
 }

@@ -52,14 +52,14 @@ INSERT INTO jobs (
     city_name, area_district, business_district, brand_stage_name,
     job_labels, skills, welfare_list, boss_name, boss_title,
     expect_id, job_type, job_valid_status, security_id, lid,
-    page, raw_json, fetched_at
+    page, raw_json, fetched_at, job_desc, detail_fetched_at
 ) VALUES (
     :encrypt_job_id, :job_name, :brand_name, :location, :salary_desc,
     :job_experience, :job_degree, :brand_industry, :brand_scale_name,
     :city_name, :area_district, :business_district, :brand_stage_name,
     :job_labels, :skills, :welfare_list, :boss_name, :boss_title,
     :expect_id, :job_type, :job_valid_status, :security_id, :lid,
-    :page, :raw_json, :fetched_at
+    :page, :raw_json, :fetched_at, :job_desc, :detail_fetched_at
 )
 ON CONFLICT(encrypt_job_id) DO UPDATE SET
     job_name          = excluded.job_name,
@@ -87,6 +87,9 @@ ON CONFLICT(encrypt_job_id) DO UPDATE SET
     page              = excluded.page,
     raw_json          = excluded.raw_json,
     fetched_at        = excluded.fetched_at
+    -- job_desc / detail_fetched_at 故意不进 UPDATE：
+    -- 列表接口不回 JD，重抓一页会拿空串把已抓到的描述抹掉。
+    -- 写 JD 只走 update_job_desc()。
 """
 
 _INSERT_PAGE = """
@@ -169,6 +172,21 @@ class JobStore:
         """连续存多页（离线回放用；线上是抓一页存一页）。"""
         return [self.save_page(result) for result in results]
 
+    def update_job_desc(
+        self, encrypt_job_id: str, job_desc: str, *, fetched_at: str | None = None
+    ) -> bool:
+        """把详情接口抓到的 JD 写回一条职位。
+
+        同时盖 ``detail_fetched_at``：空 JD 也记一笔，免得下次补抓又翻它一遍。
+        :return: 有没有真的写到行（职位不在库里 → ``False``）。
+        """
+        cur = self._conn.execute(
+            "UPDATE jobs SET job_desc = ?, detail_fetched_at = ? WHERE encrypt_job_id = ?",
+            (job_desc or "", fetched_at or _now(), encrypt_job_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
     # ------------------------------------------------------------------ #
     # 查询
     # ------------------------------------------------------------------ #
@@ -225,6 +243,45 @@ class JobStore:
             sql += " WHERE " + " AND ".join(where)
         row = self._conn.execute(sql, params).fetchone()
         return int(row["n"]) if row else 0
+
+    def list_jobs_missing_desc(
+        self, *, limit: int = 20, offset: int = 0
+    ) -> list[Job]:
+        """列出**还没抓到描述**的职位，手动补抓用。
+
+        两条都不回，保证「已有描述的不再重复获取」：
+
+        - ``job_desc != ''`` —— 已经有 JD 了；
+        - ``detail_fetched_at != ''`` —— 抓过（哪怕接口回了空 JD），别每次去撞同一批。
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM jobs WHERE job_desc = '' AND detail_fetched_at = '' "
+            "ORDER BY fetched_at DESC, page ASC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def count_jobs_missing_desc(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE job_desc = '' AND detail_fetched_at = ''"
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def fetched_desc_ids(self, encrypt_job_ids: Sequence[str]) -> set[str]:
+        """批量问「这些职位里哪些已经抓过详情」，回已抓过的 id 集合。
+
+        抓取流程顺带补 JD 时用：一页里已入库、已有描述的**不再重复拉详情**。
+        """
+        ids = [str(i) for i in encrypt_job_ids if i]
+        if not ids:
+            return set()
+        placeholders = ",".join("?" * len(ids))
+        rows = self._conn.execute(
+            f"SELECT encrypt_job_id FROM jobs "
+            f"WHERE encrypt_job_id IN ({placeholders}) AND detail_fetched_at != ''",
+            ids,
+        ).fetchall()
+        return {str(row["encrypt_job_id"]) for row in rows}
 
     def delete_job(self, encrypt_job_id: str) -> bool:
         """删一条职位；返回是否真的删掉了。"""
@@ -324,6 +381,8 @@ def _job_params(job: Job, fetched_at: str) -> dict[str, Any]:
     params["skills"] = json.dumps(list(job.skills), ensure_ascii=False)
     params["welfare_list"] = json.dumps(list(job.welfare_list), ensure_ascii=False)
     params["fetched_at"] = fetched_at
+    params["job_desc"] = job.job_desc
+    params["detail_fetched_at"] = job.detail_fetched_at
     return params
 
 
@@ -355,6 +414,8 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         security_id=data.get("security_id") or "",
         lid=data.get("lid") or "",
         page=int(data.get("page") or 0),
+        job_desc=data.get("job_desc") or "",
+        detail_fetched_at=data.get("detail_fetched_at") or "",
     )
 
 

@@ -170,3 +170,142 @@ def test_open_store_uses_path(tmp_path):
     with open_store(path) as store:
         store.save_page(make_page(jobs=[make_job("a")]))
     assert path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# job_desc / detail_fetched_at（JD 补抓）
+# --------------------------------------------------------------------------- #
+
+
+def test_job_desc_defaults_empty(store: JobStore):
+    store.save_page(make_page(jobs=[make_job("a")]))
+    job = store.get_job("a")
+    assert job is not None
+    assert job.job_desc == ""
+    assert job.detail_fetched_at == ""
+
+
+def test_update_job_desc_writes_and_stamps(store: JobStore):
+    store.save_page(make_page(jobs=[make_job("a")]))
+    assert store.update_job_desc("a", "岗位职责：\n写代码", fetched_at="2026-10-08 12:00:00")
+    job = store.get_job("a")
+    assert job is not None
+    assert job.job_desc == "岗位职责：\n写代码"
+    assert job.detail_fetched_at == "2026-10-08 12:00:00"
+
+
+def test_update_job_desc_marks_empty_too(store: JobStore):
+    """详情回来没 JD 也要盖时间戳，免得下次补抓又翻它一遍。"""
+    store.save_page(make_page(jobs=[make_job("a")]))
+    assert store.update_job_desc("a", "", fetched_at="2026-10-08 12:00:00")
+    job = store.get_job("a")
+    assert job is not None
+    assert job.job_desc == ""
+    assert job.detail_fetched_at == "2026-10-08 12:00:00"
+
+
+def test_update_job_desc_missing_job_returns_false(store: JobStore):
+    assert not store.update_job_desc("nope", "x")
+
+
+def test_resave_does_not_wipe_job_desc(store: JobStore):
+    """列表接口不回 JD：重抓一页不能拿空串把已抓到的描述抹掉。"""
+    store.save_page(make_page(jobs=[make_job("a")]))
+    store.update_job_desc("a", "已抓到的 JD", fetched_at="2026-10-08 12:00:00")
+    store.save_page(make_page(page=2, jobs=[make_job("a", job_name="改过名", page=2)]))
+    job = store.get_job("a")
+    assert job is not None
+    assert job.job_name == "改过名"
+    assert job.job_desc == "已抓到的 JD"
+    assert job.detail_fetched_at == "2026-10-08 12:00:00"
+
+
+def test_list_jobs_missing_desc(store: JobStore):
+    store.save_page(make_page(jobs=[make_job("a"), make_job("b"), make_job("c")]))
+    store.update_job_desc("b", "有描述", fetched_at="2026-10-08 12:00:00")
+    assert store.count_jobs_missing_desc() == 2
+    missing = store.list_jobs_missing_desc()
+    assert {j.encrypt_job_id for j in missing} == {"a", "c"}
+    assert store.list_jobs_missing_desc(limit=1) and len(store.list_jobs_missing_desc(limit=1)) == 1
+
+
+def test_list_jobs_missing_desc_已有描述不再重复获取(store: JobStore):
+    """已有 JD 的一条都不回；抓过但回空 JD 的也跳过（别每次撞同一批）。"""
+    store.save_page(
+        make_page(jobs=[make_job("a"), make_job("b"), make_job("c"), make_job("d")])
+    )
+    store.update_job_desc("b", "已经有 JD 了", fetched_at="2026-10-08 12:00:00")
+    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")  # 抓过，回空
+    assert store.count_jobs_missing_desc() == 2
+    assert {j.encrypt_job_id for j in store.list_jobs_missing_desc()} == {"a", "d"}
+
+
+def test_fetched_desc_ids(store: JobStore):
+    """批量问「哪些已经抓过详情」——抓取流程顺带补 JD 时跳过已有的。"""
+    store.save_page(make_page(jobs=[make_job("a"), make_job("b"), make_job("c")]))
+    store.update_job_desc("b", "有描述", fetched_at="2026-10-08 12:00:00")
+    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")  # 空也算抓过
+
+    assert store.fetched_desc_ids(["a", "b", "c", "不在库里的"]) == {"b", "c"}
+    assert store.fetched_desc_ids([]) == set()
+    assert store.fetched_desc_ids(["a"]) == set()
+
+
+def test_column_migration_adds_desc_columns(tmp_path):
+    """老库（建表时还没有 job_desc 列）打开后要能自动补列。"""
+    import sqlite3
+
+    import boss_db
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE jobs (
+            encrypt_job_id     TEXT PRIMARY KEY,
+            job_name           TEXT NOT NULL,
+            brand_name         TEXT NOT NULL,
+            location           TEXT NOT NULL DEFAULT '',
+            salary_desc        TEXT NOT NULL DEFAULT '',
+            job_experience     TEXT NOT NULL DEFAULT '',
+            job_degree         TEXT NOT NULL DEFAULT '',
+            brand_industry     TEXT NOT NULL DEFAULT '',
+            brand_scale_name   TEXT NOT NULL DEFAULT '',
+            city_name          TEXT NOT NULL DEFAULT '',
+            area_district      TEXT NOT NULL DEFAULT '',
+            business_district  TEXT NOT NULL DEFAULT '',
+            brand_stage_name   TEXT NOT NULL DEFAULT '',
+            job_labels         TEXT NOT NULL DEFAULT '[]',
+            skills             TEXT NOT NULL DEFAULT '[]',
+            welfare_list       TEXT NOT NULL DEFAULT '[]',
+            boss_name          TEXT NOT NULL DEFAULT '',
+            boss_title         TEXT NOT NULL DEFAULT '',
+            expect_id          TEXT NOT NULL DEFAULT '',
+            job_type           INTEGER NOT NULL DEFAULT 0,
+            job_valid_status   INTEGER NOT NULL DEFAULT 1,
+            security_id        TEXT NOT NULL DEFAULT '',
+            lid                TEXT NOT NULL DEFAULT '',
+            page               INTEGER NOT NULL DEFAULT 0,
+            raw_json           TEXT NOT NULL DEFAULT '',
+            fetched_at         TEXT NOT NULL
+        );
+        INSERT INTO jobs (encrypt_job_id, job_name, brand_name, fetched_at)
+        VALUES ('legacy-1', '老岗位', '老公司', '2026-01-01 00:00:00');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with JobStore(path) as store:
+        job = store.get_job("legacy-1")
+        assert job is not None
+        assert job.job_desc == ""
+        assert job.detail_fetched_at == ""
+        assert store.update_job_desc("legacy-1", "补上的 JD")
+        job = store.get_job("legacy-1")
+        assert job is not None
+        assert job.job_desc == "补上的 JD"
+
+    # 再开一次（幂等）不炸
+    with JobStore(path) as store:
+        assert store.count_jobs() == 1

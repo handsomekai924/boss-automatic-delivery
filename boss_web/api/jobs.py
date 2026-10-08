@@ -1,4 +1,4 @@
-"""职位库：列表 / 详情 / 删除 / 统计。"""
+"""职位库：列表 / 详情 / 删除 / 统计 / 补抓描述。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from boss_jobs.store import JobStore
 
 from ..errors import NotFoundError, ValidationWebError
+from ..services.desc_task import desc_tasks
 
 router = APIRouter()
 
@@ -22,6 +23,13 @@ class ClearBody(BaseModel):
     confirm: bool = False
     city: str | None = None
     keyword: str | None = None
+
+
+class FetchDescBody(BaseModel):
+    #: 本次最多补几条；0 = 全部没描述的
+    limit: int = Field(0, ge=0, le=5000)
+    #: 条间隔（秒）。0/不传 = 服务端默认 ``DETAIL_INTERVAL``（1s），防风控。
+    interval: float = Field(0.0, ge=0.0, le=30.0)
 
 
 @router.get("")
@@ -46,6 +54,7 @@ def list_jobs(
 def stats() -> dict[str, Any]:
     with JobStore() as store:
         summary = store.summary()
+        summary["missing_desc"] = store.count_jobs_missing_desc()
         # list_pages 回的是表原始列名（inserted_count），流水事件用的是 inserted
         # ——这里统一成事件的键名，前端一套字段吃两种来源。
         pages_log = []
@@ -56,6 +65,29 @@ def stats() -> dict[str, Any]:
             pages_log.append(item)
         summary["pages_log"] = pages_log
     return summary
+
+
+# ---- 手动补抓 JD：必须排在 /{encrypt_job_id} 之前，免得被动态路由吃掉 ----
+
+
+@router.post("/fetch-descriptions")
+def fetch_descriptions(body: FetchDescBody | None = None) -> dict[str, Any]:
+    """对 ``detail_fetched_at = ''`` 的职位批量补 JD（后台任务）。"""
+    limit = (body.limit if body else 0) or 0
+    interval = (body.interval if body else 0.0) or None
+    task = desc_tasks.start(limit=limit, interval=interval)
+    return task.snapshot()
+
+
+@router.get("/fetch-descriptions/status")
+def fetch_descriptions_status() -> dict[str, Any]:
+    return desc_tasks.snapshot()
+
+
+@router.post("/fetch-descriptions/cancel")
+def fetch_descriptions_cancel() -> dict[str, Any]:
+    task = desc_tasks.cancel()
+    return task.snapshot()
 
 
 @router.get("/{encrypt_job_id}")

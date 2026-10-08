@@ -23,7 +23,7 @@ import requests
 
 from . import config as C
 from .errors import JobApiError, JobDataError, JobError, JobTransportError
-from .models import PageResult, clean_page
+from .models import PageResult, clean_page, extract_job_desc
 from .store import JobStore, SaveOutcome, open_store
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,22 @@ class CrawlReport:
 
     def summary_lines(self) -> list[str]:
         return self.stats.summary_lines()
+
+
+@dataclass(frozen=True)
+class JobDetail:
+    """一次职位详情调用的清洗结果。
+
+    :param job_desc: 清洗后的 JD 正文（可能为空串——有的职位就是没写）
+    :param raw: 整包响应，便于排查字段名对不上
+    """
+
+    job_desc: str
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_desc(self) -> bool:
+        return bool(self.job_desc)
 
 
 class JobClient:
@@ -180,23 +196,113 @@ class JobClient:
         params = dict(search_filter.to_params())
         path = self.endpoints["job_search"]
         action = f"搜索第 {params.get('page', '?')} 页"
+        payload = self._get_json_with_stoken_retry(path, params=params, action=action)
+        return clean_page(payload, page=int(params.get("page", 1)))
 
-        if self.stoken_provider is not None:
-            # 先补一枚没过期的，省得每次都撞一次 37 再回头补
-            token = self.stoken_provider.ensure()
-            self._set_cookie(C.STOKEN_COOKIE, token)
+    def _get_json_with_stoken_retry(self, path: str, params: dict[str, Any], action: str) -> Any:
+        """打一发；撞 code 37 时**先歇一下拿同一枚重试**，还不行才强制换新。
 
+        37 有两类原因：令牌不对、或者**请求太快 / 被安全网关拦着**。
+        实测（2026-10-08）连环 code 37 时换新**没用**——刚换的令牌一样被拒，
+        这时正确动作是**别再撞**，而不是多打一发。所以：
+
+        - 先退避 2s 拿同一枚重试（「太快了」这一支）；
+        - 还 37 再 ``ensure(force=True)``；**没真换到新令牌**（换新冷却中）
+          就不再打第三发，把上一个 37 抛给调用方去停整批。
+        """
+        self._ensure_stoken()
         try:
-            payload = self._get_json(path, params=params, action=action)
+            return self._get_json(path, params=params, action=action)
         except JobApiError as exc:
             if not exc.is_browser_check or self.stoken_provider is None:
                 raise
-            logger.info("搜索撞上安全网关 code 37，自动补 %s 后重试", C.STOKEN_COOKIE)
-            token = self.stoken_provider.ensure(force=True)
-            self._set_cookie(C.STOKEN_COOKIE, token)
-            payload = self._get_json(path, params=params, action=action + "（补令牌后）")
+            first = exc
+        logger.info(
+            "%s撞上安全网关 code 37，歇 %.1fs 拿同一枚 %s 重试",
+            action,
+            C.BROWSER_CHECK_BACKOFF,
+            C.STOKEN_COOKIE,
+        )
+        self._sleep(C.BROWSER_CHECK_BACKOFF)
+        try:
+            return self._get_json(path, params=params, action=action + "（歇会儿后）")
+        except JobApiError as exc:
+            if not exc.is_browser_check or self.stoken_provider is None:
+                raise
+            first = exc
 
-        return clean_page(payload, page=int(params.get("page", 1)))
+        before = self._get_cookie(C.STOKEN_COOKIE)
+        logger.info("歇完还 37，强制换新 %s 后再试一次", C.STOKEN_COOKIE)
+        self._ensure_stoken(force=True)
+        if self._get_cookie(C.STOKEN_COOKIE) == before:
+            # 冷却里没真换到新令牌：同一枚刚被拒过，再打一发纯属撞墙
+            logger.info(
+                "%s 没换到新令牌（换新冷却中），不打第三发，交给上层停批",
+                C.STOKEN_COOKIE,
+            )
+            raise first
+        return self._get_json(path, params=params, action=action + "（补令牌后）")
+
+    def _get_cookie(self, name: str) -> str:
+        jar = getattr(self._http, "cookies", None)
+        if jar is None:
+            return ""
+        getter = getattr(jar, "get", None)
+        if getter is None:
+            return ""
+        try:
+            return str(getter(name) or "")
+        except Exception:  # noqa: BLE001 - cookiejar 对非法字符会抛
+            return ""
+
+    def _ensure_stoken(self, *, force: bool = False) -> None:
+        """有 :attr:`stoken_provider` 就先补一枚没过期的 ``__zp_stoken__``。
+
+        详情接口跟搜索一样站在安全网关后面，缺令牌回 code 37。
+        """
+        if self.stoken_provider is None:
+            return
+        token = self.stoken_provider.ensure(force=force)
+        self._set_cookie(C.STOKEN_COOKIE, token)
+
+    # ------------------------------------------------------------------ #
+    # 职位详情（JD 正文）
+    # ------------------------------------------------------------------ #
+
+    def fetch_job_detail(self, *, security_id: str, lid: str) -> JobDetail:
+        """拉一条职位详情，抽出 JD 正文。
+
+        打的是 ``/wapi/zpgeek/job/detail.json``（见 :data:`config.ENDPOINTS`），
+        query 只带 ``securityId`` + ``lid``（调用方 ``tc({securityId, lid})`` 就这
+        两参形态）。列表接口不回 JD，正文在 ``zpData.jobInfo.postDescription``。
+
+        详情跟搜索一样要 ``__zp_stoken__``（实测 code 37），所以这里也走
+        :meth:`_get_json_with_stoken_retry`（撞 37 先退避再换新）。
+
+        :param security_id: 职位的 ``securityId``（列表 item 里有）
+        :param lid: 列表 item / 页级 ``lid``
+        :raises JobApiError: code 37 且自动补令牌也救不回来、code 36 账号风控等
+        """
+        if not security_id:
+            raise ValueError("security_id 不能为空")
+        params: dict[str, Any] = {"securityId": security_id}
+        if lid:
+            params["lid"] = lid
+        path = self.endpoints["job_detail"]
+        payload = self._get_json_with_stoken_retry(path, params=params, action="职位详情")
+        return JobDetail(job_desc=extract_job_desc(payload), raw=payload)
+
+    def fetch_job_detail_for(
+        self, job: Any, *, store: JobStore | None = None
+    ) -> JobDetail:
+        """对一条 :class:`~boss_jobs.models.Job` 抓详情并**立刻写回** ``job_desc``。
+
+        单条失败往上抛，调用方决定要不要继续下一条（抓取流程里会只记流水）。
+        """
+        detail = self.fetch_job_detail(security_id=job.security_id, lid=job.lid)
+        if store is not None:
+            store.update_job_desc(job.encrypt_job_id, detail.job_desc)
+        return detail
 
     def _set_cookie(self, name: str, value: str) -> None:
         from .stoken import put_cookie  # 延迟导入，避免跟 stoken 硬绑
@@ -221,6 +327,8 @@ class JobClient:
         search_filter: Any | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
+        enrich_details: bool = False,
+        detail_interval: float | None = None,
     ) -> CrawlReport:
         """分页抓取职位，**每页即时清洗入库**，页与页之间硬睡一会。
 
@@ -235,11 +343,19 @@ class JobClient:
             筛选条件一般从配置文件读，见 :func:`boss_filter.load_search_filter`。
         :param on_progress: 每页入库后回调 ``{page, raw_count, kept_count,
             inserted, updated, has_more, stopped_reason?}``；网页控制台用来推进度。
+            ``enrich_details`` 开着时还会穿插 ``{event: "detail_*", …}`` 事件
+            （**不带** ``page`` / 计数键，不会把页数搅浑）。
         :param should_stop: 翻页前（含起始页）调一次；返回 ``True`` 则协作式收手，
             已入库的页保留。适合后台任务的取消按钮。
+        :param enrich_details: 每页入库后顺带补 JD（默认关，网页抓取流程会开）。
+            单条详情失败只发一条 ``detail_error`` 事件，**不**中断列表抓取。
+        :param detail_interval: 补详情的条间隔（秒），默认 :data:`config.DETAIL_INTERVAL`
         :return: :class:`CrawlReport`（统计 + 每页明细）
         """
         interval = self.page_interval if page_interval is None else max(0.0, page_interval)
+        detail_gap = (
+            C.DETAIL_INTERVAL if detail_interval is None else max(0.0, detail_interval)
+        )
         own_store = store is None
         store = store or open_store(db_path)
         run_id = uuid.uuid4().hex[:12]
@@ -265,6 +381,11 @@ class JobClient:
                 payload.update(extra)
             on_progress(payload)
 
+        def _push_detail(payload: dict[str, Any]) -> None:
+            if on_progress is None:
+                return
+            on_progress({"run_id": run_id, **payload})
+
         try:
             page = start_page
             while True:
@@ -285,6 +406,15 @@ class JobClient:
                 stats = stats.add(result, outcome)
                 report.stats = stats
                 _push(result, outcome)
+
+                if enrich_details:
+                    self._enrich_page_details(
+                        result,
+                        store=store,
+                        interval=detail_gap,
+                        on_detail=_push_detail,
+                        should_stop=should_stop,
+                    )
 
                 if result.is_empty:
                     reason = f"第 {page} 页接口回空列表"
@@ -313,6 +443,108 @@ class JobClient:
 
         logger.info("抓取结束：%s", " / ".join(report.stats.summary_lines()))
         return report
+
+    def _enrich_page_details(
+        self,
+        result: PageResult,
+        *,
+        store: JobStore,
+        interval: float = C.DETAIL_INTERVAL,
+        on_detail: Callable[[dict[str, Any]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """一页入库后顺带把 JD 补上。
+
+        **已经有描述的不再重复拉**（重抓一页时尤其重要：已有 JD 的不该再打
+        一遍详情接口）。只对 ``detail_fetched_at`` 还空着的补。
+
+        **单条失败不拖垮列表抓取**：只发一条 ``detail_error`` 事件就下一条。
+        描述抓到了也立刻 ``update_job_desc`` 落库，中途断了不丢。
+        """
+        def _emit(payload: dict[str, Any]) -> None:
+            if on_detail is not None:
+                on_detail(payload)
+
+        already = store.fetched_desc_ids([job.encrypt_job_id for job in result.jobs])
+        todo = [job for job in result.jobs if job.encrypt_job_id not in already]
+        if already:
+            logger.debug(
+                "本页 %d 条里 %d 条已有描述，跳过；只补剩下 %d 条",
+                len(result.jobs),
+                len(already),
+                len(todo),
+            )
+
+        done = 0
+        # 连续撞安全网关的计数：连环 N 次就别再砸了（见 C.BROWSER_CHECK_GIVEUP）
+        consecutive_37 = 0
+        for job in result.jobs:
+            if job.encrypt_job_id in already:
+                _emit(
+                    {
+                        "event": "detail_skipped",
+                        "encrypt_job_id": job.encrypt_job_id,
+                        "job_name": job.job_name,
+                        "reason": "已有描述",
+                    }
+                )
+                continue
+            if should_stop is not None and should_stop():
+                _emit({"event": "detail_stopped", "reason": "收到停止信号"})
+                return
+            try:
+                detail = self.fetch_job_detail(
+                    security_id=job.security_id, lid=job.lid
+                )
+            except Exception as exc:  # noqa: BLE001 - 详情失败不拖垮列表抓取
+                logger.warning(
+                    "补抓 JD 失败 %s / %s：%s", job.encrypt_job_id, job.job_name, exc
+                )
+                _emit(
+                    {
+                        "event": "detail_error",
+                        "encrypt_job_id": job.encrypt_job_id,
+                        "job_name": job.job_name,
+                        "message": str(exc),
+                    }
+                )
+                if isinstance(exc, JobApiError) and exc.is_browser_check:
+                    consecutive_37 += 1
+                    if consecutive_37 >= C.BROWSER_CHECK_GIVEUP:
+                        # 整段被限速了：停掉本页的补 JD，列表抓取本身照常走
+                        logger.warning(
+                            "连续 %d 次撞安全网关 code 37，本页补 JD 停手；"
+                            "过几分钟再试（别在这时候继续砸）",
+                            consecutive_37,
+                        )
+                        _emit(
+                            {
+                                "event": "detail_stopped",
+                                "reason": (
+                                    f"连续 {consecutive_37} 次撞安全网关 code 37，"
+                                    "已停补 JD；过几分钟再试"
+                                ),
+                            }
+                        )
+                        return
+                    # 限速墙抬手前多躺一会儿，别拿下一条去探墙
+                    self._sleep(C.BROWSER_CHECK_COOLOFF)
+            else:
+                consecutive_37 = 0
+                store.update_job_desc(job.encrypt_job_id, detail.job_desc)
+                _emit(
+                    {
+                        "event": "detail_done",
+                        "encrypt_job_id": job.encrypt_job_id,
+                        "job_name": job.job_name,
+                        "has_desc": detail.has_desc,
+                        "desc_len": len(detail.job_desc),
+                    }
+                )
+            done += 1
+            # 最后一条真抓的不睡，省掉尾部那一秒（下一页还有自己的页间隔）
+            if interval > 0 and done < len(todo):
+                self._sleep(interval)
 
     def iter_pages(
         self,

@@ -14,6 +14,7 @@ import pytest
 
 import boss_db
 from boss_jobs.cdp_stoken import (
+    RENEW_COOLDOWN,
     CdpStokenProvider,
     StokenRecord,
     StokenStore,
@@ -189,6 +190,69 @@ def test_ensure_强制换新(tmp_path: Path):
     store.save(StokenRecord(token="0138OLD", minted_at=time.time(), expires_at=time.time() + 9999))
     calls: list[str] = []
 
+    p = CdpStokenProvider(
+        http=FakeHttp(),
+        store=store,
+        acquire=lambda: calls.append("acquired") or "0138NEW",
+    )
+    assert p.ensure(force=True) == "0138NEW"
+    assert calls == ["acquired"]
+
+
+def test_ensure_令牌没变就别再写盘(tmp_path: Path):
+    """``ensure()`` 每条请求都会走；Cookie 里已经是这枚就**别再** ``_persist``——
+    否则日志上就是一行行「登录态已保存」刷屏（fetch.log 那个循环重复）。"""
+    session_db = tmp_path / "session.db"
+    store = StokenStore(tmp_path / "boss.db")
+    store.save(StokenRecord(token="0138OLD", minted_at=time.time(), expires_at=time.time() + 9999))
+    http = FakeHttp()
+    p = CdpStokenProvider(http=http, store=store, acquire=lambda: "0138NEW", session_path=session_db)
+
+    writes: list[str] = []
+    original = p._persist
+
+    def counting_persist(*args, **kwargs):
+        writes.append(args[0] if args else kwargs.get("token"))
+        return original(*args, **kwargs)
+
+    p._persist = counting_persist  # type: ignore[method-assign]
+
+    assert p.ensure() == "0138OLD"
+    assert writes == ["0138OLD"]          # 第一次：Cookie 还空着，要写
+    assert p.ensure() == "0138OLD"
+    assert writes == ["0138OLD"]          # 第二次：已经这枚了，不写
+    assert p.ensure() == "0138OLD"
+    assert writes == ["0138OLD"]          # 同上
+
+
+def test_ensure_强制换新有冷却(tmp_path: Path):
+    """刚换过就别连环拉 Chrome——37 有时只是太快，连环换新又慢又更容易撞风控。"""
+    store = StokenStore(tmp_path / "boss.db")
+    calls: list[str] = []
+    p = CdpStokenProvider(
+        http=FakeHttp(),
+        store=store,
+        acquire=lambda: calls.append("acquired") or "0138NEW",
+    )
+    assert p.ensure(force=True) == "0138NEW"
+    assert calls == ["acquired"]
+
+    # 冷却期内：还给同一枚，不再拉 Chrome
+    assert p.ensure(force=True) == "0138NEW"
+    assert calls == ["acquired"]
+
+    # 冷却期过了：真换
+    p._last_renew_at = time.time() - RENEW_COOLDOWN - 1
+    assert p.ensure(force=True) == "0138NEW"
+    assert calls == ["acquired", "acquired"]
+
+
+def test_ensure_冷却只认本进程换过的(tmp_path: Path):
+    """``_last_renew_at`` 是 0（本进程还没换过）时不该冷却——
+    否则「真的强制换新」会被上次落盘的 ``minted_at`` 误杀。"""
+    store = StokenStore(tmp_path / "boss.db")
+    store.save(StokenRecord(token="0138OLD", minted_at=time.time(), expires_at=time.time() + 9999))
+    calls: list[str] = []
     p = CdpStokenProvider(
         http=FakeHttp(),
         store=store,

@@ -82,6 +82,39 @@ def as_str_list(value: Any) -> tuple[str, ...]:
     return tuple(clean_text(item) for item in value if clean_text(item))
 
 
+_TAG_BREAK_RE = re.compile(r"(?i)<\s*(br|/p|/div|/li|/h[1-6])\s*[^>]*>")
+_TAG_RE = re.compile(r"<[^>]+>")
+_BLANK_RUN_RE = re.compile(r"\n{3,}")
+
+
+def clean_desc(value: Any) -> str:
+    """职位描述正文：HTML 转纯文本 + 压多余空行。
+
+    ``postDescription`` 在网页上是富文本，接口回的可能是 HTML 也可能是纯文本，
+    这里先按 HTML 剥标签（``<br>`` / 块级收尾当换行），再把连续空行压成一行。
+    **不**用 :func:`clean_text` 那种「全压成单空格」——JD 的换行是有结构的
+    （职责/要求分段），压平了后面匹配页没法读。
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    text = _TAG_BREAK_RE.sub("\n", value)
+    text = _TAG_RE.sub("", text)
+    text = (
+        text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+    )
+    lines = [line.strip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    text = "\n".join(lines)
+    text = _BLANK_RUN_RE.sub("\n\n", text)
+    return text.strip()
+
+
 # --------------------------------------------------------------------------- #
 # 职位
 # --------------------------------------------------------------------------- #
@@ -125,6 +158,12 @@ class Job:
 
     #: 这条是从第几页捞的（入库后才有意义）
     page: int = 0
+
+    #: 职位描述（JD 正文）。列表接口不回，靠 :meth:`JobClient.fetch_job_detail`
+    #: 逐条补；没抓过就是空串。
+    job_desc: str = ""
+    #: 详情抓取时间（ISO 风格 ``%Y-%m-%d %H:%M:%S``）；空串 = 还没抓过。
+    detail_fetched_at: str = ""
 
     @classmethod
     def from_api(cls, item: dict[str, Any], *, page: int = 0) -> "Job":
@@ -279,6 +318,31 @@ def clean_pages(pages: Iterable[dict[str, Any]]) -> tuple[Job, ...]:
     for index, payload in enumerate(pages, start=1):
         out.extend(clean_page(payload, page=index).jobs)
     return tuple(out)
+
+
+def extract_job_desc(payload: dict[str, Any]) -> str:
+    """从详情响应里抠出 JD 正文并清洗。
+
+    **实测**（2026-10-08）：正文在 ``zpData.jobInfo.postDescription``，
+    纯文本（带 ``\\n``），不是 HTML。顶层 ``zpData.postDescription`` 没有这格。
+    这里按实测路径优先，再兜几个同义位置，万一以后包一层也不用改。
+    """
+    data = payload.get("zpData")
+    if data is None:
+        data = payload.get("data")
+    if not isinstance(data, dict):
+        return ""
+
+    job_info = data.get("jobInfo")
+    if isinstance(job_info, dict):
+        for key in ("postDescription", "postDescriptionPlain", "jobDesc", "description"):
+            if job_info.get(key):
+                return clean_desc(job_info.get(key))
+
+    for key in ("postDescription", "postDescriptionPlain", "jobDesc", "description"):
+        if data.get(key):
+            return clean_desc(data.get(key))
+    return ""
 
 
 # --------------------------------------------------------------------------- #
