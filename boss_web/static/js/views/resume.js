@@ -1,12 +1,12 @@
-/** 简历航段：上传 MD · 章节解析 · 职位匹配分析 */
+/** 简历航段：上传 MD → LLM 固定模板解析 → 结构化结果 */
 
 import { api } from "../api.js";
-import { toast, modal, escapeHtml, scoreRing, fmtTime } from "../ui.js";
+import { toast, escapeHtml, fmtTime } from "../ui.js";
 
 export async function renderResume(root) {
   root.innerHTML = `
-    <h1 class="hero-title">简历 <span class="grad">匹配舱</span></h1>
-    <p class="hero-sub">上传 Markdown 简历，规则切出七大章节，再用你配置的 LLM 对库里的职位做匹配度、技能缺口与招呼语生成。</p>
+    <h1 class="hero-title">简历 <span class="grad">解析舱</span></h1>
+    <p class="hero-sub">上传 Markdown 简历，自动调用你配置的 LLM 走固定模板解析，输出结构化结果；匹配分析在「匹配」页做。</p>
 
     <div class="bento">
       <div class="card span-5">
@@ -24,46 +24,37 @@ export async function renderResume(root) {
 
         <div id="rs-list" class="mt-16"></div>
 
-        <div id="rs-preview" class="mt-16"></div>
+        <div class="mt-16" id="parse-state"></div>
+
+        <div class="btn-row mt-16">
+          <button class="btn primary" id="btn-parse">重新解析</button>
+          <button class="btn danger" id="del-rs">删除</button>
+        </div>
       </div>
 
       <div class="card span-7">
         <div class="card-head">
-          <h3 class="card-title">匹配分析</h3>
-          <span class="card-sub" id="an-state">idle</span>
+          <h3 class="card-title">解析结果</h3>
+          <span class="card-sub" id="pr-sub">尚未解析</span>
         </div>
-
-        <div class="field">
-          <label>分析职位数 top_k</label>
-          <input class="input mono" id="top-k" type="number" value="10" min="1" max="50">
-          <span class="hint">从库里按最近抓取取 N 条；也可先去职位舱勾选（进阶）</span>
+        <div id="pr-body">
+          <div class="empty"><div class="empty-icon">◌</div><p>上传或载入一份简历，解析结果会显示在这里</p></div>
         </div>
-
-        <div class="btn-row mb-16">
-          <button class="btn primary" id="btn-analyze">开始匹配</button>
-          <button class="btn danger hidden" id="btn-cancel-an">停止</button>
-        </div>
-
-        <div class="progress mb-8"><i id="an-bar" style="width:0%"></i></div>
-        <div class="muted mono mb-16" id="an-msg" style="font-size:12px">待命</div>
-
-        <div id="an-results"></div>
       </div>
     </div>
 
-    <div class="card mt-24 hidden" id="history-card">
+    <div class="card mt-24" id="raw-card">
       <div class="card-head">
-        <h3 class="card-title">历史分析</h3>
-        <span class="card-sub">data/boss.db</span>
+        <h3 class="card-title">简历原文</h3>
+        <span class="card-sub">仅阅读 · 按标题轻量分段，不算解析结果</span>
       </div>
-      <div id="history-list"></div>
+      <div id="raw-body"></div>
     </div>
   `;
 
   const $ = (id) => root.querySelector("#" + id);
   let currentResume = null;
-  let pollTimer = null;
-  let analyzeTaskId = null;
+  let parsing = false;
 
   // ---------- 上传 ----------
   const dz = $("dropzone");
@@ -89,57 +80,156 @@ export async function renderResume(root) {
     fd.append("file", file);
     try {
       const draft = await api.upload("/api/resume/upload", fd);
-      toast("简历已上传并解析", "ok");
       currentResume = draft;
-      renderPreview(draft);
+      toast("简历已上传，正在解析…", "ok");
+      renderRaw(draft);
       loadList();
+      await runParse(draft.resume_id);
     } catch (err) {
       toast(err.message || "上传失败", "bad");
     }
   }
 
-  function renderPreview(draft) {
-    $("rs-sub").textContent = draft.resume_id;
-    const skills = (draft.skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
-    const sections = Object.entries(draft.sections || {})
-      .map(
-        ([k, v]) => `
-        <details class="acc">
-          <summary>${escapeHtml(k)} <span class="muted" style="font-size:11px">(${String(v || "").length} 字)</span></summary>
-          <div class="acc-body">${escapeHtml((v || "").slice(0, 1200))}</div>
-        </details>`
-      )
-      .join("");
-    const others = Object.entries(draft.other_sections || {})
-      .map(
-        ([k, v]) => `
-        <details class="acc">
-          <summary class="muted">${escapeHtml(k)}</summary>
-          <div class="acc-body">${escapeHtml((v || "").slice(0, 800))}</div>
-        </details>`
-      )
-      .join("");
+  // ---------- 解析 ----------
+  $("btn-parse").addEventListener("click", () => {
+    if (!currentResume) return toast("先上传或载入一份简历", "warn");
+    runParse(currentResume.resume_id);
+  });
 
-    $("rs-preview").innerHTML = `
-      <div class="flex between center mb-8">
-        <strong>${escapeHtml(draft.title)}</strong>
-        <button class="btn sm danger" id="del-rs">删除</button>
-      </div>
-      <div class="card-sub mb-8">技能标签</div>
-      <div class="pills mb-16">${skills || "<span class='muted'>未识别到技能标签章节</span>"}</div>
-      <div class="card-sub mb-8">章节</div>
-      ${sections || "<div class='muted'>没有识别到标准章节，原文仍会用于分析</div>"}
-      ${others}
-    `;
-    $("del-rs").addEventListener("click", async () => {
-      if (!confirm("删除这份简历？")) return;
-      await api.del("/api/resume/item/" + draft.resume_id);
+  $("del-rs").addEventListener("click", async () => {
+    if (!currentResume) return toast("没有可删除的简历", "warn");
+    if (!confirm("删除这份简历？")) return;
+    try {
+      await api.del("/api/resume/item/" + currentResume.resume_id);
       currentResume = null;
-      $("rs-preview").innerHTML = "";
+      $("pr-body").innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>上传或载入一份简历，解析结果会显示在这里</p></div>`;
+      $("pr-sub").textContent = "尚未解析";
+      $("raw-body").innerHTML = "";
       $("rs-sub").textContent = "—";
+      $("parse-state").innerHTML = "";
       loadList();
       toast("已删除", "ok");
-    });
+    } catch (err) {
+      toast(err.message || "删除失败", "bad");
+    }
+  });
+
+  async function runParse(resumeId) {
+    if (parsing) return;
+    parsing = true;
+    $("btn-parse").disabled = true;
+    $("pr-sub").textContent = "解析中…";
+    $("parse-state").innerHTML = `<div class="banner info">◌ 正在调用 LLM 解析（单次调用，约十几秒）…</div>`;
+    try {
+      const r = await api.post(`/api/resume/item/${resumeId}/parse`);
+      if (currentResume && currentResume.resume_id === resumeId) {
+        currentResume.llm = r.llm;
+        renderParsed(r.llm);
+      }
+      toast("解析完成", "ok");
+      loadList();
+    } catch (err) {
+      $("pr-sub").textContent = "解析失败";
+      $("parse-state").innerHTML = `<div class="banner bad">${escapeHtml(err.message || "解析失败")}</div>`;
+      toast(err.message || "解析失败", "bad");
+    } finally {
+      parsing = false;
+      $("btn-parse").disabled = false;
+    }
+  }
+
+  // ---------- 展示 ----------
+  function renderParsed(llm) {
+    if (!llm || !llm.data) {
+      $("pr-sub").textContent = "尚未解析";
+      $("pr-body").innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>还没有解析结果</p></div>`;
+      return;
+    }
+    const d = llm.data;
+    $("pr-sub").textContent = `${fmtTime(llm.parsed_at)} · ${escapeHtml(llm.model || "")}`;
+
+    const basic = d.basic || {};
+    const intent = d.intent || {};
+    const kv = (label, value) =>
+      value
+        ? `<div class="flex gap-8" style="padding:4px 0"><span class="muted" style="width:72px;flex-shrink:0">${label}</span><span>${escapeHtml(value)}</span></div>`
+        : "";
+
+    const listCard = (title, items, renderOne) =>
+      items && items.length
+        ? `<div class="card-sub mb-8 mt-16">${title}</div>
+           ${items.map(renderOne).join("")}`
+        : "";
+
+    const workHtml = listCard("工作经历", d.work, (w) => `
+      <div style="padding:10px 0;border-bottom:1px solid var(--stroke)">
+        <div class="flex between center">
+          <strong>${escapeHtml(w.company || "")}</strong>
+          <span class="muted" style="font-size:12px">${escapeHtml(w.period || "")}</span>
+        </div>
+        <div class="muted" style="font-size:12.5px;margin:2px 0 6px">${escapeHtml(w.title || "")}</div>
+        ${(w.highlights || []).map((h) => `<div class="muted" style="font-size:12.5px">· ${escapeHtml(h)}</div>`).join("")}
+      </div>`);
+
+    const projectHtml = listCard("项目经历", d.project, (p) => `
+      <div style="padding:10px 0;border-bottom:1px solid var(--stroke)">
+        <div class="flex between center">
+          <strong>${escapeHtml(p.name || "")}</strong>
+          <span class="muted" style="font-size:12px">${escapeHtml(p.period || "")}</span>
+        </div>
+        <div class="muted" style="font-size:12.5px;margin:2px 0 6px">${escapeHtml(p.role || "")}</div>
+        ${(p.highlights || []).map((h) => `<div class="muted" style="font-size:12.5px">· ${escapeHtml(h)}</div>`).join("")}
+      </div>`);
+
+    const eduHtml = listCard("教育经历", d.education, (e) => `
+      <div style="padding:8px 0;border-bottom:1px solid var(--stroke)">
+        <div class="flex between center">
+          <strong>${escapeHtml(e.school || "")}</strong>
+          <span class="muted" style="font-size:12px">${escapeHtml(e.period || "")}</span>
+        </div>
+        <div class="muted" style="font-size:12.5px">${escapeHtml([e.major, e.degree].filter(Boolean).join(" · "))}</div>
+      </div>`);
+
+    const skills = (d.skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
+
+    $("pr-body").innerHTML = `
+      <div class="card-sub mb-8">基本信息</div>
+      ${kv("姓名", basic.name)}${kv("电话", basic.phone)}${kv("邮箱", basic.email)}${kv("城市", basic.city)}
+
+      <div class="card-sub mb-8 mt-16">求职意向</div>
+      ${kv("岗位", intent.position)}${kv("城市", intent.city)}${kv("薪资", intent.salary)}
+
+      ${workHtml}
+      ${projectHtml}
+      ${eduHtml}
+
+      <div class="card-sub mb-8 mt-16">技能标签</div>
+      <div class="pills">${skills || "<span class='muted'>未提取到技能</span>"}</div>
+
+      ${d.self_evaluation ? `
+        <div class="card-sub mb-8 mt-16">自我评价</div>
+        <div class="muted" style="font-size:13px;line-height:1.7">${escapeHtml(d.self_evaluation)}</div>` : ""}
+
+      ${d.summary ? `
+        <div class="card-sub mb-8 mt-16">摘要（供匹配用）</div>
+        <div class="greeting-box">${escapeHtml(d.summary)}</div>` : ""}
+    `;
+    $("parse-state").innerHTML = "";
+  }
+
+  function renderRaw(draft) {
+    $("rs-sub").textContent = draft.resume_id;
+    const sections = Object.entries(draft.sections || {});
+    const others = Object.entries(draft.other_sections || {});
+    const block = (k, v) => `
+      <details class="acc">
+        <summary>${escapeHtml(k)} <span class="muted" style="font-size:11px">(${String(v || "").length} 字)</span></summary>
+        <div class="acc-body">${escapeHtml((v || "").slice(0, 2000))}</div>
+      </details>`;
+    $("raw-body").innerHTML =
+      (sections.map(([k, v]) => block(k, v)).join("") +
+        others.map(([k, v]) => block(k, v)).join("")) ||
+      `<div class="acc-body">${escapeHtml((draft.raw || "").slice(0, 4000))}</div>`;
   }
 
   async function loadList() {
@@ -147,186 +237,31 @@ export async function renderResume(root) {
       const r = await api.get("/api/resume/list");
       const items = r.items || [];
       $("rs-list").innerHTML = items
-        .map(
-          (it) => `
+        .map((it) => {
+          const parsed = it.llm && it.llm.has_data;
+          return `
           <div class="flex between center gap-8" style="padding:8px 0;border-bottom:1px solid var(--stroke)">
-            <span>${escapeHtml(it.title || it.resume_id)}</span>
+            <span>${escapeHtml(it.title || it.resume_id)}
+              ${parsed ? `<span class="pill accent">已解析</span>` : `<span class="pill">未解析</span>`}
+            </span>
             <button class="btn sm ghost" data-id="${escapeHtml(it.resume_id)}">载入</button>
-          </div>`
-        )
+          </div>`;
+        })
         .join("");
       $("rs-list").querySelectorAll("button[data-id]").forEach((b) => {
         b.addEventListener("click", async () => {
           const draft = await api.get("/api/resume/item/" + b.dataset.id);
           currentResume = draft;
-          renderPreview(draft);
-        });
-      });
-    } catch { /* ignore */ }
-  }
-
-  // ---------- 分析 ----------
-  $("btn-analyze").addEventListener("click", async () => {
-    if (!currentResume) return toast("先上传或载入一份简历", "warn");
-    try {
-      const task = await api.post("/api/resume/analyze", {
-        resume_id: currentResume.resume_id,
-        top_k: Number($("top-k").value) || 10,
-        job_ids: [],
-      });
-      analyzeTaskId = task.task_id;
-      $("btn-analyze").classList.add("hidden");
-      $("btn-cancel-an").classList.remove("hidden");
-      toast("分析已启动（串行调 LLM，请稍候）", "ok");
-      startPoll();
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-  });
-
-  $("btn-cancel-an").addEventListener("click", async () => {
-    if (!analyzeTaskId) return;
-    try {
-      await api.post(`/api/resume/analyze/${analyzeTaskId}/cancel`);
-      toast("已请求停止", "warn");
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-  });
-
-  function startPoll() {
-    clearInterval(pollTimer);
-    pollTimer = setInterval(async () => {
-      if (!analyzeTaskId) return;
-      try {
-        const s = await api.get(`/api/resume/analyze/${analyzeTaskId}`);
-        const done = s.done || 0;
-        const total = s.total || 1;
-        $("an-bar").style.width = (s.status === "running" ? Math.round((done / total) * 100) : 100) + "%";
-        $("an-state").textContent = s.status;
-        $("an-msg").textContent =
-          s.status === "running"
-            ? `${done}/${total} · ${s.current_job || ""}`
-            : s.error || s.status;
-        if (s.matches && s.matches.length) renderMatches(s.matches);
-        if (["done", "error", "cancelled"].includes(s.status)) {
-          clearInterval(pollTimer);
-          pollTimer = null;
-          $("btn-analyze").classList.remove("hidden");
-          $("btn-cancel-an").classList.add("hidden");
-          if (s.status === "done") {
-            toast("分析完成", "ok");
-            loadHistory();
-          } else if (s.status === "error") {
-            toast(s.error || "分析失败", "bad");
+          renderRaw(draft);
+          renderParsed(draft.llm);
+          if (!draft.llm) {
+            $("parse-state").innerHTML = "";
+            toast("这份简历还没解析，点「重新解析」开始", "warn");
           }
-        }
-      } catch { /* ignore */ }
-    }, 1200);
-  }
-
-  function renderMatches(matches) {
-    const ranked = [...matches].sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
-    $("an-results").innerHTML = ranked
-      .map((m) => {
-        const score = m.match_score || 0;
-        const matched = (m.matched_skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
-        const missing = (m.missing_skills || []).map((s) => `<span class="pill static bad">${escapeHtml(s)}</span>`).join(" ");
-        return `
-          <div class="card lift mb-16" style="padding:16px">
-            <div class="match-row">
-              ${scoreRing(score)}
-              <div class="match-main">
-                <h4>${escapeHtml(m.job_name)} <span class="muted" style="font-weight:400;font-size:13px">@ ${escapeHtml(m.brand_name)}</span></h4>
-                <div class="muted" style="font-size:12px">${escapeHtml(m.location || "")} · ${escapeHtml(m.salary_desc || "")}</div>
-                <div class="muted" style="font-size:12.5px;margin-top:6px">${escapeHtml(m.verdict || "")}</div>
-                <div class="job-meta">${matched}</div>
-                ${missing ? `<div class="card-sub mb-8">缺口</div><div class="pills">${missing}</div>` : ""}
-                ${m.greeting ? `<div class="greeting-box">💬 ${escapeHtml(m.greeting)}</div>` : ""}
-                ${m.error ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>` : ""}
-              </div>
-            </div>
-          </div>`;
-      })
-      .join("");
-  }
-
-  async function loadHistory() {
-    try {
-      const r = await api.get("/api/resume/analyses");
-      const items = r.items || [];
-      if (!items.length) return;
-      $("history-card").classList.remove("hidden");
-      $("history-list").innerHTML = items
-        .map(
-          (a) => `
-          <div class="flex between center gap-12" style="padding:10px 0;border-bottom:1px solid var(--stroke)">
-            <div>
-              <div>${escapeHtml(a.resume_title || a.analysis_id)}</div>
-              <div class="muted" style="font-size:11px">${fmtTime(a.created_at)} · ${a.job_count} 个职位</div>
-            </div>
-            <div class="flex center gap-8">
-              <span class="pill accent">最高 ${a.top_score}</span>
-              <button class="btn sm ghost" data-id="${escapeHtml(a.analysis_id)}">查看</button>
-            </div>
-          </div>`
-        )
-        .join("");
-      $("history-list").querySelectorAll("button[data-id]").forEach((b) => {
-        b.addEventListener("click", async () => {
-          const data = await api.get("/api/resume/analyses/" + b.dataset.id);
-          modal({
-            title: "分析结果 · " + escapeHtml(data.resume_title || data.analysis_id),
-            body: `<div id="m-matches"></div>`,
-            wide: true,
-          });
-          setTimeout(() => {
-            const box = document.getElementById("m-matches");
-            if (box) renderMatchesInto(box, data.matches || []);
-          }, 0);
         });
       });
     } catch { /* ignore */ }
   }
-
-  function renderMatchesInto(box, matches) {
-    const ranked = [...matches].sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
-    box.innerHTML = ranked
-      .map((m) => {
-        const score = m.match_score || 0;
-        return `
-        <div class="match-row mb-16">
-          ${scoreRing(score)}
-          <div class="match-main">
-            <h4>${escapeHtml(m.job_name)} <span class="muted" style="font-weight:400;font-size:13px">@ ${escapeHtml(m.brand_name)}</span></h4>
-            <div class="muted" style="font-size:12.5px">${escapeHtml(m.verdict || "")}</div>
-            ${m.greeting ? `<div class="greeting-box">💬 ${escapeHtml(m.greeting)}</div>` : ""}
-          </div>
-        </div>`;
-      })
-      .join("");
-  }
-
-  // 技能缺口条（历史详情里附带）
-  function renderGaps(container, gaps) {
-    if (!gaps || !gaps.length) return;
-    const max = Math.max(...gaps.map((g) => g.count || 0), 1);
-    container.innerHTML = gaps
-      .map(
-        (g) => `
-        <div class="skill-bar">
-          <span class="sb-name">${escapeHtml(g.skill)}</span>
-          <span class="sb-track"><i style="width:${Math.round(((g.count || 0) / max) * 100)}%"></i></span>
-          <span class="sb-n">${g.count}</span>
-        </div>`
-      )
-      .join("");
-  }
-  // renderGaps 供历史详情用
-  window.__renderGaps = renderGaps;
 
   await loadList();
-  await loadHistory();
-
-  return () => clearInterval(pollTimer);
 }

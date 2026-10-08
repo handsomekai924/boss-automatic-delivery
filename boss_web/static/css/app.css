@@ -948,6 +948,7 @@ details.acc .acc-body {
 .muted { color: var(--text-3); }
 .mono  { font-family: var(--mono); }
 .flex  { display: flex; }
+.wrap  { flex-wrap: wrap; }
 .between { justify-content: space-between; }
 .center  { align-items: center; }
 .gap-8  { gap: 8px; }

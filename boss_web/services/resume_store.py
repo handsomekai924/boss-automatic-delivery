@@ -191,16 +191,15 @@ def _draft_from_row(row: Any) -> ResumeDraft:
 
 
 def save_resume(text: str, *, filename: str = "resume.md") -> ResumeDraft:
+    """**只存原文**（``content_md`` + 文件名）。
+
+    LLM 解析由 :mod:`boss_web.services.resume_parser` 单独跑、单独落
+    ``meta.llm``（见 :func:`save_llm_parse`）；规则切章节退居幕后，只在读原文时
+    轻量分段，不再当作解析结果写库。
+    """
     resume_id = "rs_" + uuid.uuid4().hex[:10]
     safe = _source_name(filename)
     created = time.time()
-    draft = parse_resume(
-        text,
-        resume_id=resume_id,
-        title=safe,
-        source_path=f"db://{resume_id}",
-        created_at=created,
-    )
     conn = boss_db.acquire()
     with conn:
         conn.execute(
@@ -208,14 +207,23 @@ def save_resume(text: str, *, filename: str = "resume.md") -> ResumeDraft:
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 resume_id,
-                draft.title,
+                safe,
                 safe,
                 created,
                 text,
-                json.dumps(draft.to_dict(include_raw=False), ensure_ascii=False),
+                json.dumps(
+                    {"title": safe, "source_name": safe, "created_at": created},
+                    ensure_ascii=False,
+                ),
             ),
         )
-    return draft
+    return parse_resume(
+        text,
+        resume_id=resume_id,
+        title=safe,
+        source_path=f"db://{resume_id}",
+        created_at=created,
+    )
 
 
 def load_resume(resume_id: str) -> ResumeDraft:
@@ -242,6 +250,14 @@ def list_resumes() -> list[dict[str, Any]]:
         if not isinstance(meta, dict):
             meta = {}
         meta.pop("raw", None)
+        # 列表只报「解析过没有」，别把整包 LLM 结果塞进列表响应
+        llm = meta.get("llm")
+        if isinstance(llm, dict):
+            meta["llm"] = {
+                "parsed_at": llm.get("parsed_at"),
+                "model": llm.get("model"),
+                "has_data": isinstance(llm.get("data"), dict) and bool(llm.get("data")),
+            }
         meta.setdefault("resume_id", str(row["resume_id"]))
         meta.setdefault("title", str(row["title"] or ""))
         meta.setdefault("created_at", float(row["created_at"] or 0.0))
@@ -254,6 +270,56 @@ def delete_resume(resume_id: str) -> bool:
     with conn:
         cur = conn.execute("DELETE FROM resume WHERE resume_id = ?", (resume_id,))
     return cur.rowcount > 0
+
+
+# --------------------------------------------------------------------------- #
+# LLM 固定模板解析结果（meta.llm）
+# --------------------------------------------------------------------------- #
+
+
+def save_llm_parse(resume_id: str, llm_payload: dict[str, Any]) -> dict[str, Any]:
+    """把 LLM 解析结果写进 ``meta.llm``，回写后的 ``llm`` 整包。
+
+    ``llm_payload`` 形状：``{"parsed_at", "model", "data"}``。
+    **只覆盖 ``meta.llm``**，其余 meta 键（title/source_name/…）原样保留。
+    """
+    conn = boss_db.acquire()
+    row = conn.execute(
+        "SELECT meta FROM resume WHERE resume_id = ?", (resume_id,)
+    ).fetchone()
+    if row is None:
+        raise FileNotFoundError(resume_id)
+    try:
+        meta = json.loads(str(row["meta"] or "{}"))
+    except ValueError:
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    meta["llm"] = llm_payload
+    with conn:
+        conn.execute(
+            "UPDATE resume SET meta = ? WHERE resume_id = ?",
+            (json.dumps(meta, ensure_ascii=False), resume_id),
+        )
+    return llm_payload
+
+
+def load_llm_parse(resume_id: str) -> dict[str, Any] | None:
+    """读 ``meta.llm``；没有解析过 → ``None``。简历不存在 → ``FileNotFoundError``。"""
+    conn = boss_db.acquire()
+    row = conn.execute(
+        "SELECT meta FROM resume WHERE resume_id = ?", (resume_id,)
+    ).fetchone()
+    if row is None:
+        raise FileNotFoundError(resume_id)
+    try:
+        meta = json.loads(str(row["meta"] or "{}"))
+    except ValueError:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    llm = meta.get("llm")
+    return llm if isinstance(llm, dict) else None
 
 
 def save_analysis(payload: dict[str, Any]) -> str:
@@ -293,6 +359,33 @@ def load_analysis(analysis_id: str) -> dict[str, Any]:
     if row is None:
         raise FileNotFoundError(analysis_id)
     return json.loads(str(row["payload"]))
+
+
+def update_greeting(analysis_id: str, encrypt_job_id: str, greeting: str) -> dict[str, Any]:
+    """只改 payload 里某一条 match 的招呼语，回改后的那条。
+
+    找不到 analysis → ``FileNotFoundError``；找不到那条 match → ``KeyError``。
+    """
+    payload = load_analysis(analysis_id)
+    matches = payload.get("matches")
+    if not isinstance(matches, list):
+        matches = []
+    for item in matches:
+        if isinstance(item, dict) and item.get("encrypt_job_id") == encrypt_job_id:
+            item["greeting"] = greeting
+            break
+    else:
+        raise KeyError(encrypt_job_id)
+    payload["matches"] = matches
+    conn = boss_db.acquire()
+    with conn:
+        conn.execute(
+            "UPDATE analysis SET payload = ? WHERE analysis_id = ?",
+            (json.dumps(payload, ensure_ascii=False), analysis_id),
+        )
+    return next(
+        m for m in matches if isinstance(m, dict) and m.get("encrypt_job_id") == encrypt_job_id
+    )
 
 
 def list_analyses() -> list[dict[str, Any]]:

@@ -1,4 +1,4 @@
-"""简历上传 / 解析 / 匹配分析。"""
+"""简历上传 / LLM 解析 / 历史分析查看。"""
 
 from __future__ import annotations
 
@@ -8,14 +8,18 @@ from fastapi import APIRouter, File, UploadFile
 from pydantic import BaseModel, Field
 
 from ..errors import NotFoundError, ValidationWebError
+from ..services.llm_config_store import load_config
 from ..services.resume_analyzer import analyze_tasks
+from ..services.resume_parser import ResumeParseError, parse_and_stamp
 from ..services.resume_store import (
     delete_analysis,
     delete_resume,
     list_analyses,
     list_resumes,
     load_analysis,
+    load_llm_parse,
     load_resume,
+    save_llm_parse,
     save_resume,
 )
 
@@ -52,6 +56,7 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
         except UnicodeDecodeError:
             text = raw.decode("utf-8", errors="replace")
 
+    # 只存原文；解析由 POST /item/{id}/parse 完成（上传成功后前端自动调）
     draft = save_resume(text, filename=name)
     return draft.to_dict(include_raw=True)
 
@@ -60,9 +65,43 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
 def get_resume(resume_id: str) -> dict[str, Any]:
     try:
         draft = load_resume(resume_id)
+        llm = load_llm_parse(resume_id)
     except FileNotFoundError as exc:
         raise NotFoundError(f"简历不存在：{resume_id}") from exc
-    return draft.to_dict(include_raw=True)
+    data = draft.to_dict(include_raw=True)
+    data["llm"] = llm
+    return data
+
+
+@router.post("/item/{resume_id}/parse")
+def parse_resume_item(resume_id: str) -> dict[str, Any]:
+    """LLM 固定模板解析（同步，超时按 ``LLM_TIMEOUT``）。重跑会覆盖 ``meta.llm``。"""
+    try:
+        draft = load_resume(resume_id)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"简历不存在：{resume_id}") from exc
+
+    cfg = load_config()
+    if not cfg.configured:
+        raise ValidationWebError(
+            "LLM 还没配置，请先到「模型」页填好 API Key / Base URL / 模型名"
+        )
+    try:
+        llm_payload = parse_and_stamp(draft.raw, model=cfg.model, config=cfg)
+    except ResumeParseError as exc:
+        raise ValidationWebError(str(exc)) from exc
+
+    save_llm_parse(resume_id, llm_payload)
+    return {"resume_id": resume_id, "llm": llm_payload}
+
+
+@router.get("/item/{resume_id}/parse")
+def get_parse(resume_id: str) -> dict[str, Any]:
+    try:
+        llm = load_llm_parse(resume_id)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"简历不存在：{resume_id}") from exc
+    return {"resume_id": resume_id, "llm": llm, "parsed": llm is not None}
 
 
 @router.delete("/item/{resume_id}")
