@@ -1131,27 +1131,22 @@ def test_greet_不带的可选字段就不发():
     assert call["data"] is None
 
 
-def test_greet_本期不发招呼语正文():
-    """GREETING_FIELD 还是 None：招呼语传进来了也**不**塞进 body（本期只发标准打招呼）。"""
-    from boss_jobs import config as C
+def test_greet_这条接口没有招呼语参数():
+    """**定案**：``friend/add`` 只建会话、不投递正文（实测）。
 
-    assert C.GREETING_FIELD is None
-    http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
-    client = JobClient(http=http)
-    client.greet(security_id="SEC1", encrypt_job_id="J1", greeting="你好，我对这个岗位很感兴趣")
-    body = http.calls[0]["data"] or {}
-    assert "你好，我对这个岗位很感兴趣" not in body.values()
+    以前这里有个 ``greeting=`` 参数，塞进 body 服务端直接忽略（回 code 0，
+    聊天框还是空的）。现在参数整个删掉——想发正文只能走
+    :meth:`JobClient.deliver_greeting`（MQTT 聊天通道），别在这条接口上
+    再长出第二个「正文入参」。
+    """
+    import inspect
 
-
-def test_greet_配了正文字段就带上招呼语(monkeypatch):
-    """实测出正文字段名、把 GREETING_FIELD 填上之后，招呼语才随 body 发出去。"""
-    from boss_jobs import config as C
-
-    monkeypatch.setattr(C, "GREETING_FIELD", "content")
-    http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
-    client = JobClient(http=http)
-    client.greet(security_id="SEC1", encrypt_job_id="J1", greeting="您好")
-    assert http.calls[0]["data"]["content"] == "您好"
+    params = inspect.signature(JobClient.greet).parameters
+    assert "greeting" not in params
+    with pytest.raises(TypeError):
+        JobClient(http=FakeHttp([])).greet(
+            security_id="SEC1", encrypt_job_id="J1", greeting="您好"
+        )
 
 
 def test_greet_extra_透传非空字段():

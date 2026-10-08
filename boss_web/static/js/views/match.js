@@ -36,7 +36,7 @@ export async function renderMatch(root) {
     <div class="card mb-24">
       <div class="card-head">
         <h3 class="card-title">发送工具条</h3>
-        <span class="card-sub">任何粒度发送前都会弹确认 · 已成功的不会重发 · 发送 = 标准打招呼（招呼语暂不随请求发出）</span>
+        <span class="card-sub">任何粒度发送前都会弹确认 · 已成功的不会重发 · 发送 = 建会话 + 单独发招呼语正文</span>
       </div>
       <div class="flex between center wrap gap-12">
         <div class="btn-row">
@@ -604,7 +604,7 @@ export async function renderMatch(root) {
     modal({
       title: `确认发送 · 共 ${targets.length} 条`,
       body: `
-        <div class="banner warn mb-12">将发送<strong>标准打招呼</strong>。招呼语仅预览，本期不随请求发出。</div>
+        <div class="banner warn mb-12">将先<strong>建立会话</strong>，再把下方的招呼语正文作为<strong>聊天消息</strong>单独发给招聘方。</div>
         ${scopeNote ? `<div class="muted mb-8" style="font-size:12px">${escapeHtml(scopeNote)}</div>` : ""}
         ${rows}
         <div class="btn-row mt-16">

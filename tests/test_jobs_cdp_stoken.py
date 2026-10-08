@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
 import boss_db
+import boss_jobs.cdp_stoken as cdp
 from boss_jobs.cdp_stoken import (
     RENEW_COOLDOWN,
     CdpStokenProvider,
@@ -366,6 +368,296 @@ def test_find_chrome_环境变量指空文件就报错(tmp_path: Path, monkeypat
     monkeypatch.setenv("BOSS_CHROME_BIN", str(tmp_path / "没这东西.exe"))
     with pytest.raises(StokenError):
         find_chrome()
+
+
+# --------------------------------------------------------------------------- #
+# 窗口档位（BOSS_CHROME_MODE）
+# --------------------------------------------------------------------------- #
+
+
+def test_档位_默认是hidden():
+    """默认不让窗口露出来。要人工过验证码才显式设 visible。"""
+    assert cdp.DEFAULT_CHROME_MODE == "hidden"
+    assert cdp._mode() == "hidden"
+
+
+def test_档位_认环境变量(monkeypatch):
+    monkeypatch.setenv("BOSS_CHROME_MODE", "VISIBLE")  # 大小写无所谓
+    assert cdp._mode() == "visible"
+
+
+def test_档位_写错了退回默认(monkeypatch):
+    monkeypatch.setenv("BOSS_CHROME_MODE", "隐形")
+    assert cdp._mode() == cdp.DEFAULT_CHROME_MODE
+
+
+def test_档位_offscreen把窗口摆到屏幕外():
+    flags = cdp._mode_flags("offscreen")
+    assert any(f.startswith("--window-position=-") for f in flags)
+    assert "--disable-backgrounding-occluded-windows" not in flags  # 有头那档不用管节流
+
+
+def test_档位_hidden要关掉遮挡节流():
+    """窗口被 SW_HIDE 掉之后 Chrome 会停画 + 冻结后台定时器，
+    不关掉这三样站点 JS 可能就算不动令牌。"""
+    flags = cdp._mode_flags("hidden")
+    assert "--disable-backgrounding-occluded-windows" in flags
+    assert "--disable-renderer-backgrounding" in flags
+    assert "--disable-background-timer-throttling" in flags
+    assert "CalculateNativeWinOcclusion" in cdp._disable_features("hidden")
+
+
+def test_档位_headless不给窗口():
+    assert cdp._mode_flags("headless") == ["--headless=new"]
+
+
+def test_档位_disable_features只出一个开关():
+    """同名开关给两次 Chrome 只认最后一个，译文那个不能被顶掉。"""
+    assert cdp._disable_features("visible") == "Translate,MediaRouter"
+    assert cdp._disable_features("headless") == "Translate,MediaRouter"
+    assert "Translate" in cdp._disable_features("hidden")
+
+
+def test_档位_透传到launch_chrome(monkeypatch):
+    """provider 上写的 mode 要一路走到 launch_chrome。"""
+    seen: dict = {}
+
+    class _Boom(Exception):
+        """一拉起来就跳出 connect_or_launch，省得空转等超时。"""
+
+    def fake_launch(**kwargs):
+        seen.update(kwargs)
+        raise _Boom
+
+    monkeypatch.setattr(cdp, "launch_chrome", fake_launch)
+    monkeypatch.setattr(cdp, "probe_debug", lambda *a, **k: "")
+
+    with pytest.raises(_Boom):
+        cdp.connect_or_launch(mode="hidden")
+    assert seen["mode"] == "hidden"
+
+
+def test_档位_复用现成调试口时不管档位(monkeypatch):
+    """端口上已经有一台时是直接复用，档位无从谈起——别去动它。"""
+    monkeypatch.setattr(cdp, "probe_debug", lambda *a, **k: "ws://127.0.0.1:1/devtools/browser/x")
+    monkeypatch.setattr(cdp, "CdpClient", lambda *a, **k: object())
+
+    def boom(**kwargs):
+        raise AssertionError("复用时不该拉新 Chrome")
+
+    monkeypatch.setattr(cdp, "launch_chrome", boom)
+    assert cdp.connect_or_launch(mode="headless") is not None
+
+
+# --------------------------------------------------------------------------- #
+# 退出收尾：把自己拉起来的 Chrome 关掉
+# --------------------------------------------------------------------------- #
+
+
+class FakeProc:
+    """够用的 Popen 替身：只看 poll / wait / kill。"""
+
+    def __init__(self, *, alive: bool = True, exits: bool = True, pid: int = 4242):
+        self.pid = pid
+        self.alive = alive
+        self.exits = exits
+        self.killed = False
+        self.waits: list[float | None] = []
+
+    def poll(self):
+        return None if self.alive else 0
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self.exits:
+            self.alive = False
+            return 0
+        raise subprocess.TimeoutExpired("chrome", timeout)
+
+    def kill(self):
+        self.killed = True
+        self.alive = False
+
+
+class FakeCdp:
+    """假装是 CdpClient：只记「有没有发 Browser.close」。"""
+
+    instances: list["FakeCdp"] = []
+    fail_close = False
+
+    def __init__(self, ws_url, **kwargs):
+        self.ws_url = ws_url
+        self.kwargs = kwargs
+        self.calls: list[str] = []
+        self.closed = False
+        FakeCdp.instances.append(self)
+
+    def call(self, method, params=None, **kwargs):
+        self.calls.append(method)
+        if method == "Browser.close" and FakeCdp.fail_close:
+            raise StokenError("连不上")
+        return {}
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def launched(monkeypatch):
+    """清空册子和钩子安装状态；顺手把真 atexit/signal/控制台钩子挡掉，别污染 pytest。"""
+    monkeypatch.setattr(cdp.atexit, "register", lambda *a, **k: None)
+    monkeypatch.setattr(cdp.signal, "signal", lambda *a, **k: None)
+    monkeypatch.setattr(cdp, "_install_console_handler", lambda: None)
+    monkeypatch.setattr(cdp, "CdpClient", FakeCdp)
+    FakeCdp.instances.clear()
+    FakeCdp.fail_close = False
+    with cdp._launched_lock:
+        cdp._launched.clear()
+        cdp._exit_hooks_installed = False
+    yield cdp._launched
+    with cdp._launched_lock:
+        cdp._launched.clear()
+        cdp._exit_hooks_installed = False
+
+
+def test_退出_登记自拉的浏览器(launched, monkeypatch):
+    monkeypatch.setattr(cdp, "_hide_windows", lambda pid, **k: 1)
+    monkeypatch.setattr(cdp.subprocess, "Popen", lambda *a, **k: FakeProc())
+    cdp.launch_chrome(chrome="C:/chrome.exe", mode="hidden")
+    assert len(launched) == 1
+    assert launched[0].port == cdp.DEFAULT_CDP_PORT
+
+
+def test_退出_先走CDP关再等它退(launched):
+    proc = FakeProc()
+    launched.append(cdp._Launched(proc=proc, port=9222, ws_url="ws://x/devtools/browser/abc"))
+
+    assert cdp.close_launched_browsers() == 1
+    assert FakeCdp.instances[0].calls == ["Browser.close"]
+    assert FakeCdp.instances[0].closed is True
+    assert proc.killed is False  # 它自己退了，不用杀
+    assert launched == []  # 册子清空，别再关第二遍
+
+
+def test_退出_CDP关不掉就杀进程(launched):
+    FakeCdp.fail_close = True
+    proc = FakeProc(exits=False)  # 让它 wait 超时
+    launched.append(cdp._Launched(proc=proc, port=9222, ws_url="ws://x/devtools/browser/abc"))
+
+    assert cdp.close_launched_browsers(timeout=0.01) == 1
+    assert proc.killed is True
+
+
+def test_退出_没连上过就直接杀(launched):
+    """launch_chrome 拉起来了但谁都没连上（ws 地址空着），别耗那几秒。"""
+    proc = FakeProc()
+    launched.append(cdp._Launched(proc=proc, port=9222))
+    assert cdp.close_launched_browsers() == 1
+    assert proc.killed is True
+    assert proc.waits == []  # 没等
+
+
+def test_退出_早就退了的不算(launched):
+    launched.append(cdp._Launched(proc=FakeProc(alive=False), port=9222, ws_url="ws://x"))
+    assert cdp.close_launched_browsers() == 0
+    assert FakeCdp.instances == []
+
+
+def test_退出_册子空着就什么都不做(launched):
+    assert cdp.close_launched_browsers() == 0
+
+
+def test_退出_复用那台不进册子(monkeypatch, launched):
+    """端口上已经有 Chrome 时是复用，退出一律不碰它。"""
+    monkeypatch.setattr(cdp, "probe_debug", lambda *a, **k: "ws://127.0.0.1:9222/devtools/browser/x")
+    monkeypatch.setattr(
+        cdp, "launch_chrome", lambda **k: pytest.fail("复用时不该拉新 Chrome")
+    )
+    assert cdp.connect_or_launch() is not None
+    assert launched == []
+    assert cdp.close_launched_browsers() == 0
+
+
+def test_退出_连上才把ws地址记下来(monkeypatch, launched):
+    """自拉那一支：调试口就绪后才把 ws 地址认到这台上。"""
+    monkeypatch.setattr(cdp, "_hide_windows", lambda pid, **k: 1)
+    monkeypatch.setattr(cdp.subprocess, "Popen", lambda *a, **k: FakeProc())
+    probe = iter(["", "ws://127.0.0.1:9222/devtools/browser/x"])  # 第一次是「复用」那探
+    monkeypatch.setattr(cdp, "probe_debug", lambda *a, **k: next(probe, ""))
+
+    cdp.connect_or_launch()
+    assert len(launched) == 1
+    assert launched[0].ws_url == "ws://127.0.0.1:9222/devtools/browser/x"
+
+
+def test_退出_钩子默认挂上(monkeypatch, launched):
+    hooked: list = []
+    monkeypatch.setattr(cdp.atexit, "register", lambda fn: hooked.append(fn))
+    monkeypatch.delenv("BOSS_CDP_CLOSE_ON_EXIT", raising=False)
+    cdp._install_exit_hooks()
+    assert hooked == [cdp.close_launched_browsers]
+
+
+def test_退出_可以关掉这个行为(monkeypatch, launched):
+    hooked: list = []
+    monkeypatch.setattr(cdp.atexit, "register", lambda fn: hooked.append(fn))
+    monkeypatch.setenv("BOSS_CDP_CLOSE_ON_EXIT", "0")
+    cdp._install_exit_hooks()
+    assert hooked == []
+
+
+def test_退出_钩子只挂一次(monkeypatch, launched):
+    hooked: list = []
+    monkeypatch.setattr(cdp.atexit, "register", lambda fn: hooked.append(fn))
+    cdp._install_exit_hooks()
+    cdp._install_exit_hooks()
+    assert len(hooked) == 1
+
+
+def test_退出_关终端窗口也要收尾(launched):
+    """CTRL_CLOSE_EVENT 走不到 atexit（进程是被控制台直接干掉的），得在这儿收。"""
+    proc = FakeProc()
+    launched.append(cdp._Launched(proc=proc, port=9222, ws_url="ws://x/devtools/browser/abc"))
+
+    assert cdp._console_ctrl_handler(cdp._CTRL_CLOSE_EVENT) is False  # 不拦，默认动作照跑
+    assert proc.killed is False and proc.waits  # 走的是体面那条：CDP close + wait
+    assert launched == []
+
+
+def test_退出_CtrlC不抢答(launched):
+    """CTRL_C 交给 Python 自己（抛 KeyboardInterrupt → atexit），别在这儿收。"""
+    proc = FakeProc()
+    launched.append(cdp._Launched(proc=proc, port=9222, ws_url="ws://x/devtools/browser/abc"))
+
+    assert cdp._console_ctrl_handler(cdp._CTRL_C_EVENT) is False
+    assert launched != []  # 册子没动，留给 atexit
+
+
+def test_退出_Break也是硬退所以收掉(launched):
+    """CTRL_BREAK 实测必死（Python 层收尾不跑），所以在这儿收。"""
+    proc = FakeProc()
+    launched.append(cdp._Launched(proc=proc, port=9222, ws_url="ws://x/devtools/browser/abc"))
+
+    assert cdp._console_ctrl_handler(cdp._CTRL_BREAK_EVENT) is False
+    assert launched == []
+
+
+def test_退出_致命事件清单不含CtrlC():
+    assert cdp._CTRL_C_EVENT not in cdp._FATAL_CONSOLE_EVENTS
+    assert set(cdp._FATAL_CONSOLE_EVENTS) == {
+        cdp._CTRL_BREAK_EVENT,
+        cdp._CTRL_CLOSE_EVENT,
+        cdp._CTRL_LOGOFF_EVENT,
+        cdp._CTRL_SHUTDOWN_EVENT,
+    }
+
+
+def test_退出_关掉开关就不挂控制台钩子(monkeypatch, launched):
+    installed: list = []
+    monkeypatch.setattr(cdp, "_install_console_handler", lambda: installed.append(1))
+    monkeypatch.setenv("BOSS_CDP_CLOSE_ON_EXIT", "0")
+    cdp._install_exit_hooks()
+    assert installed == []
 
 
 # --------------------------------------------------------------------------- #

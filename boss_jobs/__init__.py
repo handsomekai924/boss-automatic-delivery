@@ -28,16 +28,23 @@
 from __future__ import annotations
 
 from .client import (
+    BossData,
     CrawlReport,
     CrawlStats,
     GreetResult,
+    GreetingDelivery,
     JobClient,
     JobDetail,
     create_client,
     http_from_session,
 )
+from .chat import ChatCredentials, ChatSocket, encode_presence, encode_text_message
 from .config import (
     BASE_URL,
+    CHAT_TOPIC,
+    CHAT_WS_HOST,
+    CHAT_WS_PATH,
+    CHAT_WS_PORT,
     CODE_BROWSER_CHECK,
     CODE_RISK_CONTROL,
     DEFAULT_DB_PATH,
@@ -46,12 +53,12 @@ from .config import (
     DELIVER_INTERVAL,
     DETAIL_INTERVAL,
     ENDPOINTS,
-    GREETING_FIELD,
     PAGE_SIZE,
     STOKEN_COOKIE,
     STOKEN_ENV,
 )
 from .errors import (
+    ChatSendError,
     JobApiError,
     JobDataError,
     JobError,
@@ -87,7 +94,14 @@ __all__ = [
     "CrawlReport",
     "CrawlStats",
     "GreetResult",
+    "BossData",
+    "GreetingDelivery",
     "JobDetail",
+    # 聊天通道（建会话之后真投递招呼语正文）
+    "ChatCredentials",
+    "ChatSocket",
+    "encode_presence",
+    "encode_text_message",
     # __zp_stoken__（真浏览器 CDP 取法，fetch 默认走这条）
     "CdpClient",
     "CdpStokenProvider",
@@ -115,12 +129,17 @@ __all__ = [
     "SaveOutcome",
     "open_store",
     # 异常
+    "ChatSendError",
     "JobApiError",
     "JobDataError",
     "JobError",
     "JobTransportError",
     # 常量
     "BASE_URL",
+    "CHAT_TOPIC",
+    "CHAT_WS_HOST",
+    "CHAT_WS_PATH",
+    "CHAT_WS_PORT",
     "CODE_BROWSER_CHECK",
     "CODE_RISK_CONTROL",
     "DEFAULT_DB_PATH",
@@ -129,7 +148,6 @@ __all__ = [
     "DELIVER_INTERVAL",
     "DETAIL_INTERVAL",
     "ENDPOINTS",
-    "GREETING_FIELD",
     "PAGE_SIZE",
     "STOKEN_COOKIE",
     "STOKEN_ENV",

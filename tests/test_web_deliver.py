@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import boss_db
-from boss_jobs import GreetResult, Job, JobApiError
+from boss_jobs import GreetingDelivery, Job, JobApiError
 from boss_jobs.config import BROWSER_CHECK_GIVEUP
 from boss_jobs.models import PageResult
 from boss_jobs.store import JobStore
@@ -32,19 +32,23 @@ from boss_web.services.resume_store import load_analysis, save_analysis
 class FakeGreetClient:
     """假的 ``JobClient``：按序回脚本化结果，异常实例直接抛，并记下每次调的参数。
 
-    响应池空了就一律成功——多数用例只关心前几条怎么排。
+    按的是 :meth:`boss_web.services.deliver_task` 真正调的那个方法
+    （``deliver_greeting``，建会话 + 把正文投出去那步）；响应池空了就一律成功
+    ——多数用例只关心前几条怎么排。
     """
 
     def __init__(self, results=()) -> None:
         self._results = list(results)
         self.calls: list[dict] = []
 
-    def greet(self, **kwargs) -> GreetResult:
+    def deliver_greeting(self, **kwargs) -> GreetingDelivery:
         self.calls.append(kwargs)
         item = self._results.pop(0) if self._results else None
         if isinstance(item, BaseException):
             raise item
-        return item if isinstance(item, GreetResult) else GreetResult(message="Success")
+        if isinstance(item, GreetingDelivery):
+            return item
+        return GreetingDelivery(boss_uid=0, text=str(kwargs.get("greeting") or ""))
 
 
 @pytest.fixture
@@ -373,10 +377,10 @@ def test_deliver_cancel_stops_between_items():
     started = threading.Event()
 
     class BlockingClient(FakeGreetClient):
-        def greet(self, **kwargs):
+        def deliver_greeting(self, **kwargs):
             started.set()
             time.sleep(0.15)  # 让测试有机会在第一条发完前按下取消
-            return super().greet(**kwargs)
+            return super().deliver_greeting(**kwargs)
 
     client = BlockingClient()
     aid = _seed_analysis([_match("j1"), _match("j2")])

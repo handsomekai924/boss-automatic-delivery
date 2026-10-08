@@ -45,11 +45,27 @@ ENDPOINTS: Final[dict[str, str]] = {
     #: ``__zp_stoken__``（缺了回 code 37，跟搜索一样），query 带
     #: ``securityId`` + ``lid`` 两参就够。正文在 ``zpData.jobInfo.postDescription``。
     "job_detail": "/wapi/zpgeek/job/detail.json",
-    #: 打招呼 / 加好友（POST，form）。**路径与参数形态已从站点前端 chunk 确认，
-    #: 尚未实测**：query 带 ``securityId`` + ``jobId`` + ``lid``；body 是
-    #: ``application/x-www-form-urlencoded``，透传 ``encryptBossId`` / ``sessionId``
-    #: 等字段。见 :meth:`boss_jobs.client.JobClient.greet`。
+    #: 打招呼 / 加好友（POST，form）。**已实测**（2026-10-08）：query 带
+    #: ``securityId`` + ``jobId`` + ``lid``；body 是
+    #: ``application/x-www-form-urlencoded``，带 ``encryptBossId`` /
+    #: ``sessionId`` 等。**这条只建会话、不投递正文**：请求体里塞
+    #: ``greeting`` 服务端直接忽略（回了 code 0，聊天框却还是空的）——
+    #: 真的招呼语走聊天通道，见 :mod:`boss_jobs.chat`。
     "friend_add": "/wapi/zpgeek/friend/add.json",
+    #: MQTT over WSS 的接入凭据（GET）。回 ``zpData.wt2``，当 MQTT 密码用。
+    #: 来源：chat-new 前端 ``ChatWebsocket.init`` 里的 ``l()``。
+    "get_wt": "/wapi/zppassport/get/wt",
+    #: 当前登录用户（GET）。取 ``zpData.token``（MQTT 用户名前缀）+ ``userId``。
+    "get_user_info": "/wapi/zpuser/wap/getUserInfo.json",
+    #: 会话对象信息（GET，query ``bossId={encryptBossId}``）。回 ``zpData.data``，
+    #: 里面有 **boss 的数字 uid**（``bossId``）与 ``bossSource``——
+    #: 这俩正是发聊天消息要的 ``to``。**要先 ``friend/add`` 建了会话才查得到**
+    #: （没会话回 code 1「聊天的Boss不存在」/「非好友关系」）。
+    "get_boss_data": "/wapi/zpchat/geek/getBossData",
+    #: 历史消息（GET，query ``bossId={数字 uid}``）。**当不了送达判据**：
+    #: 对这条账号回 ``code 0`` + 空 ``zpData``，有消息的会话也读不出来
+    #: （2026-10-08 实测，见 :mod:`boss_jobs.chat` 模块头）。留着只当探针。
+    "chat_history": "/wapi/zpchat/geek/historyMsg",
 }
 
 #: 推荐页 ``pageType`` 10/45 → type=1（全职流），36 → type=2（兼职流）
@@ -120,13 +136,113 @@ DETAIL_INTERVAL: Final[float] = 1.0
 #: 1s 是人手点「立即沟通」的节奏，既不像脚本刷屏，也不至于慢到没法用。
 DELIVER_INTERVAL: Final[float] = 1.0
 
-#: 打招呼请求 body 里放**招呼语正文**的字段名。**默认 ``None`` = 不发正文**。
-#:
-#: 本期只发标准打招呼（todo.md C6 已拍板）：正文字段名（``content`` /
-#: ``greeting`` / ``sayHi``）没有从站点前端 chunk 里挖到，猜错了会被服务端忽略
-#: 或者报错。招呼语照常生成 / 展示 / 手改 / 落库，只差把它塞进请求那一行。
-#: 实测出正确字段名后，把这里改成字段名即升级为「带招呼语发送」。
-GREETING_FIELD: Final[str | None] = None
+# --------------------------------------------------------------------------- #
+# 聊天通道（MQTT over WebSocket）
+# --------------------------------------------------------------------------- #
+#
+# 站点**没有**「发一条聊天消息」的 HTTP 接口：消息是 MQTT 上的 protobuf 帧。
+# chat-new 前端里 ``ChatWebsocket`` 直接用 Paho MQTT：
+#
+#     new Paho.MQTT.Client(server, port, "/chatws", "ws-"+rand16)
+#     client.connect({token: wt, userName: <token>+"|0", password: wt,
+#                     keepAliveInterval: 25, cleanSession: true, mqttVersion: 3,
+#                     useSSL: true})
+#     client.send("chat", <TechwolfChatProtocol>.toArrayBuffer(), 1, true)
+#
+# 2026-10-08 **全链路实测通过**（见 :mod:`boss_jobs.chat`）：
+# 建 MQTT（CONNACK Success）→ 往 ``chat`` 主题 PUBLISH 一帧文本消息 →
+# **站点自己的会话列表里出现这条招呼语并标「[送达]」**（重载页面、从服务端
+# 重拉也还在，是服务端真收下了）。
+#
+# 三个坑：
+#
+# 1. **WebSocket 握手必须带登录 Cookie**，不带直接 HTTP 403（实测）。
+# 2. **文本帧要跟站点逐字节对齐**：``from`` 必须显式带 ``source``（哪怕 0），
+#    ``mid`` 要落在服务端消息 id 的数轴上（3.9e14 量级，不是毫秒时间戳）。
+#    见 :mod:`boss_jobs.chat` 模块头。
+# 3. **这条网关不给文本帧回 PUBACK**，PUBLISH 完约 150ms 直接把 WebSocket
+#    关掉——**这是它的常态，不是拒收**（那几发都真送达了）。所以判据是
+#    「帧发出去了」，不是「等到 PUBACK」（见 :data:`CHAT_PUBACK_WAIT`）。
+#    ``GET /wapi/zpchat/geek/historyMsg`` 对这条账号回 ``code 0`` + 空
+#    ``zpData``，连有消息的会话也读不出来，也当不了判据。
+#
+# 生产服务器的 host/port 来自 chunk ``26308``：
+#    ``{useSSL:true, server:"ws6.zhipin.com", port:443,
+#      uris:["ws6.zhipin.com","ws2.zhipin.com","ws.zhipin.com"]}``；
+#    池子也可以问 ``GET /wapi/zpchat/config/ws``。
+
+#: 聊天 MQTT 网关（WebSocket Secure）。
+CHAT_WS_HOST: Final[str] = "ws6.zhipin.com"
+CHAT_WS_PORT: Final[int] = 443
+#: Paho 客户端构造里的 path（第三个参数）。
+CHAT_WS_PATH: Final[str] = "/chatws"
+#: 消息统一发到这一个主题，收件人在 protobuf 的 ``to`` 里。
+CHAT_TOPIC: Final[str] = "chat"
+
+#: MQTT 心跳（秒），对齐站点前端的 ``keepAliveInterval: 25``。
+CHAT_KEEPALIVE: Final[int] = 25
+#: 等 CONNACK 的超时（秒）。
+CHAT_TIMEOUT: Final[float] = 15.0
+
+#: 连上之后等多久去收服务端主动推的那帧**会话同步**（秒）。
+#: 它带着每个会话最后一条消息的 id，是本地算 ``mid`` 的唯一现成基数（见
+#: :data:`CHAT_MID_FLOOR`）。等不到就退回基数兜底值。
+CHAT_PUSH_WAIT: Final[float] = 4.0
+
+#: ``mid`` 的基数兜底值。**服务端的消息 id 是 3.9e14 量级的雪花号**
+#: （2026-10-08 实测：会话最后一条消息 394570988736768，站点 ``maxMsgId``
+#: 394570988769538），不是毫秒时间戳。发出去的帧 ``mid`` 必须落在这个数轴上、
+#: 且大于对方会话已有的 id，否则网关判这帧非法、直接掐线（没有 PUBACK）。
+#: 站点自己算的是 ``getMaxMsgId() + Date.now()``：拿本地见过的最大 id 再加当前
+#: 毫秒，保证「比已知的都大、又不撞车」。这里同样先把基数抬到服务端量级，
+#: 正常路径下这个兜底值会被收到的那帧会话同步里的真实 id 顶上去。
+CHAT_MID_FLOOR: Final[int] = 394_000_000_000_000
+
+#: 从推送里认「这是个消息 id」的合理区间。用来滤掉解析到的别的数字字段，
+#: 免得把 ``mid`` 抬到离谱的地方去。
+CHAT_MID_RANGE: Final[tuple[int, int]] = (10**13, 10**17)
+
+#: 等那条 PUBACK 的超时（秒）——**只是记日志用，不是判据**。
+#: 2026-10-08 实测：这条网关对文本帧**不回 PUBACK**，发完约 150ms 直接把
+#: WebSocket 关掉（``close code=1000 reason="Bye"``）。可那几发（站点界面上
+#: 都显示「[送达]」）是真真切切进了服务端的——所以「没等到 PUBACK」不等于
+#: 失败。等一会儿只是为了在日志里记下「这回倒是有回执」这种非常态。
+CHAT_PUBACK_WAIT: Final[float] = 1.5
+
+#: 发完再停多久才主动断（秒）。**PUBACK 通常是等不到的**（见上），
+#: 这个停顿是留给「网关还没来得及掐线」的那种情况，让回执/推送先落地。
+CHAT_FLUSH_WAIT: Final[float] = 0.6
+
+#: 正文帧的 MQTT ``retain``（保留消息）标志。**站点前端用的是 ``true``**
+#: （``client.send("chat", frame, 1, true)``），但这儿**关掉**——排查「一条招呼语
+#: 在对方会话里变成两条」问题时改的（2026-10-09）。
+#: ``retain=true`` 会让 broker 把这一帧留在 ``chat`` 主题上，收件人（重新）订阅 /
+#: 同步时会**再收到一遍留存的那份**，实时那份 + 留存那份 = 两条。我们不在站点前端里，
+#: 没有它那套按 ``cmid`` 合流的本地去重，所以两条都冒出来了。
+#: 站点那边用 true 也没事，是因为它本地 ``pendingDeliverMap`` 会把回来的那份并回占位。
+#: 改 ``False`` = 只走实时投递。若对方离线会拿不到（本来也基本是实时场景）。
+#: **presence 帧仍随站点用 ``true``**（不是消息、不参与去重）。
+CHAT_RETAIN: Final[bool] = False
+
+#: 断线重连间隔（秒）。**故意开得很大**：一帧一条连接（发完主动断），
+#: 重连由 :class:`boss_jobs.chat.ChatSocket` 显式重建，不让 paho 在后台
+#: 按秒级节奏自己重连（那会变成连环握手，实测会被网关更早踢掉）。
+CHAT_RECONNECT_MIN: Final[int] = 30
+CHAT_RECONNECT_MAX: Final[int] = 60
+
+#: 发消息时塞进 ``from``/``to`` 的 ``TechwolfUser.source``，站点前端按会话对象
+#: 的 ``friendSource`` 填（老板侧实测回 ``0``）。
+CHAT_DEFAULT_SOURCE: Final[int] = 0
+#: 文本消息的 ``body.type`` / ``templateId``（站点 ``createMessage.text`` 里写死 1）。
+CHAT_BODY_TEXT: Final[int] = 1
+#: ``TechwolfChatProtocol.type``：1 普通消息 / 2 presence。
+CHAT_PROTO_MESSAGE: Final[int] = 1
+CHAT_PROTO_PRESENCE: Final[int] = 2
+#: ``TechwolfClientInfo`` 里报的版本号与 appid，对齐站点（4.92 / 9019 / web）。
+CHAT_CLIENT_VERSION: Final[str] = "4.92"
+CHAT_APP_ID: Final[int] = 9019
+#: presence 帧的 ``type``（1 = 上线）。
+CHAT_PRESENCE_ONLINE: Final[int] = 1
 
 #: 撞上安全网关 code 37 时先歇多久再拿同一枚令牌重试（秒）。
 #: 37 有时只是「请求太快」，先退避；歇完还 37 才轮到强制换新（换新自己

@@ -22,7 +22,14 @@ from typing import Any, Callable, Iterator, Mapping
 import requests
 
 from . import config as C
-from .errors import JobApiError, JobDataError, JobError, JobTransportError
+from .chat import ChatCredentials, ChatSocket
+from .errors import (
+    ChatSendError,
+    JobApiError,
+    JobDataError,
+    JobError,
+    JobTransportError,
+)
 from .models import PageResult, clean_page, extract_job_desc
 from .store import JobStore, SaveOutcome, open_store
 
@@ -111,12 +118,51 @@ class GreetResult:
     接口回 ``code 0`` 即算成功（失败会由 :meth:`JobClient._request_json` 抛
     :class:`~boss_jobs.errors.JobApiError`，所以能构造出这个对象就是成功了）。
 
+    **注意它只表示「会话建起来了」，不表示「话发出去了」**：这条接口不带正文。
+    要真投递招呼语，用 :meth:`JobClient.deliver_greeting`。
+
     :param message: 服务端回的话术（成功时通常是无意义文案，留作日志）
     :param raw: 整包响应，便于排查
     """
 
     message: str = ""
     raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BossData:
+    """会话对象的身份信息（``GET /wapi/zpchat/geek/getBossData``）。
+
+    聊天消息的 ``to`` 要的是**数字 uid**，不是 ``encryptBossId``，这里就是那次换算。
+
+    :param uid: boss 的数字 uid（响应里的 ``bossId``），消息的 ``to.uid``
+    :param source: boss 来源（``bossSource``），消息的 ``to.source``
+    :param name: boss 昵称（日志/展示用）
+    :param encrypt_boss_id: 加密 id（原样带回，省得调用方再拼）
+    :param raw: ``zpData.data`` 整包
+    """
+
+    uid: int
+    source: int = 0
+    name: str = ""
+    encrypt_boss_id: str = ""
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GreetingDelivery:
+    """一次「真·打招呼」的结果（见 :meth:`JobClient.deliver_greeting`）。
+
+    :param boss_uid: 消息发给了谁（数字 uid）
+    :param boss_source: 对端的 source
+    :param temp_id: 本地消息 id（就是这一帧的 ``mid`` / ``cmid``）
+    :param text: 实际发出去的正文
+    """
+
+    boss_uid: int
+    boss_source: int = 0
+    temp_id: int = 0
+    text: str = ""
 
 
 class JobClient:
@@ -133,6 +179,15 @@ class JobClient:
     :param stoken_provider: ``__zp_stoken__`` 自动获取器（见 :mod:`boss_jobs.cdp_stoken`）。
         每次搜索前会 ``ensure()`` 判过期、过期了自己换新；撞上 code 37 时会
         ``ensure(force=True)`` 强制再换一枚重试。不传就按老规矩报错。
+    :param chat_host / chat_port / chat_path: 聊天 MQTT 网关（见
+        :mod:`boss_jobs.chat`），默认取 :mod:`boss_jobs.config` 里的实测值。
+    :param chat_timeout: 聊天通道等 CONNACK 的超时（秒）
+    :param chat_push_wait: 连上后等那帧**会话同步**的超时（秒）——发消息的
+        ``mid`` 基数从里面取（见 :func:`boss_jobs.chat.max_message_id`）
+    :param chat_flush_wait: 正文发出去之后再停多久才断（秒）
+    :param chat_puback_wait: 正文发完顺带等 PUBACK 的超时（秒）——**只记日志**：
+        这条网关对文本帧不回 PUBACK，等不到是常态、不算失败（见
+        :attr:`boss_jobs.config.CHAT_PUBACK_WAIT`）
     """
 
     def __init__(
@@ -148,6 +203,13 @@ class JobClient:
         sleeper: Callable[[float], None] = time.sleep,
         page_interval: float = C.DEFAULT_PAGE_INTERVAL,
         stoken_provider: Any | None = None,
+        chat_host: str = C.CHAT_WS_HOST,
+        chat_port: int = C.CHAT_WS_PORT,
+        chat_path: str = C.CHAT_WS_PATH,
+        chat_timeout: float = C.CHAT_TIMEOUT,
+        chat_push_wait: float = C.CHAT_PUSH_WAIT,
+        chat_puback_wait: float = C.CHAT_PUBACK_WAIT,
+        chat_flush_wait: float = C.CHAT_FLUSH_WAIT,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.endpoints = {**C.ENDPOINTS, **(endpoints or {})}
@@ -157,6 +219,15 @@ class JobClient:
         self.page_interval = max(0.0, page_interval)
         self._sleep = sleeper
         self.stoken_provider = stoken_provider
+        self.chat_host = chat_host
+        self.chat_port = chat_port
+        self.chat_path = chat_path
+        self.chat_timeout = chat_timeout
+        self.chat_push_wait = chat_push_wait
+        self.chat_puback_wait = chat_puback_wait
+        self.chat_flush_wait = chat_flush_wait
+        #: 本批的聊天连接（:meth:`open_chat` 懒建，:meth:`close_chat` 断）
+        self._chat: ChatSocket | None = None
 
         self._http = http or requests.Session()
         merged = {**C.DEFAULT_HEADERS, **(headers or {})}
@@ -353,28 +424,26 @@ class JobClient:
         lid: str = "",
         encrypt_boss_id: str = "",
         session_id: str = "",
-        greeting: str = "",
         extra: Mapping[str, Any] | None = None,
     ) -> GreetResult:
         """发一条打招呼（``POST /wapi/zpgeek/friend/add.json``）。
 
-        形态**从站点前端 chunk 确认、尚未实测**（见
-        :data:`config.ENDPOINTS`）：query 带 ``securityId`` / ``jobId`` / ``lid``，
-        body 走 ``x-www-form-urlencoded`` 透传 ``encryptBossId`` / ``sessionId``。
+        **这条只建会话、不投递正文**——已实测（2026-10-08）：body 里带
+        ``greeting`` 服务端直接忽略，回 ``code 0`` 但聊天框还是空的。
+        真正的招呼语正文要走聊天通道（:meth:`deliver_greeting`，见
+        :mod:`boss_jobs.chat`）。
 
-        **本期只发标准打招呼**：``greeting`` 只在
-        :data:`config.GREETING_FIELD` 配了字段名时才塞进 body（默认为
-        ``None`` = 不发）。正文字段名实测出来改那一个常量即可。
+        形态：query 带 ``securityId`` / ``jobId`` / ``lid``，body 走
+        ``x-www-form-urlencoded`` 透传 ``encryptBossId`` / ``sessionId``。
 
         跟搜索 / 详情一样要 ``__zp_stoken__``，走同一套「先退避再换新」的重试。
 
-        :param security_id: 职位的 ``securityId``（列表 item 里有）
+        :param security_id: 职位的 ``securityId``（列表 item 里有，**整串**别截断）
         :param encrypt_job_id: 职位加密 id（``jobId`` 参数）
         :param lid: 列表 / 详情里的 ``lid``，有就带
         :param encrypt_boss_id: ``raw_json.encryptBossId``（
             :attr:`~boss_jobs.models.Job.encrypt_boss_id`）
         :param session_id: 详情响应下发的 ``zpData.sessionId``，有就带
-        :param greeting: 招呼语正文；:data:`config.GREETING_FIELD` 为 ``None`` 时不发
         :param extra: 额外的 form 字段（透传，值为 ``None`` 的丢掉）
         :raises JobApiError: code 36（账号风控，要人工处理）、code 1/7（登录失效）
             等非成功码
@@ -393,8 +462,6 @@ class JobClient:
             body["encryptBossId"] = encrypt_boss_id
         if session_id:
             body["sessionId"] = session_id
-        if greeting and C.GREETING_FIELD:
-            body[C.GREETING_FIELD] = greeting
         if extra:
             body.update({str(k): v for k, v in extra.items() if v is not None})
 
@@ -407,6 +474,198 @@ class JobClient:
             action=action,
         )
         return GreetResult(message=str(payload.get("message") or ""), raw=payload)
+
+    # ------------------------------------------------------------------ #
+    # 聊天通道（建会话 + 真发招呼语正文）
+    # ------------------------------------------------------------------ #
+
+    def fetch_wt(self) -> str:
+        """取 MQTT 密码：``GET /wapi/zppassport/get/wt`` → ``zpData.wt2``。"""
+        payload = self._get_json(self.endpoints["get_wt"], action="取聊天凭据 wt")
+        wt = str((payload.get("zpData") or {}).get("wt2") or "")
+        if not wt:
+            raise ChatSendError("取聊天凭据失败：get/wt 没回 wt2")
+        return wt
+
+    def fetch_me(self) -> ChatCredentials:
+        """取自己的聊天身份：``token``（MQTT 用户名）+ ``userId``/``name``。
+
+        另外把会话 Cookie 一起打包——聊天 WebSocket 握手**必须带 Cookie**
+        （不带回 HTTP 403，实测）。
+        """
+        payload = self._get_json(self.endpoints["get_user_info"], action="取登录用户")
+        data = payload.get("zpData") or {}
+        user_id = int(data.get("userId") or 0)
+        token = str(data.get("token") or "")
+        if not user_id or not token:
+            raise ChatSendError("取聊天凭据失败：getUserInfo 没回 userId/token")
+        return ChatCredentials(
+            user_id=user_id,
+            token=token,
+            wt=self.fetch_wt(),
+            cookie=self._cookie_header(),
+            name=str(data.get("name") or ""),
+        )
+
+    def fetch_boss_data(self, encrypt_boss_id: str) -> BossData:
+        """把 ``encryptBossId`` 换成**聊天要用的数字 uid**。
+
+        打 ``GET /wapi/zpchat/geek/getBossData?bossId={encryptBossId}``
+        （query 参数就叫 ``bossId``，但值是那串加密 id）。回 ``zpData.data``：
+        ``bossId``（数字 uid）、``bossSource``（消息里的 ``to.source``）。
+
+        **要先 :meth:`greet` 建了会话才查得到**——没会话回 code 1
+        「聊天的Boss不存在」/「非好友关系」。
+        """
+        if not encrypt_boss_id:
+            raise ValueError("encrypt_boss_id 不能为空")
+        payload = self._get_json_with_stoken_retry(
+            self.endpoints["get_boss_data"],
+            params={"bossId": encrypt_boss_id},
+            action="取会话对象",
+        )
+        data = (payload.get("zpData") or {}).get("data") or {}
+        uid = int(data.get("bossId") or 0)
+        if not uid:
+            raise ChatSendError(f"{encrypt_boss_id} 没换到 boss uid（会话可能没建起来）")
+        return BossData(
+            uid=uid,
+            source=int(data.get("bossSource") or 0),
+            name=str(data.get("name") or ""),
+            encrypt_boss_id=str(data.get("encryptBossId") or encrypt_boss_id),
+            raw=data,
+        )
+
+    def fetch_chat_history(self, boss_uid: int | str) -> list[dict[str, Any]]:
+        """回读某个会话的历史消息（``GET /wapi/zpchat/geek/historyMsg``）。
+
+        :param boss_uid: **对方的数字 uid**（``getBossData`` 的 ``bossId``），
+            **不是** ``encryptBossId``——2026-10-08 实测：传加密串回
+            **code 19「参数值错误」**，传数字 uid 回 code 0。
+
+        **拿它核对送达是不行的**：2026-10-08 实测，对有消息、且刚确认送达到的
+        会话，这个接口回 ``code 0`` + 空 ``zpData``（连 ``messages`` 都没有）。
+        所以它现在只当「能不能读到历史」的探针留着，**不作为发送判据**。
+        """
+        payload = self._get_json_with_stoken_retry(
+            self.endpoints["chat_history"],
+            params={"bossId": boss_uid},
+            action="回读聊天记录",
+        )
+        messages = (payload.get("zpData") or {}).get("messages") or []
+        return [m for m in messages if isinstance(m, dict)]
+
+    def open_chat(self, credentials: ChatCredentials | None = None) -> ChatSocket:
+        """拿到一条聊天 MQTT 连接（:attr:`_chat` 缓存）；已连上就复用。
+
+        缓存的意义只是省掉 ``getUserInfo`` / ``get/wt`` 两次 HTTP——
+        :meth:`~boss_jobs.chat.ChatSocket.send_text` 发完会主动断开
+        （网关自己也断），所以下一条进来时这里多半是「重建」而不是「复用」。
+        """
+        from .chat import ChatSocket  # 延迟导入，聊天通道只在真发消息时才碰
+
+        if self._chat is not None and self._chat.connected:
+            return self._chat
+        if self._chat is not None:
+            self._chat.close()
+        self._chat = ChatSocket(
+            credentials or self.fetch_me(),
+            host=self.chat_host,
+            port=self.chat_port,
+            path=self.chat_path,
+            timeout=self.chat_timeout,
+            push_wait=self.chat_push_wait,
+            puback_wait=self.chat_puback_wait,
+            flush_wait=self.chat_flush_wait,
+            sleeper=self._sleep,
+        )
+        self._chat.connect()
+        return self._chat
+
+    def close_chat(self) -> None:
+        """断开聊天连接（幂等）。整批发完 / 任务收尾时调。"""
+        if self._chat is not None:
+            self._chat.close()
+            self._chat = None
+
+    def deliver_greeting(
+        self,
+        *,
+        security_id: str,
+        encrypt_job_id: str,
+        lid: str = "",
+        encrypt_boss_id: str = "",
+        greeting: str = "",
+        session_id: str = "",
+    ) -> GreetingDelivery:
+        """**真·打招呼**：建会话 → 换 boss uid → MQTT 发正文。
+
+        三步走（每步都能单独失败，失败往上抛，调用方记这条发送失败）：
+
+        1. :meth:`greet` —— ``friend/add.json`` 建会话（幂等，已建过也无妨）；
+        2. :meth:`fetch_boss_data` —— ``encryptBossId`` → 数字 ``uid`` / ``source``；
+        3. :meth:`open_chat` + :meth:`~boss_jobs.chat.ChatSocket.send_text`
+           —— MQTT 发正文。
+
+        第 3 步的**成功判据是「帧发出去了」**（PUBLISH 无异常、``rc == 0``），
+        **不是「等到 PUBACK」**：这条网关对文本帧根本不回 PUBACK，发完约 150ms
+        直接把连接关掉——**这是它的常态，不是拒收**（2026-10-08 实测的那几发
+        站点上都显示「[送达]」，见 :mod:`boss_jobs.chat` 模块头）。所以
+        :meth:`~boss_jobs.chat.ChatSocket.send_text` 只把 PUBACK 记进日志，
+        等不到不抛。``mid`` 由 :class:`boss_jobs.chat.ChatSocket` 自己算
+        （基数取服务端推的会话同步里的最大消息 id，见
+        :func:`boss_jobs.chat.max_message_id`），调用方不用管。
+
+        **不再回读聊天记录核对**：``GET /wapi/zpchat/geek/historyMsg`` 对这条
+        账号返回 ``code 0`` + 空 ``zpData``——**有消息、刚确认送达的会话也读不
+        出来**（2026-10-08 实测），拿它当判据只会把成功报成失败。
+
+        :param greeting: 招呼语正文。**空的不发**（抛 :class:`ChatSendError`）——
+            站点那条 ``friend/add`` 只建会话，不带正文的「打招呼」在 App 里
+            看着像打了、聊天框其实是空的，正是本次要修的症状。
+        :raises ChatSendError: 正文为空 / 换不到 boss uid / 通道发失败
+        :raises JobApiError: 建会话那步的登录态失效 / 账号风控
+        """
+        text = (greeting or "").strip()
+        if not text:
+            raise ChatSendError("没有招呼语正文，不发空消息（这条跳过或先补一句招呼语）")
+
+        self.greet(
+            security_id=security_id,
+            encrypt_job_id=encrypt_job_id,
+            lid=lid,
+            encrypt_boss_id=encrypt_boss_id,
+            session_id=session_id,
+        )
+        boss = self.fetch_boss_data(encrypt_boss_id)
+        chat = self.open_chat()
+        temp_id = chat.send_text(
+            to_uid=boss.uid,
+            text=text,
+            to_source=boss.source,
+            # 站点前端 to.name 塞的是会话对象的 encryptUid，这里能拿到同源的
+            # encryptBossId（跟站点一样：有值就写，空串就不写这个字段）。
+            to_name=boss.encrypt_boss_id or encrypt_boss_id,
+        )
+        return GreetingDelivery(
+            boss_uid=boss.uid,
+            boss_source=boss.source,
+            temp_id=temp_id,
+            text=text,
+        )
+
+    def _cookie_header(self) -> str:
+        """把会话 Cookie 拼成握手用的 ``Cookie`` 头值。"""
+        jar = getattr(self._http, "cookies", None)
+        if jar is None:
+            return ""
+        try:
+            items = list(jar)
+        except TypeError:
+            return ""
+        return "; ".join(
+            f"{c.name}={c.value}" for c in items if getattr(c, "value", None) is not None
+        )
 
     # ------------------------------------------------------------------ #
     # 翻页：抓 → 洗 → 存 → 睡

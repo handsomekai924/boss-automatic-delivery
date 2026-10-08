@@ -4,7 +4,8 @@
     JobError        基类
       ├── JobTransportError  网络层失败（超时、连接错误、响应不是 JSON）
       ├── JobApiError        服务端返回了失败业务码（含登录态失效、浏览器校验）
-      └── JobDataError       响应是成功码但结构对不上，解析不出来
+      ├── JobDataError       响应是成功码但结构对不上，解析不出来
+      └── ChatSendError      聊天通道（MQTT over WebSocket）发消息失败
 """
 
 from __future__ import annotations
@@ -64,3 +65,17 @@ class JobApiError(JobError):
 
 class JobDataError(JobError):
     """响应业务码是成功，但字段形状不对，没法映射成职位。"""
+
+
+class ChatSendError(JobError):
+    """聊天通道（MQTT over WebSocket）没连上 / 没发出去。
+
+    跟 :class:`JobApiError` 分开，是因为它**没有业务码**：失败在传输层
+    （握手被拒、CONNACK 非成功、PUBLISH 直接抛 / ``rc != 0``），重试策略也不一样——
+    见 :mod:`boss_jobs.chat`。上层（发送任务）把它当「这条发送失败」记流水，
+    **不重试**（避免重复打扰招聘方）。
+
+    ⚠️ **没等到 PUBACK 不算失败**：这条网关对文本帧不回 PUBACK，发完就把连接
+    关掉是常态（见 :mod:`boss_jobs.chat` 模块头）。本异常只在**握手/连接没成、
+    或 PUBLISH 本身报错**时抛。
+    """

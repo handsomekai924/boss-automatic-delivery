@@ -259,15 +259,18 @@ def test_desc_task_连环撞37就停批(tmp_path, monkeypatch):
         "boss_web.services.desc_task.JobStore",
         lambda *a, **k: _StoreWithMissing([_fake_job(i) for i in range(10)]),
     )
+    # desc_task 里的 ``time`` 就是全局 time 模块，这么补会把**本用例自己的**
+    # ``time.sleep`` 也一起打成空转——先把真的那份留一份，轮询用它。
+    real_sleep = time.sleep
     monkeypatch.setattr("boss_web.services.desc_task.time.sleep", lambda _s: None)
 
     mgr = DescTaskManager()
     task = mgr.start(limit=0, interval=0.0)
-    # 线程很快收尾；轮询到不再 running
+    # 线程很快收尾；轮询到不再 running（空转轮询会跟工作线程抢不到 GIL，必须真睡）
     for _ in range(200):
         if task.status != "running":
             break
-        time.sleep(0.01)
+        real_sleep(0.01)
 
     snap = task.snapshot()
     kinds = [e["event"] for e in snap["events"]]
