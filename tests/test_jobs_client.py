@@ -1349,6 +1349,18 @@ def test_chat_remind_remaining_抠还剩次数():
     assert chat_remind_remaining(None) is None
 
 
+def test_chat_limit_exhausted_recognizes_tomorrow_message_only():
+    """明确的休息至明天话术表示额度耗尽，正常配额提醒仍不算耗尽。"""
+    message = "您今天已与150位BOSS沟通，休息一下，明天再来吧"
+    exhausted = JobApiError(1, message, raw=_chat_remind_payload(message))
+    available = JobApiError(1, "开聊提醒", raw=_chat_remind_payload())
+    unknown = JobApiError(1, "开聊提醒")
+
+    assert exhausted.is_chat_limit_exhausted
+    assert not available.is_chat_limit_exhausted
+    assert not unknown.is_chat_limit_exhausted
+
+
 @pytest.mark.parametrize(
     ("security_id", "encrypt_job_id"),
     [("", "J1"), ("SEC1", "")],

@@ -291,6 +291,7 @@ class DeliverTaskManager:
                 except JobApiError as exc:
                     outcome = self._on_api_error(task, item, exc)
                     if outcome == "stop":
+                        task.done += 1
                         return
                     if outcome == "cooloff":
                         consecutive_37 += 1
@@ -334,7 +335,7 @@ class DeliverTaskManager:
         """分类处理业务错误，回 ``"stop"`` / ``"cooloff"`` / ``"continue"``。
 
         code 36（账号异常/人机验证）与登录态失效停整批；code 37 走 cooloff。
-        「开聊提醒」是**提示弹窗**，只在话术明说「还剩 0 次」时才停。
+        每日沟通配额明确耗尽时停批；其他「开聊提醒」只在话术明说「还剩 0 次」时才停。
         """
         jid = str(item.get("encrypt_job_id"))
         name = str(item.get("job_name") or "")
@@ -342,21 +343,21 @@ class DeliverTaskManager:
             self._record(task, item, status=DELIVER_FAILED, error=f"账号异常：{exc.message}")
             self._stop(task, f"账号异常（code {exc.code}）：{exc.message}。请人工处理后再发。")
             return "stop"
+        if exc.is_chat_limit_exhausted and not exc.is_chat_remind:
+            error = f"每日沟通配额已耗尽：{exc.message}"
+            self._record(task, item, status=DELIVER_FAILED, error=error)
+            self._stop(task, f"{error}。这是 BOSS 侧的每日沟通配额（不是登录失效），明天再试。")
+            return "stop"
         if exc.is_chat_remind:
-            # 「开聊提醒」是 **blockLevel 0 的提示弹窗**，不是硬拦。greet() 里
-            # 已经做过「模拟点击确认」（埋点 + cid=1 重打 friend/add）；还能走到
-            # 这儿说明确认也没把这条建起来。话术里的「还剩 N 次」是**还能再发**
-            # 的次数，所以：
-            #   - 还剩 > 0 / 抠不出来 → 只记这一条，**继续发剩下的**；
-            #   - 还剩 0 → 今天的量真见底了，停批（仍别叫人去重新登录）。
-            # 2026-10-09 实测踩过：code 1 被当登录态失效，人重新登录了照样发不出去。
+            # 「开聊提醒」是 **blockLevel 0 的提示弹窗**。确认后仍被拦时，
+            # 明确的每日额度耗尽话术（或还剩 0 次）停批；其余情况仍只记当前条。
             remaining = exc.chat_remind_remaining
             self._record(task, item, status=DELIVER_FAILED, error=f"开聊提醒：{exc.message}")
-            if remaining == 0:
+            if exc.is_chat_limit_exhausted:
                 self._stop(
                     task,
                     f"今日沟通配额已用完：{exc.message}。"
-                    "这是 BOSS 侧的每日沟通配额（不是登录失效），改天再发剩下的。",
+                    "这是 BOSS 侧的每日沟通配额（不是登录失效），明天再试。",
                 )
                 return "stop"
             logger.warning(

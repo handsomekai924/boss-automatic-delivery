@@ -293,6 +293,24 @@ def test_deliver_chat_remind_continues_batch_without_login_hint():
     assert _match_of(aid, "j2")["deliver_status"] == "ok"
 
 
+def test_deliver_chat_remind_tomorrow_message_stops_batch():
+    """达到每日沟通上限并提示明天再来时，当前失败后立即停整批。"""
+    message = "您今天已与150位BOSS沟通，休息一下，明天再来吧"
+    client = FakeGreetClient([_chat_remind_exc(message)])
+    snap, aid = _run_deliver(
+        [_match("j1"), _match("j2"), _match("j3")], ["j1", "j2", "j3"], client
+    )
+
+    assert snap["status"] == "error"
+    assert "沟通配额" in snap["error"]
+    assert "明天再来" in snap["error"]
+    assert (snap["done"], snap["failed"], snap["ok"]) == (1, 1, 0)
+    assert [call["encrypt_job_id"] for call in client.calls] == ["j1"]
+    assert "明天再来" in _match_of(aid, "j1")["deliver_error"]
+    assert "deliver_status" not in _match_of(aid, "j2")
+    assert "deliver_status" not in _match_of(aid, "j3")
+
+
 def test_deliver_chat_remind_remaining_zero_stops_batch():
     """话术明说「还剩 0 次」= 今天的量真见底了，停批（但仍不是登录失效）。"""
     exc = _chat_remind_exc("您今天已与150位BOSS沟通，还剩0次沟通机会哦")
