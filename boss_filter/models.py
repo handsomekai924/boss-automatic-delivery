@@ -11,10 +11,13 @@ from typing import Any, Iterable, Iterator
 
 
 def normalize_code(value: Any) -> str:
-    """把接口里的 int / str code 统一成 str。``None`` → 空串。"""
+    """把接口里的 int / str code 统一成 str。``None`` → 空串。
+
+    ``bool`` 虽是 int 子类，但当 code 没意义，原样字符串化。
+    """
     if value is None:
         return ""
-    if isinstance(value, bool):  # bool 是 int 的子类，但当 code 没意义
+    if isinstance(value, bool):
         return str(value)
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -119,22 +122,22 @@ class CityNode:
 
 @dataclass(frozen=True)
 class FilterConditions:
-    """todo.md 第二节列的 7 类筛选条件，外加接口顺带返回的辅助项。
+    """7 类筛选条件，外加接口顺带返回的辅助项。
 
     字段顺序对应推荐流程里用户会配置的维度；``source`` 标明数据从哪来，
     便于 UI 提示「当前是离线兜底值，可能不是最新的」。
     """
 
-    # ---- todo.md 列出的 7 项 ----
-    cities: tuple[CityNode, ...] = ()            # 城市
-    job_types: tuple[FilterOption, ...] = ()     # 求职类型
-    salaries: tuple[FilterOption, ...] = ()      # 薪资待遇
-    experiences: tuple[FilterOption, ...] = ()   # 工作经验
-    degrees: tuple[FilterOption, ...] = ()       # 学历要求
-    industries: tuple[IndustryGroup, ...] = ()   # 公司行业（分组）
-    scales: tuple[FilterOption, ...] = ()        # 公司规模
+    # ---- 主维度（城市 / 求职类型 / 薪资 / 经验 / 学历 / 行业 / 规模） ----
+    cities: tuple[CityNode, ...] = ()
+    job_types: tuple[FilterOption, ...] = ()
+    salaries: tuple[FilterOption, ...] = ()
+    experiences: tuple[FilterOption, ...] = ()
+    degrees: tuple[FilterOption, ...] = ()
+    industries: tuple[IndustryGroup, ...] = ()
+    scales: tuple[FilterOption, ...] = ()
 
-    # ---- 接口顺带回的，todo.md 没列但先收下 ----
+    # ---- 接口顺带返回的辅助项 ----
     pay_types: tuple[FilterOption, ...] = ()
     stages: tuple[FilterOption, ...] = ()
     part_times: tuple[FilterOption, ...] = ()
@@ -145,9 +148,6 @@ class FilterConditions:
     #: 本次装配过程中被降级的来源，如 ``{"cities": "fallback"}``
     degraded: dict[str, str] = field(default_factory=dict)
 
-    # ------------------------------------------------------------------ #
-    # 查询辅助
-    # ------------------------------------------------------------------ #
 
     def industry_options(self) -> tuple[FilterOption, ...]:
         """把分组的行业摊平成一维列表（组名丢弃，code 全局唯一）。"""

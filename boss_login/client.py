@@ -1,33 +1,18 @@
 """短信登录客户端 —— 完整流程的核心实现。
 
-流程总览::
+    校验手机号 → 本地冷却 → 发验证码 → 人工输码 → getLoginSuggest → 登录 → 收 Set-Cookie
 
-    校验手机号 ──► 本地冷却检查 ──► POST 发送验证码 ──► 记下冷却与票据
-                                        │                （zpData.token = smsToken）
-                                        ├─ 命中限流   → RateLimited(retry_after)
-                                        ├─ 命中滑块   → 拉挑战 → 本人拖滑块
-                                        │              → 带票据打 **smsCodeV2** 重试
-                                        │              （不调 validate：票据一次性）
-                                        ├─ 命中风控   → RiskControlRequired(seed/ts/name)
-                                        └─ IP/账号封禁 → AccountBlocked
-                                        ▼
-              人工输入短信验证码 ──► getLoginSuggest ──► POST 登录 ──► 收 Set-Cookie
-                                        │（失败不阻断）        │        ──► LoginResult
-                                        │                     │
-                                        │                     ├─ 命中滑块 → 先复用发码那张票打 **phoneV2**
-                                        │                     │             → 不认就重新拖一次再打 phoneV2
-                                        │                     ├─ 验证码错误/过期 → CodeRejected（重新输入）
-                                        │                     └─ 成功            → 落盘登录态
+发码分支：限流 → :class:`RateLimited`；滑块 → 解题后带票打 **smsCodeV2**（不调
+validate，票据一次性）；风控 → :class:`RiskControlRequired`；封禁 → :class:`AccountBlocked`。
+登录分支：滑块 → 先复用发码那张票打 **phoneV2**，不认就重新解一次；验证码错误/
+过期 → :class:`CodeRejected`；成功 → 落盘登录态。``zpData.token`` 是 smsToken。
 
-设计要点
-    * 网络、休眠、时钟全部可注入，便于离线单测（见 tests/）。
-    * 服务端返回码 → 异常类型的映射集中在 ``_handle_response``，调用方按类型捕获即可。
-    * **真实站点的登录响应体里没有会话 token**：登录页的成功处理只读路由字段，
-      鉴权完全靠 ``Set-Cookie``。Cookie 名还可能不在 ``AUTH_COOKIES`` 里，
-      所以「这次登录新种的 Cookie」本身就当凭证，由 ``user_info`` 验真伪。
-    * **不实现验证码破解**：滑块的题由本人在浏览器里拖（官方极验组件），
-      本模块只负责把挑战参数递过去、把票据交回来。其余风控仍然抛
-      ``RiskControlRequired`` 交由使用者处理。
+* 网络、休眠、时钟可注入，便于离线单测（见 tests/）。
+* 服务端返回码 → 异常类型集中在 ``_handle_response``，按类型捕获即可。
+* **真实站点的登录响应体里没有会话 token**，鉴权完全靠 ``Set-Cookie``；Cookie 名
+  可能不在 ``AUTH_COOKIES`` 里，「这次登录新种的 Cookie」本身就当凭证。
+* **不实现验证码破解**：滑块由本人在浏览器里拖官方极验组件，本模块只递挑战参数、
+  收回票据；其余风控抛 ``RiskControlRequired`` 交使用者处理。
 """
 
 from __future__ import annotations
@@ -152,27 +137,18 @@ class ZhipinLoginClient:
 
         #: phone -> 最近一次发送回执
         self._tickets: dict[str, SmsCodeTicket] = {}
-        #: phone -> 发码那次解出来的滑块票据
-        #:
-        #: 登录页的 ``verifyInfo`` 跨发码 / 登录共用（``clearVerify`` 只在登录的
-        #: finally 里调），所以 ``Ce()`` 把**同一张**票据也挂到 login 请求上。
-        #: 这里照办：登录先试着复用发码那张，服务端不认再重新解一次。
+        #: phone -> 发码那次解出来的滑块票据。登录页 ``verifyInfo`` 跨发码 / 登录
+        #: 共用，登录会先试着复用这张，服务端不认再重新解一次。
         self._slider_solutions: dict[str, SliderSolution] = {}
-        #: phone -> 发码响应 ``zpData.token``（smsToken，短信会话票据）
-        #:
-        #: 登录页把它存进 ``smsToken``，登录前置的 ``getLoginSuggest`` 要用。
-        #: 这**不是**登录态，别拿它当鉴权凭证。
+        #: phone -> 发码响应 ``zpData.token``（smsToken）。登录前置 ``getLoginSuggest``
+        #: 要用；**不是**登录态，别拿它当鉴权凭证。
         self._sms_tokens: dict[str, str] = {}
         #: 落盘的会话 token（真实站点登录响应体里通常没有，假服务端会给）
         self._auth_token: str = ""
         #: 登录那次种下的 Cookie 名。真实站点鉴权靠 Set-Cookie，名字可能不在
-        #: ``AUTH_COOKIES`` 那张已知名单里——记下实到的名字，``is_logged_in``
-        #: 才认得出它们（否则落盘复用后又会说「本地没有登录态」）。
+        #: ``AUTH_COOKIES`` 里——记下实到的名字，``is_logged_in`` 才认得出它们。
         self._session_cookie_names: set[str] = set()
 
-    # ------------------------------------------------------------------ #
-    # 对外属性
-    # ------------------------------------------------------------------ #
 
     @property
     def http(self) -> Any:
@@ -182,9 +158,6 @@ class ZhipinLoginClient:
     def last_ticket(self, phone: str) -> SmsCodeTicket | None:
         return self._tickets.get(normalize_phone(phone))
 
-    # ------------------------------------------------------------------ #
-    # 发送验证码
-    # ------------------------------------------------------------------ #
 
     def send_sms_code(
         self,
@@ -211,6 +184,10 @@ class ZhipinLoginClient:
         :raises RateLimited:        仍在冷却期
         :raises RiskControlRequired: 需要人工完成安全验证
         :raises AccountBlocked:     IP / 账号被封禁
+
+        命中滑块且给了 ``slider_solver`` 时人机协作过一次，再带票打 **V2** 重试
+        （走 :meth:`solve_slider`，**不调 validate**，票据一次性）；登录步会复用
+        这张票。
         """
         phone = normalize_phone(phone)
         validate_phone(phone, dial_code)
@@ -232,19 +209,13 @@ class ZhipinLoginClient:
         try:
             self._handle_response(response, phone=phone, action="send_sms_code")
         except RiskControlRequired as exc:
-            # 滑块可以人机协作过掉，过完带着票据重试一次；其余风控原样抛出。
             if slider_solver is None or not self._is_slider_challenge(
                 exc.code, exc.message, exc.raw or {}
             ):
                 raise
             self._emit(on_event, "slider_required", {"code": exc.code, "message": exc.message})
-            # 注意：这里走 solve_slider，**不调 validate**。passport 族没有
-            # validate 路由，而且极验票据一次性——先交去 validate 会把它烧掉。
             solution = self.solve_slider(solver=slider_solver, on_event=on_event)
-            # 登录那一步会先试着复用这张票据（登录页 verifyInfo 就是跨两步共用的）
             self._slider_solutions[phone] = solution
-            # 重试打的是 **V2**：登录页在极验通道下只调 send/smsCodeV2，票据也
-            # 只有那一层认。带着票据去重试 V1，服务端照样 400061。
             response = self._retry_send_sms_v2(
                 phone, dial_code=dial_code, identity=identity, solution=solution, on_event=on_event
             )
@@ -272,7 +243,6 @@ class ZhipinLoginClient:
             retry_after=retry_after,
         )
         self._tickets[phone] = ticket
-        # 发码响应里的 zpData.token 是 smsToken，登录前置的 getLoginSuggest 要用
         sms_token = str(response.data.get(C.SMS_TOKEN_FIELD) or "")
         if sms_token:
             self._sms_tokens[phone] = sms_token
@@ -292,9 +262,6 @@ class ZhipinLoginClient:
                 retry_after=remain,
             )
 
-    # ------------------------------------------------------------------ #
-    # 短信登录
-    # ------------------------------------------------------------------ #
 
     def login_by_sms(
         self,
@@ -321,6 +288,9 @@ class ZhipinLoginClient:
         :raises ValidationError: 手机号或验证码格式不合法
         :raises CodeRejected:    验证码错误 / 过期 / 错误次数超限
         :raises RiskControlRequired / AccountBlocked: 风控
+
+        登录前置 ``getLoginSuggest`` 失败不阻断。有票据就直接打 V2；没有先按 V1
+        探一次，命中滑块再解题重试。命中滑块后**不调 validate**（票据一次性）。
         """
         phone = normalize_phone(phone)
         code = normalize_phone(code)
@@ -331,15 +301,11 @@ class ZhipinLoginClient:
         if solution is None:
             solution = self._slider_solutions.get(phone)
 
-        # 登录页的 loginOrRegister 中间件链末位是 getLoginSuggest（Re），
-        # 拿发码那步的 smsToken + 验证码打一发。失败会被吞掉，但每次登录都会打。
         self._call_login_suggest(phone, code, dial_code=dial_code)
-        # 真实站点的登录响应体里没有会话 token，鉴权靠 Set-Cookie。拍个快照，
-        # 好把「这次登录新种的 Cookie」单独认出来——名字可能不在 AUTH_COOKIES 里。
+        # 真实站点登录响应体里没有会话 token，鉴权靠 Set-Cookie。拍快照好把
+        # 「这次登录新种的 Cookie」单独认出来——名字可能不在 AUTH_COOKIES 里。
         cookies_before = self._collect_cookies()
 
-        # 登录页在极验通道下走 ``login/phoneV2``，票据只在那层认。有票据就直接
-        # 打 V2；没有就先按 V1 探一次——真实站点会回 400061，然后再解题重试。
         if solution is not None:
             response = self._retry_login_v2(
                 phone,
@@ -368,9 +334,7 @@ class ZhipinLoginClient:
             if slider_solver is None:
                 raise
             self._emit(on_event, "slider_required", {"code": exc.code, "message": exc.message})
-            # 复用失败 = 票据已烧 / 已过期；或者刚才那发 V1 压根没带票据。
-            # 两种情况都得重新解一张，不能再拿旧的凑数。
-            # **不调 validate**：passport 族没有那条路由，而且极验票据一次性。
+            # 复用失败 = 票据已烧/过期，或刚才那发 V1 压根没带票；重新解一张。
             solution = self.solve_slider(solver=slider_solver, on_event=on_event)
             self._slider_solutions[phone] = solution
             cookies_before = self._collect_cookies()
@@ -411,9 +375,6 @@ class ZhipinLoginClient:
             new_cookies=new_cookies,
         )
         if not result.logged_in:
-            # 真实站点的登录响应体里没有 token（登录页的成功处理只读路由字段），
-            # 鉴权靠 Set-Cookie。连 Cookie 都没种 = 这次登录根本没换到登录态。
-            # 把实到的形状打出来，免得只能瞎猜该适配哪个字段。
             raise LoginIncomplete(
                 "接口返回成功，但既没有 token，登录响应也没种下任何 Cookie，"
                 "拿不到可用于后续请求的凭证。\n"
@@ -425,8 +386,7 @@ class ZhipinLoginClient:
                 raw=response.data,
             )
         if not token and not any(name in cookies for name in C.AUTH_COOKIES):
-            # 种了 Cookie 但名字一个都不认识——先放行，让 user_info 去验真伪，
-            # 同时把名字打出来，好把它们补进 AUTH_COOKIES。
+            # 种了 Cookie 但名字都不认识——先放行，让 user_info 验真伪，并打出名字。
             logger.warning(
                 "登录响应种了 Cookie，但名字都不在已知鉴权名单里：%s",
                 sorted(new_cookies) or sorted(cookies),
@@ -472,9 +432,6 @@ class ZhipinLoginClient:
         except Exception as exc:  # noqa: BLE001 - 这一发绝不拦登录
             logger.debug("getLoginSuggest 异常（忽略）：%s", exc)
 
-    # ------------------------------------------------------------------ #
-    # 完整流程编排（发码 → 人工输码 → 登录 → 失败重试）
-    # ------------------------------------------------------------------ #
 
     def run_sms_login(
         self,
@@ -536,7 +493,6 @@ class ZhipinLoginClient:
             except CodeRejected as exc:
                 last_error = exc
                 self._emit(on_event, "code_rejected", {"attempt": attempt, "message": exc.message})
-                # 过期就重发一次，错误则继续索要
                 if exc.code in (2002, 2003) and attempt < self.max_code_attempts:
                     ticket = self._resend_after_failure(
                         phone,
@@ -596,7 +552,11 @@ class ZhipinLoginClient:
         slider_solver: SliderSolver | None = None,
         on_event: EventHandler | None = None,
     ) -> SmsCodeTicket:
-        """验证码过期后的重发：先等到冷却结束，避免又撞限流。"""
+        """验证码过期后的重发：先等到冷却结束，避免又撞限流。
+
+        本地与服务端的冷却可能对不上（时钟漂移，或另一台设备刚发过），以服务端
+        给的剩余秒数为准再等一次；超过上限就放弃，避免无意义的长眠。
+        """
         ticket = self._tickets.get(phone)
         wait = ticket.remaining_cooldown(now=self._clock()) if ticket else 0
         if wait > 0:
@@ -610,8 +570,6 @@ class ZhipinLoginClient:
                 slider_solver=slider_solver, on_event=on_event,
             )
         except RateLimited as exc:
-            # 本地与服务端的冷却可能对不上（时钟漂移，或另一台设备刚发过验证码）。
-            # 以服务端给的剩余秒数为准再等一次；超过上限就放弃，避免无意义的长眠。
             if exc.retry_after <= 0 or exc.retry_after > C.MAX_RESEND_WAIT_SECONDS:
                 raise
             logger.info("服务端要求 %s 秒后才可重发，等待后重试一次", exc.retry_after)
@@ -629,9 +587,6 @@ class ZhipinLoginClient:
         )
         return new_ticket
 
-    # ------------------------------------------------------------------ #
-    # 登录态
-    # ------------------------------------------------------------------ #
 
     def fetch_user_info(self) -> UserInfo:
         """拉取当前登录用户信息；未登录抛 :class:`SessionExpired`。"""
@@ -684,9 +639,6 @@ class ZhipinLoginClient:
             if cookies is not None and hasattr(cookies, "clear"):
                 cookies.clear()
 
-    # ------------------------------------------------------------------ #
-    # 滑块验证（人机协作）
-    # ------------------------------------------------------------------ #
 
     def fetch_slider_challenge(
         self,
@@ -757,8 +709,7 @@ class ZhipinLoginClient:
         if solution is None:
             raise BossLoginError("已放弃滑块验证")
         if not solution.rand_key:
-            # 挑战里的 randKey 一并带上。getTypeV2 特意下发它，onSuccess 也回传它，
-            # 多半就是要跟着业务请求走的。
+            # getTypeV2 特意下发 randKey，多半要跟着业务请求走
             solution = SliderSolution(
                 challenge=solution.challenge,
                 validate=solution.validate,
@@ -842,9 +793,6 @@ class ZhipinLoginClient:
             return True
         return any(keyword in message for keyword in C.SLIDER_MESSAGE_KEYWORDS)
 
-    # ------------------------------------------------------------------ #
-    # 端点探测
-    # ------------------------------------------------------------------ #
 
     def probe_endpoints(self, *, keys: Iterable[str] | None = None) -> list[dict[str, Any]]:
         """逐个试探候选接口，帮助确认线上真实路径。
@@ -881,9 +829,6 @@ class ZhipinLoginClient:
                     )
         return report
 
-    # ------------------------------------------------------------------ #
-    # 内部：请求与响应
-    # ------------------------------------------------------------------ #
 
     def _post(
         self,
@@ -1097,7 +1042,7 @@ class ZhipinLoginClient:
         message = response.message or C.CODE_MESSAGES.get(code, f"接口返回异常码 {code}")
         data = response.data
 
-        # 1) 风控：SECURITY_CHECK 会带出滑块参数 {seed, ts, name}
+        # 风控：SECURITY_CHECK 会带出滑块参数 {seed, ts, name}
         if self._is_risk_control(code, message):
             if code in C.RISK_CODE_IP_BLOCK | C.RISK_CODE_UID_BLOCK:
                 raise AccountBlocked(
@@ -1113,7 +1058,7 @@ class ZhipinLoginClient:
                 raw=data,
             )
 
-        # 2) 限流：优先采用服务端给出的剩余秒数
+        # 限流：优先采用服务端给出的剩余秒数
         if code == 1001:
             retry_after = self._parse_int(data.get("retryAfter"), self.cooldown_seconds)
             self._tickets[phone] = SmsCodeTicket(
@@ -1124,19 +1069,15 @@ class ZhipinLoginClient:
             )
             raise RateLimited(code, message, retry_after=retry_after, raw=data)
 
-        # 3) 验证码相关失败（仅登录接口会返回）
+        # 验证码相关失败（仅登录接口会返回）
         if code in (2001, 2002, 2003):
             raise CodeRejected(code, message, raw=data)
 
-        # 4) 账号异常
         if code == 2004:
             raise AccountBlocked(code, message, raw=data)
 
         raise ApiError(code, f"[{action}] {message}", raw=data)
 
-    # ------------------------------------------------------------------ #
-    # 内部：小工具
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _scene_code(scene: str) -> int:
@@ -1181,8 +1122,8 @@ class ZhipinLoginClient:
     def _extract_token(data: Mapping[str, Any]) -> str:
         """从响应体里抠会话 token；再往里看一层，免得藏在 ``zpData.user.token``。
 
-        ⚠️ 真实站点的 ``login/phoneV2`` 响应体里**没有** token——登录页的成功
-        处理只读路由字段，鉴权靠 Set-Cookie。这里取到空是常态，不是失败。
+        ⚠️ 真实站点的 ``login/phoneV2`` 响应体里**没有** token，鉴权靠
+        Set-Cookie——这里取到空是常态，不是失败。
         """
         for field in C.TOKEN_FIELDS:
             value = data.get(field)

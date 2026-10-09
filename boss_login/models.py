@@ -103,11 +103,9 @@ class LoginResult:
     is_new_user: bool = False
     cookies: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
-    #: 这次登录**新种**的 Cookie（前后快照的差集）。
-    #:
-    #: 真实站点的登录响应体里没有会话 token，鉴权完全靠 ``Set-Cookie``；而且
-    #: Cookie 名可能不在 ``AUTH_COOKIES`` 那张已知名单里。只要登录响应真的种了
-    #: Cookie，就先当换到了登录态，由 ``user_info`` 去验真伪。
+    #: 这次登录**新种**的 Cookie（前后快照的差集）。真实站点登录响应体里没有
+    #: 会话 token，鉴权完全靠 ``Set-Cookie``；名字也可能不在 ``AUTH_COOKIES`` 里。
+    #: 只要真种了 Cookie 就先当换到了登录态，由 ``user_info`` 验真伪。
     new_cookies: dict[str, str] = field(default_factory=dict)
 
     @property

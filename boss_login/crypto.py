@@ -1,22 +1,14 @@
 """手机号 AES 加密 —— 复刻登录页 ``je()`` 中间件里的 ``re(phone, atob(E))``。
 
-来源是按需加载的 webpack chunk ``user-login.5398946e.js``（zhipin-sign/v5330）::
-
-    je = () => async (ctx, next) => {
-        const { phone, ...rest } = ctx.params;        // we = ["phone"]
-        ctx.params = { encryptedAccount: re(phone, atob(E)), ...rest };
-        await next();
-    }
-
-``re(plaintext, key)`` 是 CryptoJS 默认参数下的 AES：
+CryptoJS 默认参数下的 **AES-128-CBC + Pkcs7**，随机 16 字节 IV，输出
+``base64(iv ‖ ciphertext)``::
 
     key        = Utf8.parse(atob("clRwXUJBK1VKK0k0IWFbbQ=="))
     iv         = WordArray.random(16)
     ciphertext = AES.encrypt(Utf8.parse(plaintext), key, {iv}).ciphertext
     return     = Base64.stringify(iv.concat(ciphertext))
 
-也就是 **AES-128-CBC + Pkcs7**，随机 16 字节 IV，输出 ``base64(iv ‖ ciphertext)``。
-密钥是写死的 16 个 ASCII 字节（``atob`` 之后全是 < 0x80，所以 Utf8.parse 不改变它）。
+密钥是写死的 16 个 ASCII 字节（``atob`` 之后全 < 0x80，``Utf8.parse`` 不改变它）。
 
 **只做协议对齐**：这层只是把手机号按线上形状装进表单，不涉及任何风控绕过。
 """

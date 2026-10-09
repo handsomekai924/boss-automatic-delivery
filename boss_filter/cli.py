@@ -95,9 +95,6 @@ def main(argv: list[str] | None = None) -> int:
     return handlers[args.command](args, conditions)
 
 
-# --------------------------------------------------------------------------- #
-# 子命令
-# --------------------------------------------------------------------------- #
 
 
 def _cmd_show(args: argparse.Namespace, conditions: FilterConditions) -> int:
@@ -126,9 +123,6 @@ def _cmd_export(args: argparse.Namespace, conditions: FilterConditions) -> int:
     return EXIT_OK
 
 
-# --------------------------------------------------------------------------- #
-# 装配
-# --------------------------------------------------------------------------- #
 
 
 def _load_conditions(args: argparse.Namespace) -> FilterConditions:
@@ -155,9 +149,6 @@ def _load_conditions(args: argparse.Namespace) -> FilterConditions:
     return get_filter_conditions(client=client, use_fallback=True)
 
 
-# --------------------------------------------------------------------------- #
-# 展示辅助
-# --------------------------------------------------------------------------- #
 
 
 def _print_detail(conditions: FilterConditions) -> None:

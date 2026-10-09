@@ -59,11 +59,9 @@ from .verify import (
 __version__ = "1.1.0"
 
 __all__ = [
-    # 核心
     "ZhipinLoginClient",
     "create_client",
     "persist_login",
-    # 模型
     "ApiResponse",
     "LoginResult",
     "SmsCodeTicket",
@@ -72,7 +70,6 @@ __all__ = [
     "SliderSolution",
     "StoredSession",
     "UserInfo",
-    # 异常
     "AccountBlocked",
     "ApiError",
     "BossLoginError",
@@ -83,7 +80,6 @@ __all__ = [
     "SessionExpired",
     "TransportError",
     "ValidationError",
-    # 工具
     "SliderSolver",
     "build_helper_html",
     "generate_trace_id",
@@ -98,7 +94,6 @@ __all__ = [
     "clear_session",
     "load_session",
     "save_session",
-    # 常量
     "BASE_URL",
     "CODE_LENGTH",
     "DEFAULT_DB_PATH",
@@ -126,12 +121,12 @@ def create_client(
         if not stored.is_empty:
             for name, value in stored.cookies.items():
                 client.http.cookies.set(name, value)
-            # 落盘的会话可能只剩 token（真实站点鉴权靠 Cookie，但假服务端
-            # 之类会把 token 放响应体）。两种都得算登录态。
+            # 落盘的会话可能只剩 token（真实站点鉴权靠 Cookie，假服务端之类会把
+            # token 放响应体）。两种都得算登录态。
             if stored.token:
                 client.set_auth_token(stored.token)
-            # 落盘时已经认定是登录凭证的 Cookie 名，复用时也得认——名字可能
-            # 不在 AUTH_COOKIES 里（真实站点 Set-Cookie 的名字会变）。
+            # 落盘时已经认定是登录凭证的 Cookie 名，复用时也得认——名字可能不在
+            # AUTH_COOKIES 里（真实站点 Set-Cookie 的名字会变）。
             client.set_session_cookies(stored.cookies)
     return client
 

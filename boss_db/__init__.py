@@ -1,23 +1,16 @@
-"""统一状态库（SQLite）。
-
-以前登录态、搜索条件、stoken、LLM 配置、简历、分析各自躺在 ``*.json`` 里，
-职位另有一份 ``jobs.db``。现在**只有一份库** ``data/boss.db``：
+"""统一状态库（SQLite，``data/boss.db``）。
 
 ``doc``
-    单例文档（会话 / 搜索条件 / stoken / LLM 配置 / 投递配置）。它们本身就是「一份文档」，
-    字段由各模块自己的 dataclass 管，所以整包存 JSON，不拆列。
-    payload 就是当年那个文件的正文，迁移 = 把文本搬进一行。
+    单例文档（会话 / 搜索条件 / stoken / LLM 配置 / 投递配置），整包存 JSON 不拆列。
 
 ``resume`` / ``analysis``
-    实体集合，有 CRUD、要按时间排序、要按 id 删——真正的表。
-    嵌套字段（章节、匹配结果）整包进 JSON 列，和 ``jobs.job_labels`` 一个惯例。
+    实体集合，真正的表；嵌套字段（章节、匹配结果）整包进 JSON 列。
 
 ``jobs`` / ``fetch_pages``
-    职位与抓取流水，DDL 从 :mod:`boss_jobs.store` 原样搬来。
+    职位与抓取流水，DDL 自 :mod:`boss_jobs.store`。
 
-路径覆盖顺序：显式 ``path`` → 环境变量 ``BOSS_DB`` → ``data/boss.db``。
-用户点名的 JSON 文件读写不走这里（``boss_filter export --out``、
-``search_filter_from_file`` 那类）。
+路径覆盖：显式 ``path`` → 环境变量 ``BOSS_DB`` → ``data/boss.db``。
+用户点名的 JSON 文件读写不走这里（``boss_filter export --out`` 等）。
 """
 
 from __future__ import annotations
@@ -151,9 +144,6 @@ CREATE INDEX IF NOT EXISTS idx_fetch_pages_page ON fetch_pages(page);
 """
 
 
-# --------------------------------------------------------------------------- #
-# 路径
-# --------------------------------------------------------------------------- #
 
 
 def resolve_db_path(path: Path | str | None = None) -> Path:
@@ -174,11 +164,9 @@ def resolve_db_path(path: Path | str | None = None) -> Path:
     return DEFAULT_DB_PATH
 
 
-# --------------------------------------------------------------------------- #
-# 连接（进程内缓存：":memory:" 必须共享，文件库也省得反复开）
-# --------------------------------------------------------------------------- #
-
 _lock = threading.Lock()
+#: 进程内连接缓存。**``":memory:"`` 必须共享**（每个连接是独立库），文件库也
+#: 省得反复开。
 _conns: dict[str, sqlite3.Connection] = {}
 #: 迁移要串行跑：web 线程池会并发 ``connect`` 同一个默认库
 _migrate_lock = threading.Lock()
@@ -264,6 +252,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
 
 
 def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
+    """打开连接、建表/补列；仅默认文件库会触发 :func:`migrate_legacy`。"""
     is_memory = str(resolved) == ":memory:"
     created = False
     if not is_memory:
@@ -292,16 +281,12 @@ def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
         if created:
             logger.info("状态库已建：%s", resolved)
 
-    # 只认默认库：测试/自定义库路径下绝不会去动项目根那几个真账本
     if migrate and not is_memory and resolved == DEFAULT_DB_PATH:
         with _migrate_lock:
             migrate_legacy(conn, resolved)
     return conn
 
 
-# --------------------------------------------------------------------------- #
-# 单例文档
-# --------------------------------------------------------------------------- #
 
 
 def doc_get_raw(name: str, path: Path | str | None = None) -> str | None:
@@ -350,9 +335,6 @@ def _decode_payload(raw: Any) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-# --------------------------------------------------------------------------- #
-# 一次性迁移
-# --------------------------------------------------------------------------- #
 
 
 def migrate_legacy(
@@ -367,7 +349,8 @@ def migrate_legacy(
         免得把真账本搬走。
 
     迁成功的 JSON 源文件会删掉；``jobs.db`` 只改名成 ``jobs.db.migrated``，留个后路。
-    单条失败只 warning，不挡别的条。
+    单条失败只 warning，不挡别的条。``jobs.db`` 走 :func:`_import_jobs_db`（
+    ATTACH 的库必须自己 commit 完再 detach）。
     """
     root = Path(legacy_root) if legacy_root is not None else PROJECT_ROOT
     gate = _decode_payload(_raw_row(conn, SCHEMA_DOC) or "")
@@ -386,12 +369,10 @@ def migrate_legacy(
     }
     data_dir = root / "data"
 
-    # 职位库单独走一步：ATTACH 的库在事务里 DETACH 会被锁住，必须自己 commit 完再 detach
     counts["jobs"], counts["fetch_pages"] = _import_jobs_db(conn, root / "jobs.db")
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        # --- 单例文档 ---
         for name, src in (
             (DOC_SESSION, root / "session.json"),
             (DOC_SEARCH_FILTER, root / "search_filter.json"),
@@ -402,7 +383,7 @@ def migrate_legacy(
                 continue
             try:
                 text = src.read_text(encoding="utf-8")
-                json.loads(text)  # 校验一下，坏文件不搬
+                json.loads(text)  # 坏文件不搬
             except (OSError, ValueError) as exc:
                 logger.warning("迁移跳过 %s：%s", src, exc)
                 continue
@@ -413,7 +394,6 @@ def migrate_legacy(
             counts[name] = 1
             _unlink_quiet(src)
 
-        # --- 简历 / 分析 ---
         counts["resume"] = _import_resumes(conn, data_dir / "resumes")
         counts["analysis"] = _import_analyses(conn, data_dir / "analyses")
 
@@ -520,9 +500,13 @@ def _import_analyses(conn: sqlite3.Connection, folder: Path) -> int:
 
 
 def _import_jobs_db(conn: sqlite3.Connection, legacy: Path) -> tuple[int, int]:
+    """把旧 ``jobs.db`` 搬进当前库。目标库已有职位则只改名，避免重复。
+
+    列用显式名 + ``COALESCE``：旧库可能有 NULL，目标列是 ``NOT NULL DEFAULT ''``。
+    ATTACH 的库必须自己 commit 完再 detach，不能塞在外层事务里。
+    """
     if not legacy.exists():
         return 0, 0
-    # 目标库里已经有职位就别搬了（避免重复），只把旧文件挪开
     have = conn.execute("SELECT count(*) AS n FROM jobs").fetchone()["n"]
     if have:
         _rename_quiet(legacy, legacy.with_name(legacy.name + ".migrated"))
@@ -535,7 +519,6 @@ def _import_jobs_db(conn: sqlite3.Connection, legacy: Path) -> tuple[int, int]:
         jobs = int(conn.execute(f"SELECT count(*) AS n FROM {alias}.jobs").fetchone()["n"])
         pages = int(conn.execute(f"SELECT count(*) AS n FROM {alias}.fetch_pages").fetchone()["n"])
         conn.execute("BEGIN IMMEDIATE")
-        # 显式列名 + COALESCE：旧库里可能有 NULL，目标列是 NOT NULL DEFAULT ''
         conn.execute(
             "INSERT OR IGNORE INTO jobs (encrypt_job_id, job_name, brand_name, location, "
             "salary_desc, job_experience, job_degree, brand_industry, brand_scale_name, "
@@ -590,10 +573,11 @@ def _unlink_quiet(path: Path) -> None:
 
 
 def _rmdir_quiet(path: Path) -> None:
+    """空目录才删；还有别的文件就留着。"""
     try:
         path.rmdir()
     except OSError:
-        pass  # 还有别的文件就留着
+        pass
 
 
 def _rename_quiet(src: Path, dst: Path) -> None:
