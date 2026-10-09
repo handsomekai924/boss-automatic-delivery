@@ -88,7 +88,7 @@ OpenAI 兼容协议（DeepSeek / Kimi / 本地 vLLM 都行）。Key 只存本地
 # github
 git clone https://github.com/handsomekai924/boss-automatic-delivery.git
 # gitee
-git https://gitee.com/w-kev/boss-automatic-delivery.git
+git clone https://gitee.com/w-kev/boss-automatic-delivery.git
 cd boss-automatic-delivery
 
 python -m venv .venv
