@@ -274,16 +274,68 @@ export function taskPanel({ title = "任务", stopLabel = "停止", logTitle = "
   };
 }
 
-/** 事件列表 → task-log 的 HTML 行 */
+/** 事件列表 → task-log 的 HTML 行（从两种事件格式提取关键信息） */
 export function renderEvents(events, { limit = 30, nameKey = "name" } = {}) {
   return (events || [])
     .slice(-limit)
     .map((ev) => {
       const at = ev.at || ev.ts || ev.time;
       const name = ev[nameKey] || ev.event || ev.type || "event";
-      const detail = ev.message || ev.msg || (ev.payload && ev.payload.message) || "";
-      const kind = /error|fail|bad/i.test(String(name)) ? "bad" : (/ok|done|finish|success/i.test(String(name)) ? "ok" : "");
-      return `<div class="ev"><time>${escapeHtml(fmtClock(at))}</time><span class="name ${kind}">${escapeHtml(String(name))}</span>${detail ? `<span>${escapeHtml(String(detail))}</span>` : ""}</div>`;
+      // 两种格式：match/deliver 是 {name, payload:{...}}，crawl/desc 是平铺字段
+      const flat = { ...ev };
+      if (ev.payload && typeof ev.payload === "object") Object.assign(flat, ev.payload);
+      const kind = /error|fail|bad|stopped/i.test(String(name))
+        ? "bad"
+        : /ok|done|finish|success|sent/i.test(String(name))
+          ? "ok"
+          : /skip|cancel/i.test(String(name))
+            ? "warn"
+            : "";
+      const label = formatEventLabel(name, flat);
+      return `<div class="ev"><time>${escapeHtml(fmtClock(at))}</time><span class="name ${kind}">${escapeHtml(label)}</span></div>`;
     })
     .join("");
+}
+
+/** 把事件名 + 字段拼成人看得懂的一行 */
+function formatEventLabel(name, f) {
+  const n = String(name);
+  const job = f.job_name || "";
+  const brand = f.brand || f.brand_name || "";
+  const who = job ? (brand ? `${job} @ ${brand}` : job) : "";
+
+  // 抓取：翻页（没有 event 字段，靠 page 计数）
+  if (f.page != null && (f.inserted != null || f.kept_count != null)) {
+    return `第 ${f.page} 页 · 原始 ${f.raw_count ?? "?"} · 入库 +${f.inserted ?? 0} · 更新 ${f.updated ?? 0}`;
+  }
+  // 抓取：JD 补抓
+  if (n === "detail_done") return `✓ ${who}${f.has_desc ? "" : "（无描述）"}`;
+  if (n === "detail_error") return `✗ ${who} — ${f.message || "拉取失败"}`;
+  if (n === "detail_skipped") return `– ${who}（${f.reason || "已有描述"}）`;
+  if (n === "detail_stopped") return `⛔ ${f.reason || "已停"}`;
+  // 抓取：生命周期
+  if (n === "stoken") return f.message || "正在准备搜索令牌…";
+  if (n === "finished") {
+    // crawl 有 stopped_reason，deliver/match 有 sent/failed/skipped 或 analysis_id
+    if (f.stopped_reason) return `抓取结束（${f.stopped_reason}）`;
+    if (f.sent != null || f.failed != null || f.skipped != null)
+      return `完成 · 成功 ${f.sent ?? f.ok ?? 0} / 失败 ${f.failed ?? 0} / 跳过 ${f.skipped ?? 0}`;
+    return "完成";
+  }
+  // 补抓 JD
+  if (n === "item_done") return `${f.has_desc ? "✓" : "○"} ${who}`;
+  if (n === "item_error") return `✗ ${who} — ${f.message || "拉取失败"}`;
+  if (n === "item_skipped") return `– ${who}（${f.reason || "已有描述"}）`;
+  if (n === "start") return `开始补抓 · 共 ${f.total ?? "?"} 条`;
+  if (n === "stopped") return `⛔ ${f.reason || "已停"}`;
+  // 匹配
+  if (n === "job_start") return `→ 开始匹配 ${who}`;
+  if (n === "job_done") return `✓ ${who}${f.score != null ? ` · 评分 ${f.score}` : ""}`;
+  // 投递
+  if (n === "send_start") return `→ 发送 ${who || f.encrypt_job_id || ""}`;
+  if (n === "sent") return `✓ 已发送 ${who || f.encrypt_job_id || ""}`;
+  if (n === "skipped") return `– 跳过 ${who || f.encrypt_job_id || ""}（${f.reason || "已发送"}）`;
+  // 通用兜底：挑几个有意义的字段
+  const bits = [who, f.message || f.reason || ""].filter(Boolean);
+  return bits.length ? `${n} · ${bits.join(" · ")}` : n;
 }

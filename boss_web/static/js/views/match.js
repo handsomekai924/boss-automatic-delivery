@@ -13,7 +13,7 @@ export async function renderMatch(root) {
   root.innerHTML = `
     <div class="page-head">
       <div class="page-head-text">
-        <h1 class="hero-title">匹配 <span class="grad">舱</span></h1>
+        <h1 class="hero-title">岗位 <span class="grad">匹配舱</span></h1>
         <p class="hero-sub">用 LLM 解析过的简历对库里的岗位做人岗匹配，出匹配度、优缺点与个性化招呼语；可手改招呼语，确认后发送。</p>
       </div>
     </div>

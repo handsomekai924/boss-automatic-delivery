@@ -7,7 +7,7 @@ export async function renderJobs(root) {
   root.innerHTML = `
     <div class="page-head">
       <div class="page-head-text">
-        <h1 class="hero-title">职位 <span class="grad">舱库</span></h1>
+        <h1 class="hero-title">职位 <span class="grad">抓取舱</span></h1>
         <p class="hero-sub">按条件抓取、卡片化浏览、选中即删。抓取是后台任务，翻页硬间隔 1 秒防风控，随时可停。</p>
       </div>
     </div>
@@ -722,30 +722,8 @@ export async function renderJobs(root) {
       ],
       eta,
       error: s.status === "error" ? s.error : undefined,
-      log: renderDescLog(s.events),
+      log: renderEvents(s.events, { limit: 20, nameKey: "event" }),
     });
-  }
-
-  function renderDescLog(events) {
-    return (events || [])
-      .slice(-20)
-      .map((e) => {
-        const t = e.at
-          ? new Date(e.at * 1000).toLocaleTimeString("zh-CN", { hour12: false })
-          : "";
-        const label =
-          e.event === "item_error"
-            ? `✗ ${e.job_name || ""} ${e.message || ""}`
-            : e.event === "item_done"
-              ? `${e.has_desc ? "✓" : "○"} ${e.job_name || ""}`
-              : e.event === "item_skipped"
-                ? `– ${e.job_name || ""} ${e.reason || "跳过"}`
-                : e.event === "stopped"
-                  ? `⛔ ${e.reason || "已停"}`
-                  : e.event || "";
-        return `<div class="ev"><time>${t}</time><span class="name">${escapeHtml(String(label))}</span></div>`;
-      })
-      .join("");
   }
 
   function stopDescPoll() {
