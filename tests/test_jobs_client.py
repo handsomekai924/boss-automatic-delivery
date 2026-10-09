@@ -12,14 +12,16 @@ import pytest
 
 import boss_jobs.cli as cli
 from boss_jobs.client import JobClient, create_client, http_from_session
-from boss_jobs.errors import JobApiError, JobDataError, JobTransportError
+from boss_jobs.errors import (
+    JobApiError,
+    JobDataError,
+    JobTransportError,
+    format_api_message,
+)
 from boss_jobs.models import clean_page
 from boss_jobs.store import JobStore
 
 
-# --------------------------------------------------------------------------- #
-# 假会话
-# --------------------------------------------------------------------------- #
 
 
 class FakeResponse:
@@ -91,9 +93,6 @@ class FakeProvider:
         return self.token
 
 
-# --------------------------------------------------------------------------- #
-# 脚本
-# --------------------------------------------------------------------------- #
 
 
 def api_item(encrypt_job_id: str, job_name: str = "岗位", **overrides) -> dict:
@@ -120,7 +119,7 @@ def ok_page(items, *, has_more: bool = True) -> dict:
 def client_with(responses, *, sleeper=None, **kwargs) -> tuple[JobClient, FakeHttp, RecordingSleeper]:
     http = FakeHttp(responses)
     sleeper = sleeper or RecordingSleeper()
-    kwargs.setdefault("retries", 0)  # 测试里不重试，除非用例自己要
+    kwargs.setdefault("retries", 0)
     client = JobClient(
         base_url="https://example.test",
         http=http,
@@ -142,9 +141,6 @@ def cookie_map(http) -> dict[str, str]:
     return dict(jar.items())
 
 
-# --------------------------------------------------------------------------- #
-# fetch_page
-# --------------------------------------------------------------------------- #
 
 
 def test_fetch_page_hits_special_zone_route():
@@ -155,7 +151,7 @@ def test_fetch_page_hits_special_zone_route():
     assert call["method"] == "GET"
     assert call["url"] == "https://example.test/wapi/zpgeek/pc/special/zone/joblist.json"
     assert call["params"]["page"] == 1
-    assert call["params"]["type"] == "1"  # 全职流
+    assert call["params"]["type"] == "1"
     assert http.headers.get("X-Requested-With") == "XMLHttpRequest"
 
 
@@ -172,13 +168,13 @@ def test_fetch_page_clean_maps_fields():
     assert result.page == 1
 
 
-# --------------------------------------------------------------------------- #
-# crawl：抓 → 洗 → 存 → 睡
-# --------------------------------------------------------------------------- #
 
 
 def test_crawl_cleans_and_stores_each_page_then_sleeps(tmp_path):
-    """每页入库后才睡，睡完再要下一页——顺序错了就会被这个用例抓住。"""
+    """每页入库后才睡，睡完再要下一页——顺序错了就会被这个用例抓住。
+
+    页与页之间各睡一次 1s（共 2 次；最后一页空，不再翻页所以不睡）。
+    """
     pages = [
         ok_page([api_item("a1"), api_item("a2")], has_more=True),
         ok_page([api_item("b1")], has_more=True),
@@ -189,13 +185,9 @@ def test_crawl_cleans_and_stores_each_page_then_sleeps(tmp_path):
 
     report = client.crawl(store=store, page_interval=1.0)
 
-    # 三次请求，页码 1/2/3
     assert [c["params"]["page"] for c in http.calls] == [1, 2, 3]
-    # 页与页之间各睡一次 1s（共 2 次；最后一页空，不再翻页所以不睡）
     assert sleeper.calls == [1.0, 1.0]
-    # 三页都进了 fetch_pages 流水
     assert store.count_pages() == 3
-    # 洗后 3 条全部入库
     assert store.count_jobs() == 3
     assert {j.encrypt_job_id for j in store.list_jobs(limit=10)} == {"a1", "a2", "b1"}
 
@@ -206,7 +198,10 @@ def test_crawl_cleans_and_stores_each_page_then_sleeps(tmp_path):
 
 
 def test_crawl_saves_before_sleep(tmp_path):
-    """睡眠之前必须已经入库——中途 Ctrl-C 也不能丢已到手的页。"""
+    """睡眠之前必须已经入库——中途 Ctrl-C 也不能丢已到手的页。
+
+    睡第 1 次时（翻第 2 页前）库里该已经有第 1 页。
+    """
     pages = [
         ok_page([api_item("a1")], has_more=True),
         ok_page([api_item("b1")], has_more=True),
@@ -215,7 +210,6 @@ def test_crawl_saves_before_sleep(tmp_path):
     client, _, sleeper = client_with(pages)
     store = JobStore(tmp_path / "jobs.db")
 
-    # 睡第 1 次时（翻第 2 页前）库里该已经有第 1 页
     seen: list[int] = []
 
     def spy(seconds: float) -> None:
@@ -225,7 +219,7 @@ def test_crawl_saves_before_sleep(tmp_path):
     client._sleep = spy
     client.crawl(store=store, page_interval=1.0)
 
-    assert seen == [1, 2]  # 每次睡前，当前页已经落库
+    assert seen == [1, 2]
 
 
 def test_crawl_respects_max_pages(tmp_path):
@@ -235,7 +229,7 @@ def test_crawl_respects_max_pages(tmp_path):
         report = client.crawl(store=store, max_pages=2, page_interval=1.0)
 
     assert len(http.calls) == 2
-    assert sleeper.calls == [1.0]  # 两页之间只睡一次
+    assert sleeper.calls == [1.0]
     assert report.stats.pages == 2
     assert "max_pages=2" in report.stats.stopped_reason
 
@@ -249,7 +243,7 @@ def test_crawl_stops_on_partial_page_without_more(tmp_path):
     with JobStore(tmp_path / "jobs.db") as store:
         report = client.crawl(store=store, page_interval=1.0)
 
-    assert len(http.calls) == 1  # 没有再要第 2 页
+    assert len(http.calls) == 1
     assert sleeper.calls == []
     assert "不满页" in report.stats.stopped_reason
 
@@ -290,15 +284,15 @@ def test_crawl_keeps_already_stored_pages_on_error(tmp_path):
         client.crawl(store=store, page_interval=1.0)
 
     assert excinfo.value.is_session_expired
-    assert store.count_jobs() == 1  # 第 1 页保住了
+    assert store.count_jobs() == 1
 
 
 def test_crawl_opens_default_store_when_not_given(tmp_path, monkeypatch):
     db_path = tmp_path / "auto.db"
     monkeypatch.setattr("boss_jobs.client.open_store", lambda path=None: JobStore(db_path))
     client, _, _ = client_with([ok_page([])])
-    report = client.crawl(page_interval=0.0)  # 不传 store
-    assert report.stats.pages == 1  # 空页也算抓了一页
+    report = client.crawl(page_interval=0.0)
+    assert report.stats.pages == 1
     assert db_path.exists()
 
 
@@ -339,11 +333,14 @@ def test_crawl_不带search_filter_走推荐流(tmp_path):
 
 
 def test_crawl_搜索流_翻页时换页码(tmp_path):
+    """翻页时换 page 参数。
+
+    首页要塞满 15 条才不会被「不满页 + hasMore=false」提前收手。
+    """
     pages = [
         {"code": 0, "zpData": {"jobList": [api_item(f"s{i}")], "hasMore": True}}
         for i in range(2)
     ]
-    # 塞满 15 条才不会被「不满页 + hasMore=false」提前收手
     pages[0] = {"code": 0, "zpData": {"jobList": [api_item(f"s{i}") for i in range(15)], "hasMore": True}}
     pages[1] = {"code": 0, "zpData": {"jobList": [api_item("s99")], "hasMore": False}}
     client, http, _ = client_with(pages, stoken_provider=FakeProvider())
@@ -366,15 +363,100 @@ def test_iter_pages_yields_without_store():
     assert sleeper.calls == [1.0]
 
 
-# --------------------------------------------------------------------------- #
-# 错误分类
-# --------------------------------------------------------------------------- #
 
 
 def test_session_expired_error_is_tagged():
     err = JobApiError(7, "当前登录状态已失效")
     assert err.is_session_expired
     assert not err.is_browser_check
+
+
+def test_code1_non_login_message_is_not_session_expired():
+    """code 1 是业务失败的通用码，不能一律当登录失效。
+
+    「开聊提醒」（每日沟通配额）就是 code 1——真当成登录失效，会把人支去
+    重新登录、登录了也照样发不出去（2026-10-09 实测踩过）。
+    """
+    err = JobApiError(1, "开聊提醒")
+    assert not err.is_session_expired
+    assert not err.is_browser_check
+    assert JobApiError(1, "当前登录状态已失效").is_session_expired
+
+
+def test_chat_remind_dialog_is_tagged():
+    """``friend/add.json`` 的「开聊提醒」弹窗：是沟通配额，不是登录失效。
+
+    没 raw、只有话术的也认（测试/手工抛的异常）。
+    """
+    raw = {
+        "code": 1,
+        "message": "开聊提醒",
+        "zpData": {
+            "bizCode": 1,
+            "bizMessage": "开聊提醒",
+            "bizData": {
+                "chatRemindDialog": {
+                    "title": "温馨提示",
+                    "content": "您今天已与120位BOSS沟通，还剩30次沟通机会哦",
+                    "remindType": 524288,
+                    "blockLevel": 0,
+                }
+            },
+        },
+    }
+    err = JobApiError(1, "开聊提醒", raw=raw)
+    assert err.is_chat_remind
+    assert not err.is_session_expired
+    assert not err.is_risk_control
+    assert JobApiError(1, "开聊提醒").is_chat_remind
+
+
+def test_format_api_message_prefers_dialog_content():
+    """顶层 message 常常只是短标签，真话在 chatRemindDialog.content 里。
+
+    没弹窗就退回顶层 message / msg。
+    """
+    raw = {
+        "code": 1,
+        "message": "开聊提醒",
+        "zpData": {
+            "bizData": {
+                "chatRemindDialog": {
+                    "title": "温馨提示",
+                    "content": "您今天已与120位BOSS沟通，还剩30次沟通机会哦",
+                }
+            }
+        },
+    }
+    assert (
+        format_api_message(raw)
+        == "您今天已与120位BOSS沟通，还剩30次沟通机会哦"
+    )
+    assert format_api_message({"message": "参数错误"}) == "参数错误"
+    assert format_api_message({"msg": "参数错误"}) == "参数错误"
+    assert format_api_message({"code": 1}) == ""
+
+
+def test_request_json_surfaces_dialog_content_as_message():
+    """撞「开聊提醒」时，异常话术要是弹窗那句原话，不是「开聊提醒」四个字。"""
+    raw = {
+        "code": 1,
+        "message": "开聊提醒",
+        "zpData": {
+            "bizData": {
+                "chatRemindDialog": {
+                    "title": "温馨提示",
+                    "content": "您今天已与120位BOSS沟通，还剩30次沟通机会哦",
+                }
+            }
+        },
+    }
+    client, _, _ = client_with([FakeResponse(raw)])
+    with pytest.raises(JobApiError) as excinfo:
+        client.fetch_page(1)
+    assert excinfo.value.is_chat_remind
+    assert "还剩30次沟通机会" in excinfo.value.message
+    assert not excinfo.value.is_session_expired
 
 
 def test_browser_check_error_is_tagged():
@@ -404,18 +486,16 @@ def test_retries_then_succeeds():
     client, http, _ = client_with(pages, sleeper=sleeper, retries=1, backoff=0.5)
     assert client.fetch_page(1)["code"] == 0
     assert len(http.calls) == 2
-    assert sleeper.calls == [0.5]  # 退避了一次
+    assert sleeper.calls == [0.5]
 
 
-# --------------------------------------------------------------------------- #
-# 会话装配
-# --------------------------------------------------------------------------- #
 
 
 def test_http_from_session_loads_cookies(tmp_path):
     from boss_login.session import StoredSession, save_session
 
     session_path = tmp_path / "session.db"
+    """用假会话验灌 Cookie 的逻辑；真 requests.Session 见下一个用例。"""
     save_session(
         StoredSession(
             token="",
@@ -426,7 +506,6 @@ def test_http_from_session_loads_cookies(tmp_path):
         ),
         session_path,
     )
-    # 用假会话验灌 Cookie 的逻辑；真 requests.Session 见下一个用例
     fake = FakeHttp([])
     http = http_from_session(session_path, http=fake)
     assert http is fake
@@ -451,9 +530,6 @@ def test_create_client_uses_session(tmp_path):
     assert cookie_map(client._http) == {"wt2": "x"}
 
 
-# --------------------------------------------------------------------------- #
-# __zp_stoken__：显式参数 → 状态库里的会话 → 环境变量
-# --------------------------------------------------------------------------- #
 
 
 def write_session(tmp_path, cookies: dict[str, str]):
@@ -513,7 +589,7 @@ def test_换新令牌时不会留下同名旧Cookie(tmp_path, monkeypatch):
     from boss_jobs.stoken import put_cookie
 
     jar = requests.cookies.RequestsCookieJar()
-    jar.set("__zp_stoken__", "OLD")                       # 不带 domain（老写法）
+    jar.set("__zp_stoken__", "OLD")
     put_cookie(jar, "__zp_stoken__", "NEW")
     assert [c.value for c in jar if c.name == "__zp_stoken__"] == ["NEW"]
     assert next(c for c in jar if c.name == "__zp_stoken__").domain == ".zhipin.com"
@@ -532,9 +608,6 @@ def test_stoken_会话里有就不会被环境变量盖掉(tmp_path, monkeypatch
     assert cookie_map(fake)["__zp_stoken__"] == "TOKEN-FROM-SESSION"
 
 
-# --------------------------------------------------------------------------- #
-# fetch_search_page
-# --------------------------------------------------------------------------- #
 
 
 def search_filter(**kwargs):
@@ -594,9 +667,6 @@ def test_fetch_search_page_code37_标记成浏览器校验():
     assert not excinfo.value.is_session_expired
 
 
-# --------------------------------------------------------------------------- #
-# CLI
-# --------------------------------------------------------------------------- #
 
 
 def test_cli_fetch_writes_db(tmp_path, monkeypatch):
@@ -622,12 +692,15 @@ def test_cli_fetch_writes_db(tmp_path, monkeypatch):
 
 
 def test_cli_fetch_reports_browser_check(tmp_path, monkeypatch, capsys):
+    """自动补一枚重试后**仍然** 37，才算「救不回来」。
+
+    现在是拉 Chrome（CDP）让站点自己算，提示也改成「自动补 + 仍被拒怎么办」。
+    """
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session",
         lambda *a, **k: FakeHttp(
             [
                 {"code": 37, "message": "你的浏览器环境异常", "zpData": {"seed": "s", "ts": 1, "name": "n"}},
-                # 自动补一枚重试后**仍然** 37，才算「救不回来」
                 {"code": 37, "message": "你的浏览器环境异常", "zpData": {"seed": "s", "ts": 1, "name": "n"}},
             ]
         ),
@@ -638,7 +711,6 @@ def test_cli_fetch_reports_browser_check(tmp_path, monkeypatch, capsys):
     assert code == 1
     err = capsys.readouterr().err
     assert "__zp_stoken__" in err
-    # 现在是拉 Chrome（CDP）让站点自己算，提示也改成「自动补 + 仍被拒怎么办」
     assert "CDP" in err
     assert "Chrome" in err
 
@@ -731,7 +803,7 @@ def test_cli_fetch_两边都没有条件_走推荐流(tmp_path, monkeypatch, cap
     )
     code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1"])
     assert code == 0
-    assert "special/zone" in captured["url"]   # 空条件 = 不限 = 推荐流
+    assert "special/zone" in captured["url"]
     assert "query" not in captured["params"]
     out = capsys.readouterr().out
     assert "推荐流" in out
@@ -751,9 +823,6 @@ def test_cli_list_and_stats(tmp_path, monkeypatch, capsys):
     assert json.loads(out)["jobs"] == 1
 
 
-# --------------------------------------------------------------------------- #
-# 进度回调 / 协作式停止（网页控制台用）
-# --------------------------------------------------------------------------- #
 
 
 def test_crawl_on_progress_fires_per_page(tmp_path):
@@ -800,7 +869,7 @@ def test_crawl_should_stop_breaks_before_next_page(tmp_path):
         )
         assert store.count_jobs() == 1
 
-    assert len(http.calls) == 1  # 只打了第 1 页
+    assert len(http.calls) == 1
     assert "停止信号" in report.stats.stopped_reason
 
 
@@ -812,9 +881,6 @@ def test_crawl_without_hooks_still_works(tmp_path):
     assert report.stats.pages == 1
 
 
-# --------------------------------------------------------------------------- #
-# 职位详情（JD）
-# --------------------------------------------------------------------------- #
 
 
 def test_fetch_job_detail_hits_detail_endpoint():
@@ -887,7 +953,7 @@ def test_fetch_job_detail_撞37先歇会儿再用同一枚重试():
     client = JobClient(http=http, stoken_provider=OnceProvider(), sleeper=sleeper)
     detail = client.fetch_job_detail(security_id="SEC1", lid="L1")
     assert detail.job_desc == "歇完再要到的 JD"
-    assert tokens == [False]                       # 一次都没强制换新
+    assert tokens == [False]
     assert sleeper.calls == [C.BROWSER_CHECK_BACKOFF]
     assert len(http.calls) == 2
 
@@ -928,7 +994,7 @@ def test_enrich_page_details_survives_single_failure(tmp_path):
     http = FakeHttp(
         [
             {"code": 0, "zpData": {"jobInfo": {"postDescription": "A 的 JD"}}},
-            JobApiError(36, "账号异常", raw={}),  # 中间那条炸
+            JobApiError(36, "账号异常", raw={}),
             {"code": 0, "zpData": {"jobInfo": {"postDescription": "C 的 JD"}}},
         ]
     )
@@ -945,12 +1011,15 @@ def test_enrich_page_details_survives_single_failure(tmp_path):
 
         assert [e["event"] for e in events] == ["detail_done", "detail_error", "detail_done"]
         assert store.get_job("a").job_desc == "A 的 JD"
-        assert store.get_job("b").job_desc == ""  # 失败那条没写
+        assert store.get_job("b").job_desc == ""
         assert store.get_job("c").job_desc == "C 的 JD"
 
 
 def test_enrich_page_details_已有描述不再重复获取(tmp_path):
-    """重抓一页时，已入库且已有 JD 的不该再打详情接口。"""
+    """重抓一页时，已入库且已有 JD 的不该再打详情接口。
+
+    只给 b 准备一条响应——a / c 已有描述，不该再发请求。
+    """
     from boss_jobs.models import Job, PageResult
 
     jobs = (
@@ -962,7 +1031,6 @@ def test_enrich_page_details_已有描述不再重复获取(tmp_path):
 
     http = FakeHttp(
         [
-            # 只给 b 准备一条——a / c 已有描述，不该再发请求
             {"code": 0, "zpData": {"jobInfo": {"postDescription": "B 的 JD"}}},
         ]
     )
@@ -977,8 +1045,8 @@ def test_enrich_page_details_已有描述不再重复获取(tmp_path):
 
         kinds = [e["event"] for e in events]
         assert kinds == ["detail_skipped", "detail_done", "detail_skipped"]
-        assert len(http.calls) == 1            # 只打了 1 次详情
-        assert store.get_job("a").job_desc == "A 早抓过了"   # 没被覆盖
+        assert len(http.calls) == 1
+        assert store.get_job("a").job_desc == "A 早抓过了"
         assert store.get_job("b").job_desc == "B 的 JD"
         assert store.get_job("c").job_desc == "C 也早抓过了"
 
@@ -1004,12 +1072,19 @@ def test_fetch_job_detail_换新冷却没换到_不再打第三发():
     with pytest.raises(JobApiError) as excinfo:
         client.fetch_job_detail(security_id="SEC1", lid="L1")
     assert excinfo.value.is_browser_check
-    assert tokens == [False, True]         # 确实尝试了 force
-    assert len(http.calls) == 2            # 但**没有**打第三发
+    assert tokens == [False, True]
+    assert len(http.calls) == 2
 
 
 def test_enrich_page_details_连环撞37就停批(tmp_path):
-    """连着撞 N 次 code 37 = 整段被限速了，停掉补 JD，别拿剩下的去探墙。"""
+    """连着撞 N 次 code 37 = 整段被限速了，停掉补 JD，别拿剩下的去探墙。
+
+    每条都走完整的 37 重试梯（首打 + 歇会儿 + 不换新就不再打）＝每条 2 发，
+    够把脚本吃穿。第 4 条起脚本没了 → 也是 37 之外的错，所以这里全给 37，
+    看的是「连环 N 次就停」。
+    GIVEUP 条 detail_error 之后必须有一条 detail_stopped——剩下那条（e）连试都不试。
+    只碰了前 N 条（每条 2 发），没碰剩下的。
+    """
     from boss_jobs import config as C
     from boss_jobs.models import Job, PageResult
 
@@ -1022,16 +1097,13 @@ def test_enrich_page_details_连环撞37就停批(tmp_path):
     )
     page = PageResult(page=1, jobs=jobs, has_more=False, raw_count=len(jobs))
 
-    # 每条都走完整的 37 重试梯（首打 + 歇会儿 + 不换新就不再打）＝
-    # 每条 2 发，够把脚本吃穿。第 4 条起脚本没了 → 也是 37 之外的错，
-    # 所以这里全给 37，看的是「连环 N 次就停」。
     responses = [
         {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
     ] * 20
 
     class SameTokenProvider:
         def ensure(self, *, force: bool = False):
-            return "TOKEN-SAME"  # 冷却：force 也不换
+            return "TOKEN-SAME"
 
     http = FakeHttp(responses)
     client = JobClient(
@@ -1045,17 +1117,17 @@ def test_enrich_page_details_连环撞37就停批(tmp_path):
         )
 
         kinds = [e["event"] for e in events]
-        # C.BROWSER_CHECK_GIVEUP 条 detail_error 之后必须有一条 detail_stopped
-        # ——剩下那条（e）连试都不试
         assert kinds.count("detail_error") == C.BROWSER_CHECK_GIVEUP
         assert kinds[-1] == "detail_stopped"
         assert kinds.count("detail_done") == 0
-        # 只碰了前 N 条（每条 2 发：首打 + 歇会儿重试），没碰剩下的
         assert len(http.calls) == C.BROWSER_CHECK_GIVEUP * 2
 
 
 def test_enrich_page_details_37失败后多躺一会(tmp_path):
-    """单条 37 不停批时，下一条之前多睡 BROWSER_CHECK_COOLOFF——别撞着墙继续敲。"""
+    """单条 37 不停批时，下一条之前多睡 BROWSER_CHECK_COOLOFF——别撞着墙继续敲。
+
+    至少睡过：BROWSER_CHECK_BACKOFF（37 重试）+ BROWSER_CHECK_COOLOFF（失败后躺平）。
+    """
     from boss_jobs import config as C
     from boss_jobs.models import Job, PageResult
 
@@ -1092,14 +1164,10 @@ def test_enrich_page_details_37失败后多躺一会(tmp_path):
         kinds = [e["event"] for e in events]
         assert kinds == ["detail_error", "detail_done"]
         assert store.get_job("b").job_desc == "B 的 JD"
-        # 至少睡过：BROWSER_CHECK_BACKOFF（37 重试）+ BROWSER_CHECK_COOLOFF（失败后躺平）
         assert C.BROWSER_CHECK_BACKOFF in sleeper.calls
         assert C.BROWSER_CHECK_COOLOFF in sleeper.calls
 
 
-# --------------------------------------------------------------------------- #
-# greet（打招呼，POST friend/add.json）
-# --------------------------------------------------------------------------- #
 
 
 def test_greet_posts_form_with_query_params():
@@ -1161,6 +1229,126 @@ def test_greet_extra_透传非空字段():
     assert http.calls[0]["data"] == {"expectId": "E1"}
 
 
+def _chat_remind_payload(content: str = "您今天已与120位BOSS沟通，还剩30次沟通机会哦") -> dict:
+    """真实形态的「开聊提醒」弹窗响应（2026-10-09 实测 friend/add.json）。"""
+    return {
+        "code": 1,
+        "message": "开聊提醒",
+        "zpData": {
+            "bizCode": 1,
+            "bizMessage": "开聊提醒",
+            "bizData": {
+                "chatRemindDialog": {
+                    "actionType": 1,
+                    "ba": "%7B%22action%22%3A%22addf-limit-popup-c%22%7D",
+                    "title": "温馨提示",
+                    "content": content,
+                    "buttonList": [
+                        {
+                            "text": "好",
+                            "actionType": 11,
+                            "ba": "%7B%22action%22%3A%22server-remind-detail-boss-click%22%7D",
+                        }
+                    ],
+                    "remindType": 524288,
+                    "blockLevel": 0,
+                }
+            },
+        },
+    }
+
+
+def test_greet_开聊提醒_模拟点击确认_cid1_后建会话():
+    """「开聊提醒」是提示弹窗：greet 自动模拟点「好」，带 cid=1 重打 friend/add。
+
+    站点前端（chunk ``1326.ad80b1c8.js``）点「好」走的就是这条：
+    埋点 ``addf-limit-popup-c`` → ``friend/add`` 带 ``cid=1`` → 埋点
+    ``addf-limit-popup-connect``。实测带上 ``cid=1`` 直接 code 0 建会话——
+    **这是提示不是硬拦**，「还剩30次」就是还能再发的次数。
+    """
+    http = FakeHttp(
+        [
+            _chat_remind_payload(),
+            {"code": 0, "message": "Success", "zpData": True},  # 埋点 c
+            {"code": 0, "message": "Success", "zpData": {"securityId": "SEC-NEW"}},
+            {"code": 0, "message": "Success", "zpData": True},  # 埋点 connect
+        ]
+    )
+    client = JobClient(http=http)
+    result = client.greet(
+        security_id="SEC1",
+        encrypt_job_id="J1",
+        lid="L1",
+        encrypt_boss_id="BOSS1",
+    )
+
+    assert result.raw["code"] == 0
+    assert [c["url"].rsplit("/", 1)[-1] for c in http.calls] == [
+        "add.json",
+        "chatremind.json",
+        "add.json",
+        "chatremind.json",
+    ]
+
+    first, log_c, confirm, log_connect = http.calls
+    # 第一发：普通打招呼，body 里没有 cid
+    assert first["data"] == {"encryptBossId": "BOSS1"}
+    # 弹窗埋点（模拟弹窗弹出）
+    assert log_c["data"]["action"] == "addf-limit-popup-c"
+    assert "ba" in log_c["data"]
+    # 确认那发：cid=1，且 securityId/jobId/lid 只在 query（塞进 body 会 code 17）
+    assert confirm["data"]["cid"] == 1
+    assert confirm["data"] == {"encryptBossId": "BOSS1", "cid": 1}
+    assert confirm["params"] == {"securityId": "SEC1", "jobId": "J1", "lid": "L1"}
+    # 点「好」之后的埋点
+    assert log_connect["data"]["action"] == "addf-limit-popup-connect"
+    assert log_connect["data"]["p8"] == "11"
+
+
+def test_greet_开聊提醒_确认后仍被拦才抛原弹窗():
+    """确认后还弹同一个窗 → 抛出来，话术仍是弹窗那句原话（含「还剩 N 次」）。"""
+    http = FakeHttp(
+        [
+            _chat_remind_payload(),
+            {"code": 0, "message": "Success", "zpData": True},
+            _chat_remind_payload(),
+            {"code": 0, "message": "Success", "zpData": True},
+        ]
+    )
+    client = JobClient(http=http)
+    with pytest.raises(JobApiError) as ei:
+        client.greet(security_id="SEC1", encrypt_job_id="J1", encrypt_boss_id="BOSS1")
+    assert ei.value.is_chat_remind
+    assert "还剩30次沟通机会" in ei.value.message
+    assert ei.value.chat_remind_remaining == 30
+
+
+def test_greet_开聊提醒_埋点失败不挡确认():
+    """埋点是锦上添花；挂了也照样带 cid=1 重打，别把确认一起吹掉。"""
+    http = FakeHttp(
+        [
+            _chat_remind_payload(),
+            JobTransportError("埋点挂了"),
+            {"code": 0, "message": "Success", "zpData": {}},
+            {"code": 0, "message": "Success", "zpData": True},
+        ]
+    )
+    client = JobClient(http=http, retries=0)
+    result = client.greet(security_id="SEC1", encrypt_job_id="J1", encrypt_boss_id="BOSS1")
+    assert result.raw["code"] == 0
+    assert http.calls[2]["data"]["cid"] == 1
+
+
+def test_chat_remind_remaining_抠还剩次数():
+    """从弹窗话术里抠「还剩 N 次」；抠不出来回 None（继续发，别瞎停批）。"""
+    from boss_jobs.errors import chat_remind_remaining
+
+    assert chat_remind_remaining(_chat_remind_payload()) == 30
+    assert chat_remind_remaining("您今天已与150位BOSS沟通，还剩0次沟通机会哦") == 0
+    assert chat_remind_remaining("开聊提醒") is None
+    assert chat_remind_remaining(None) is None
+
+
 @pytest.mark.parametrize(
     ("security_id", "encrypt_job_id"),
     [("", "J1"), ("SEC1", "")],
@@ -1213,7 +1401,7 @@ def test_greet_撞37先歇会儿再用同一枚重试():
     sleeper = RecordingSleeper()
     client = JobClient(http=http, stoken_provider=OnceProvider(), sleeper=sleeper)
     client.greet(security_id="SEC1", encrypt_job_id="J1")
-    assert tokens == [False]                        # 一次都没强制换新
+    assert tokens == [False]
     assert sleeper.calls == [C.BROWSER_CHECK_BACKOFF]
     assert [c["method"] for c in http.calls] == ["POST", "POST"]
 

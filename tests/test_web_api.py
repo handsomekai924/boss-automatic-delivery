@@ -12,7 +12,7 @@ from boss_web import create_app
 
 @pytest.fixture
 def client():
-    """状态库由 ``isolated_db`` 统一指到 ``tmp_path``，这里只起 app。"""
+    # 状态库由 conftest 的 isolated_db 统一指到 tmp_path
     return TestClient(create_app())
 
 
@@ -40,10 +40,7 @@ def test_slider_refresh_unknown_task_404(client: TestClient):
 
 
 def test_slider_refresh_换新挑战重建帮助页(client: TestClient):
-    """「重新加载」必须换一张新 challenge：极验票据一次性，重载旧的必然 onError。
-
-    新帮助页里嵌的是刚换的挑战。
-    """
+    """「重新加载」必须换一张新 challenge：极验票据一次性，重载旧的必然 onError。"""
     from boss_login.verify import SliderChallenge
     from boss_web.services import login_task as lt
 
@@ -65,6 +62,7 @@ def test_slider_refresh_换新挑战重建帮助页(client: TestClient):
         assert r.status_code == 200
         assert calls == [1]
         assert task.slider_needed is True
+        # 新帮助页里嵌的是刚换的挑战
         page = client.get(f"/api/auth/slider/{task.task_id}")
         assert page.status_code == 200
         assert "ch-1" in page.text
@@ -108,6 +106,7 @@ def test_llm_config_masked(client: TestClient):
     body = r.json()
     assert "api_key" in body and "configured" in body
     assert "sk-secret" not in body.get("api_key", "")
+    # 采样参数是系统固定值，随配置一起回显
     assert "fixed" in body
 
 
@@ -156,6 +155,7 @@ def test_resume_upload_md(client: TestClient):
     body = r.json()
     assert body["resume_id"].startswith("rs_")
     assert "Python" in body["skills"]
+    # 清理
     client.delete(f"/api/resume/item/{body['resume_id']}")
 
 
@@ -192,10 +192,8 @@ def test_fetch_descriptions_cancel_when_idle_404(client: TestClient):
 
 
 def test_fetch_descriptions_start_then_status(client: TestClient, monkeypatch):
-    """起一个补抓任务：没有登录态会在任务里报 error，但接口本身要回。
-
-    免掉真拉 Chrome / 真起 HTTP。
-    """
+    """起一个补抓任务：没有登录态会在任务里报 error，但接口本身要回。"""
+    # 免掉真拉 Chrome / 真起 HTTP
     monkeypatch.setattr(
         "boss_web.services.desc_task.create_client",
         lambda **_kw: (_ for _ in ()).throw(RuntimeError("no session")),
@@ -245,12 +243,7 @@ def test_desc_task_interval_夹到02秒下限(monkeypatch):
 
 
 def test_desc_task_连环撞37就停批(tmp_path, monkeypatch):
-    """连续 N 次 code 37 = 安全网关整段限速，停整批而不是拿剩下的去探墙。
-
-    缺描述职位塞满到 giveup 阈值。desc_task 里的 ``time`` 就是全局 time 模块，
-    把 sleep 打成空转会连**本用例自己的**轮询也一起空转——留一份真的，轮询用它；
-    空转轮询抢不到 GIL，必须真睡。只碰 giveup 条，不砸满 10 条。
-    """
+    """连续 N 次 code 37 = 安全网关整段限速，停整批而不是拿剩下的去探墙。"""
     from boss_jobs.errors import JobApiError
     from boss_web.services.desc_task import DescTaskManager
 
@@ -261,15 +254,19 @@ def test_desc_task_连环撞37就停批(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "boss_web.services.desc_task.create_client", lambda **_kw: AlwaysBrowserCheck()
     )
+    # 缺描述的职位塞满，够撞到 giveup 阈值
     monkeypatch.setattr(
         "boss_web.services.desc_task.JobStore",
         lambda *a, **k: _StoreWithMissing([_fake_job(i) for i in range(10)]),
     )
+    # desc_task 里的 ``time`` 就是全局 time 模块，这么补会把**本用例自己的**
+    # ``time.sleep`` 也一起打成空转——先把真的那份留一份，轮询用它。
     real_sleep = time.sleep
     monkeypatch.setattr("boss_web.services.desc_task.time.sleep", lambda _s: None)
 
     mgr = DescTaskManager()
     task = mgr.start(limit=0, interval=0.0)
+    # 线程很快收尾；轮询到不再 running（空转轮询会跟工作线程抢不到 GIL，必须真睡）
     for _ in range(200):
         if task.status != "running":
             break
@@ -280,6 +277,7 @@ def test_desc_task_连环撞37就停批(tmp_path, monkeypatch):
     assert "stopped" in kinds
     stopped = next(e for e in snap["events"] if e["event"] == "stopped")
     assert "连续" in stopped["reason"] and "code 37" in stopped["reason"]
+    # 只碰了 giveup 条，没把 10 条都砸一遍
     from boss_jobs.config import BROWSER_CHECK_GIVEUP
 
     assert snap["progress"]["failed"] == BROWSER_CHECK_GIVEUP

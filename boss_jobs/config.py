@@ -1,25 +1,18 @@
 """职位获取相关接口地址、请求头、节流参数等常量。
 
-⚠️ 关于接口地址的可信度
---------------------------------------------------------------------------------
-**已实测确认**（2026-09-30，Cookie 取自 ``boss_login`` 落盘的登录会话
-（``data/boss.db`` 的 ``doc('session')``），直接打真实站点）：
+在用的列表路由是 ``GET /wapi/zpgeek/pc/special/zone/joblist.json``（推荐页
+``PageJobRecommend`` 用的也是它）：每页固定 15 条（pageSize 传了也不认），
+字段覆盖 todo.md 第四节的 8 项；page=1 起步，page=0 回空列表，翻到头那页不足
+15 条且 ``hasMore=false``。
 
-  GET /wapi/zpgeek/pc/special/zone/joblist.json?page=…&type=1
-      → 200 + {"code":0,"message":"Success","zpData":{"jobList":[…],"hasMore":…}}
-        每页 15 条（pageSize 传了也不认），字段覆盖 todo.md 第四节全部 8 项。
-        page=1 起步；page=0 回空列表；翻到头那页不足 15 条且 hasMore=false，
-        再下一页回 0 条。
+  - ``recommend/job/list.json``、``search/joblist.json`` 缺 ``__zp_stoken__``
+    就回 code 37「浏览器环境异常」；令牌按 :mod:`boss_jobs.stoken` 自动算
+  - ``job/detail.json``（JD 正文）同样要登录 + ``__zp_stoken__``
+  - ``friend/add.json`` **只建会话、不投递正文**（body 塞 ``greeting`` 会被忽略），
+    真的招呼语走聊天通道 :mod:`boss_jobs.chat`
 
-  GET /wapi/zpgeek/pc/recommend/job/list.json   → code 37「浏览器环境异常」
-  POST /wapi/zpgeek/search/joblist.json         → code 37「浏览器环境异常」
-        （带 ``__zp_stoken__`` 即可过；令牌按 :mod:`boss_jobs.stoken` 自动算）
-
-special/zone 那条（推荐页 PageJobRecommend 在用的也是它）。
-
-路由来自按需 chunk ``static.zhipin.com/zhipin-geek-spa/web/v6748/`` 的
-``job-recommend-type.c303eca2.js``（``tb=(0,tc.iH)(v.zI)``，``zI`` 就是
-``/wapi/zpgeek/pc/special/zone/joblist.json``）。
+路由出处是按需 chunk ``job-recommend-type.c303eca2.js``
+（``tb=(0,tc.iH)(v.zI)``）。
 """
 
 from __future__ import annotations
@@ -35,37 +28,39 @@ BASE_URL: Final[str] = "https://www.zhipin.com"
 GEEK_JOBS_REFERER: Final[str] = f"{BASE_URL}/web/geek/jobs"
 
 ENDPOINTS: Final[dict[str, str]] = {
-    #: 唯一在用的分页职位列表（GET）。见文件头的实测记录。
+    #: 唯一在用的分页职位列表（GET）。
     "job_list": "/wapi/zpgeek/pc/special/zone/joblist.json",
     #: 职位搜索列表（GET）。要登录 **且** 要 ``__zp_stoken__``（缺了回 code 37）。
     #: 令牌由 :class:`boss_jobs.cdp_stoken.CdpStokenProvider` 全自动补（拉 Chrome
     #: 让站点自己算），见 :func:`boss_jobs.client.JobClient.fetch_search_page`。
     "job_search": "/wapi/zpgeek/search/joblist.json",
-    #: 职位详情（JD 正文）。**已实测**（2026-10-08）：要登录 **且** 要
-    #: ``__zp_stoken__``（缺了回 code 37，跟搜索一样），query 带
-    #: ``securityId`` + ``lid`` 两参就够。正文在 ``zpData.jobInfo.postDescription``。
+    #: 职位详情（JD 正文）。要登录 **且** 要 ``__zp_stoken__``（缺了回 code 37）；
+    #: query 带 ``securityId`` + ``lid`` 两参就够。正文在
+    #: ``zpData.jobInfo.postDescription``。
     "job_detail": "/wapi/zpgeek/job/detail.json",
-    #: 打招呼 / 加好友（POST，form）。**已实测**（2026-10-08）：query 带
-    #: ``securityId`` + ``jobId`` + ``lid``；body 是
-    #: ``application/x-www-form-urlencoded``，带 ``encryptBossId`` /
-    #: ``sessionId`` 等。**这条只建会话、不投递正文**：请求体里塞
-    #: ``greeting`` 服务端直接忽略（回了 code 0，聊天框却还是空的）——
-    #: 真的招呼语走聊天通道，见 :mod:`boss_jobs.chat`。
+    #: 打招呼 / 加好友（POST，form）。query 带 ``securityId`` + ``jobId`` + ``lid``；
+    #: body 是 ``application/x-www-form-urlencoded``，带 ``encryptBossId`` /
+    #: ``sessionId`` 等。**只建会话、不投递正文**：body 里塞 ``greeting`` 会被
+    #: 服务端忽略——真的招呼语走聊天通道 :mod:`boss_jobs.chat`。
     "friend_add": "/wapi/zpgeek/friend/add.json",
     #: MQTT over WSS 的接入凭据（GET）。回 ``zpData.wt2``，当 MQTT 密码用。
-    #: 来源：chat-new 前端 ``ChatWebsocket.init`` 里的 ``l()``。
     "get_wt": "/wapi/zppassport/get/wt",
     #: 当前登录用户（GET）。取 ``zpData.token``（MQTT 用户名前缀）+ ``userId``。
     "get_user_info": "/wapi/zpuser/wap/getUserInfo.json",
     #: 会话对象信息（GET，query ``bossId={encryptBossId}``）。回 ``zpData.data``，
-    #: 里面有 **boss 的数字 uid**（``bossId``）与 ``bossSource``——
-    #: 这俩正是发聊天消息要的 ``to``。**要先 ``friend/add`` 建了会话才查得到**
-    #: （没会话回 code 1「聊天的Boss不存在」/「非好友关系」）。
+    #: 里面有 **boss 的数字 uid**（``bossId``）与 ``bossSource``——这俩正是发聊天
+    #: 消息要的 ``to``。**要先 ``friend/add`` 建了会话才查得到**（没会话回
+    #: code 1「聊天的Boss不存在」/「非好友关系」）。
     "get_boss_data": "/wapi/zpchat/geek/getBossData",
-    #: 历史消息（GET，query ``bossId={数字 uid}``）。**当不了送达判据**：
-    #: 对这条账号回 ``code 0`` + 空 ``zpData``，有消息的会话也读不出来
-    #: （2026-10-08 实测，见 :mod:`boss_jobs.chat` 模块头）。留着只当探针。
+    #: 历史消息（GET，query ``bossId={数字 uid}``）。**当不了送达判据**：对这条
+    #: 账号回 ``code 0`` + 空 ``zpData``，有消息的会话也读不出来。留着只当探针。
     "chat_history": "/wapi/zpchat/geek/historyMsg",
+    #: 「开聊提醒」弹窗的埋点（POST，form）。站点在弹窗**弹出时**打
+    #: ``action=addf-limit-popup-c`` + 弹窗 ``ba``，点「好」之后再打
+    #: ``action=addf-limit-popup-connect`` + ``ba`` + ``p8=11``。
+    #: 模拟点击确认时把这两发补齐，跟真浏览器一致。
+    #: **要带 ``zp_token`` 头**（cookie ``bst``），缺了回 code 121「请求不合法」。
+    "chatremind_log": "/wapi/zpCommon/actionLog/geek/chatremind.json",
 }
 
 #: 推荐页 ``pageType`` 10/45 → type=1（全职流），36 → type=2（兼职流）
@@ -85,8 +80,14 @@ DEFAULT_HEADERS: Final[dict[str, str]] = {
 #: 通用成功码（与 wapi 网关一致）
 CODE_OK: Final[int] = 0
 
-#: 业务码「未登录 / 登录态失效」。与 :mod:`boss_filter.config` 同判据。
-CODE_SESSION_EXPIRED: Final[frozenset[int]] = frozenset({1, 7})
+#: 业务码「未登录 / 登录态失效」。**只有 7 是实测确认的**（Cookie 过期时回
+#: ``{"code":7,"message":"当前登录状态已失效"}``，与 :mod:`boss_filter.config` 同）。
+#: **code 1 是业务失败的通用码**，别一律当登录失效——「聊天的Boss不存在」
+#: 「非好友关系」「开聊提醒」（每日沟通配额，见
+#: :attr:`boss_jobs.errors.JobApiError.is_chat_remind`）都走它。1 只在话术
+#: 明说了登录问题时才算，判据见
+#: :attr:`boss_jobs.errors.JobApiError.is_session_expired`。
+CODE_SESSION_EXPIRED: Final[frozenset[int]] = frozenset({7})
 
 #: 业务码「浏览器环境异常」——缺 ``__zp_stoken__`` 安全网关令牌。
 #: 服务端会顺手在 ``zpData`` 里下发一次性挑战 ``{seed,name,ts}``，
@@ -105,6 +106,20 @@ CODE_RISK_CONTROL: Final[int] = 36
 #: :mod:`boss_jobs.stoken` 那条 Node 硬算只用来验证算法，服务端不认它的指纹。
 STOKEN_COOKIE: Final[str] = "__zp_stoken__"
 
+#: 站点 axios 拦截器往**每个**请求上贴的 ``zp_token`` 头，取自 cookie ``bst``。
+#: ``friend/add`` 这条不校验它，但「开聊提醒」确认侧的
+#: ``actionLog/geek/chatremind.json`` / ``friend/continuechat.json`` **缺了就回
+#: code 121「请求不合法」**——带上才谈得上模拟点击确认。
+ZP_TOKEN_COOKIE: Final[str] = "bst"
+ZP_TOKEN_HEADER: Final[str] = "zp_token"
+
+#: 「开聊提醒」弹窗点「好」时前端回传的确认位（chunk ``1326.ad80b1c8.js`` 的
+#: ``commonAction``：``k(job, {url: webUrl, cid: 1})``）。``friend/add`` 带上它
+#: 就从 code 1 弹窗变成 code 0 建会话——这正是「模拟点击确认」要复现的那一步。
+#: 2026-10-09 实测：不带 ``cid`` 一直弹窗，带上 ``cid=1`` 直接
+#: ``{"code":0,"message":"Success"}``。
+CHAT_REMIND_CONFIRM_CID: Final[int] = 1
+
 #: 环境变量兜底：想跳过自动计算、直接用浏览器里拷出来的令牌时设它。
 STOKEN_ENV: Final[str] = "BOSS_ZP_STOKEN"
 
@@ -117,9 +132,6 @@ DEFAULT_RETRIES: Final[int] = 2
 #: 重试退避基数（秒），按 2 的幂递增
 DEFAULT_BACKOFF: Final[float] = 0.8
 
-# --------------------------------------------------------------------------- #
-# 分页与风控节流
-# --------------------------------------------------------------------------- #
 
 #: 服务端固定每页 15 条，传 pageSize 也不认。留作客户端切分/校验用。
 PAGE_SIZE: Final[int] = 15
@@ -128,48 +140,19 @@ PAGE_SIZE: Final[int] = 15
 #: 把请求频率压到人手滚动的量级，避免触发风控。
 DEFAULT_PAGE_INTERVAL: Final[float] = 1.0
 
-#: 补抓职位详情（JD）的条间隔（秒）。
-#: **1 秒**：实测 0.3s 会被安全网关当过频（连环 code 37），1s 是人手点击的量级。
+#: 补抓职位详情（JD）的条间隔（秒）。**1 秒**：0.3s 会被安全网关当过频（连环
+#: code 37），1s 是人手点击的量级。
 DETAIL_INTERVAL: Final[float] = 1.0
 
-#: 打招呼（发送）之间的条间隔（秒）。同 DETAIL_INTERVAL 一个道理：
-#: 1s 是人手点「立即沟通」的节奏，既不像脚本刷屏，也不至于慢到没法用。
+#: 打招呼之间的条间隔（秒）。同 :data:`DETAIL_INTERVAL`：1s 是人手点「立即沟通」
+#: 的节奏，既不像脚本刷屏，也不至于慢到没法用。
 DELIVER_INTERVAL: Final[float] = 1.0
 
-# --------------------------------------------------------------------------- #
-# 聊天通道（MQTT over WebSocket）
-# --------------------------------------------------------------------------- #
-#
-# 站点**没有**「发一条聊天消息」的 HTTP 接口：消息是 MQTT 上的 protobuf 帧。
-# chat-new 前端里 ``ChatWebsocket`` 直接用 Paho MQTT：
-#
-#     new Paho.MQTT.Client(server, port, "/chatws", "ws-"+rand16)
-#     client.connect({token: wt, userName: <token>+"|0", password: wt,
-#                     keepAliveInterval: 25, cleanSession: true, mqttVersion: 3,
-#                     useSSL: true})
-#     client.send("chat", <TechwolfChatProtocol>.toArrayBuffer(), 1, true)
-#
-# 2026-10-08 **全链路实测通过**（见 :mod:`boss_jobs.chat`）：
-# 建 MQTT（CONNACK Success）→ 往 ``chat`` 主题 PUBLISH 一帧文本消息 →
-# **站点自己的会话列表里出现这条招呼语并标「[送达]」**（重载页面、从服务端
-# 重拉也还在，是服务端真收下了）。
-#
-# 三个坑：
-#
-# 1. **WebSocket 握手必须带登录 Cookie**，不带直接 HTTP 403（实测）。
-# 2. **文本帧要跟站点逐字节对齐**：``from`` 必须显式带 ``source``（哪怕 0），
-#    ``mid`` 要落在服务端消息 id 的数轴上（3.9e14 量级，不是毫秒时间戳）。
-#    见 :mod:`boss_jobs.chat` 模块头。
-# 3. **这条网关不给文本帧回 PUBACK**，PUBLISH 完约 150ms 直接把 WebSocket
-#    关掉——**这是它的常态，不是拒收**（那几发都真送达了）。所以判据是
-#    「帧发出去了」，不是「等到 PUBACK」（见 :data:`CHAT_PUBACK_WAIT`，默认
-#    0 = 不等）。``GET /wapi/zpchat/geek/historyMsg`` 对这条账号回 ``code 0``
-#    + 空 ``zpData``，连有消息的会话也读不出来，也当不了判据。
-#
-# 生产服务器的 host/port 来自 chunk ``26308``：
-#    ``{useSSL:true, server:"ws6.zhipin.com", port:443,
-#      uris:["ws6.zhipin.com","ws2.zhipin.com","ws.zhipin.com"]}``；
-#    池子也可以问 ``GET /wapi/zpchat/config/ws``。
+# 聊天通道（MQTT over WebSocket）。站点**没有**发聊天消息的 HTTP 接口——消息是
+# MQTT 上的 protobuf 帧（Paho，topic ``chat``，userName ``<token>|0``）。全链路
+# 协议与三个坑（握手要登录 Cookie；``from`` 要带 ``source``、``mid`` 要落在服务端
+# 雪花号数轴上；网关对文本帧**不回 PUBACK**，发完约 150ms 就掐线）见
+# :mod:`boss_jobs.chat`。下面每个常量的 ``#:` 写了各自动作值的理由。
 
 #: 聊天 MQTT 网关（WebSocket Secure）。
 CHAT_WS_HOST: Final[str] = "ws6.zhipin.com"
@@ -184,60 +167,47 @@ CHAT_KEEPALIVE: Final[int] = 25
 #: 等 CONNACK 的超时（秒）。
 CHAT_TIMEOUT: Final[float] = 15.0
 
-#: 连上之后等多久去收服务端主动推的那帧**会话同步**（秒）。
-#: 它带着每个会话最后一条消息的 id，是本地算 ``mid`` 的唯一现成基数（见
-#: :data:`CHAT_MID_FLOOR`）。**只在手里没基数时才等**（整批第一条）——
-#: 基数能跨条带过来（见 :class:`boss_jobs.chat.ChatSocket` 的 ``mid_base``），
-#: 有了就直接发，别每条都白等这 4 秒。等不到就退回基数兜底值。
+#: 连上后等多久去收服务端主动推的那帧**会话同步**（秒）。它带每个会话最后一条
+#: 消息的 id，是本地算 ``mid`` 的唯一现成基数。**只在手里没基数时才等**（整批
+#: 第一条）——基数能跨条带过来（:class:`boss_jobs.chat.ChatSocket` 的
+#: ``mid_base``），有了就直接发。等不到就退回 :data:`CHAT_MID_FLOOR`。
 CHAT_PUSH_WAIT: Final[float] = 4.0
 
-#: ``mid`` 的基数兜底值。**服务端的消息 id 是 3.9e14 量级的雪花号**
-#: （2026-10-08 实测：会话最后一条消息 394570988736768，站点 ``maxMsgId``
-#: 394570988769538），不是毫秒时间戳。发出去的帧 ``mid`` 必须落在这个数轴上、
-#: 且大于对方会话已有的 id，否则网关判这帧非法、直接掐线（没有 PUBACK）。
-#: 站点自己算的是 ``getMaxMsgId() + Date.now()``：拿本地见过的最大 id 再加当前
-#: 毫秒，保证「比已知的都大、又不撞车」。这里同样先把基数抬到服务端量级，
-#: 正常路径下这个兜底值会被收到的那帧会话同步里的真实 id 顶上去。
+#: ``mid`` 基数兜底值。**服务端的消息 id 是 3.9e14 量级的雪花号**（不是毫秒
+#: 时间戳），发出的帧 ``mid`` 必须落在这个数轴上、且大于对方会话已有的 id，
+#: 否则网关判非法直接掐线。站点自己算的是 ``getMaxMsgId() + Date.now()``；
+#: 正常路径下这个兜底值会被会话同步里的真实 id 顶上去。
 CHAT_MID_FLOOR: Final[int] = 394_000_000_000_000
 
-#: 从推送里认「这是个消息 id」的合理区间。用来滤掉解析到的别的数字字段，
-#: 免得把 ``mid`` 抬到离谱的地方去。
+#: 从推送里认「这是个消息 id」的合理区间，滤掉别的数字字段，免得把 ``mid``
+#: 抬到离谱的地方去。
 CHAT_MID_RANGE: Final[tuple[int, int]] = (10**13, 10**17)
 
-#: 等那条 PUBACK 的超时（秒）——**只是记日志用，不是判据**。
-#: 2026-10-08 实测：这条网关对文本帧**不回 PUBACK**，发完约 150ms 直接把
-#: WebSocket 关掉（``close code=1000 reason="Bye"``）。可那几发（站点界面上
-#: 都显示「[送达]」）是真真切切进了服务端的——所以「没等到 PUBACK」不等于
-#: 失败。既然回执**从来不到**，默认 0 = 发完不等，省掉每条干烧的 1.5s；
-#: 想抓「这回倒是有回执」这种非常态再临时调大。
+#: 等 PUBACK 的超时（秒）——**只记日志，不是判据**。这条网关对文本帧**不回
+#: PUBACK**，发完约 150ms 直接关 WebSocket（``close code=1000 reason="Bye"``），
+#: 但那几发是真的进服务端了。回执从来不到，所以默认 0 = 发完不等。
 CHAT_PUBACK_WAIT: Final[float] = 0.0
 
-#: 发完再停多久才主动断（秒）。PUBACK 等不到（见上），这停顿只留给
-#: 「网关还没来得及掐线」——它常态 **约 150ms** 就把 WebSocket 关掉，所以
-#: 停 0.15s 就够，再多是每条干烧。
+#: 发完再停多久才主动断（秒）。PUBACK 等不到，这停顿只留给「网关还没来得及
+#: 掐线」——它常态约 150ms 就关连接，停 0.15s 就够。
 CHAT_FLUSH_WAIT: Final[float] = 0.15
 
-#: 把 PUBLISH**真正写到 socket 上**最多等多久（秒）。``publish()`` 回
-#: ``rc == 0`` 只是**入队成功**，真写出去是 paho 的 loop 线程干的——没写完
-#: 就断连，这帧随连接一起丢，而这条网关又不回 PUBACK，没法用回执发现，
-#: 只会表现成「会话建了、招呼语没了」。所以发完等它出队（一般几十毫秒），
-#: 这个数只是硬上限。
+#: 把 PUBLISH **真正写到 socket 上**最多等多久（秒）。``publish()`` 回
+#: ``rc == 0`` 只是**入队成功**，真写出去是 paho 的 loop 线程干的；没写完就断
+#: 连，这帧随连接一起丢，而这条网关不回 PUBACK，只会表现成「会话建了、招呼语
+#: 没了」。发完等它出队，这个数只是硬上限。
 CHAT_FLUSH_DEADLINE: Final[float] = 1.0
 
-#: 正文帧的 MQTT ``retain``（保留消息）标志。**定案 ``False``**（2026-10-09 实测）。
-#: 站点前端用的是 ``true``（``client.send("chat", frame, 1, true)``），照抄会出问题：
-#: 留下 ``true`` 时，一条招呼语在对方会话里会**变成两条**（实测确认）；改成 ``false``
-#: 后不再重复。原因是 ``retain=true`` 会让 broker 把这一帧**留在 ``chat`` 主题上**，
-#: 收件人（重新）订阅 / 同步时会**再收到一遍留存的那份**——实时那份 + 留存那份 = 两条。
-#: 站点前端用 ``true`` 不出这毛病，是因为它本地 ``pendingDeliverMap`` 会按 ``cmid``
-#: 把回来的那份**并回占位**、不新加气泡；我们不在站点前端里，没有这套本地去重。
-#: ``false`` = 只走实时投递（对方离线会收不到，但本来就是实时场景）。
-#: **presence 帧仍随站点用 ``true``**（不是消息、不参与去重）。
+#: 正文帧的 MQTT ``retain``。**定案 ``False``**：站点前端用 ``true``，但那会让
+#: broker 把帧留在 ``chat`` 主题上，收件人（重新）订阅/同步时再收一遍留存的那份，
+#: 一条招呼语变两条。站点自己不出这毛病是因为它有 ``pendingDeliverMap`` 按
+#: ``cmid`` 去重，我们没有。``false`` = 只走实时投递。**presence 帧仍用 ``true``**
+#: （不是消息，不参与去重）。
 CHAT_RETAIN: Final[bool] = False
 
-#: 断线重连间隔（秒）。**故意开得很大**：一帧一条连接（发完主动断），
-#: 重连由 :class:`boss_jobs.chat.ChatSocket` 显式重建，不让 paho 在后台
-#: 按秒级节奏自己重连（那会变成连环握手，实测会被网关更早踢掉）。
+#: 断线重连间隔（秒）。**故意开得很大**：一帧一条连接（发完主动断），重连由
+#: :class:`boss_jobs.chat.ChatSocket` 显式重建，不让 paho 在后台按秒级节奏自己
+#: 重连（会变成连环握手，更快被网关踢掉）。
 CHAT_RECONNECT_MIN: Final[int] = 30
 CHAT_RECONNECT_MAX: Final[int] = 60
 
@@ -255,28 +225,23 @@ CHAT_APP_ID: Final[int] = 9019
 #: presence 帧的 ``type``（1 = 上线）。
 CHAT_PRESENCE_ONLINE: Final[int] = 1
 
-#: 撞上安全网关 code 37 时先歇多久再拿同一枚令牌重试（秒）。
-#: 37 有时只是「请求太快」，先退避；歇完还 37 才轮到强制换新（换新自己
-#: 还有 ``RENEW_COOLDOWN`` 冷却，不会连环拉 Chrome）。
+#: 撞上安全网关 code 37 时先歇多久再拿同一枚令牌重试（秒）。37 有时只是
+#: 「请求太快」，先退避；歇完还 37 才轮到强制换新（换新自己有
+#: ``RENEW_COOLDOWN`` 冷却，不会连环拉 Chrome）。
 BROWSER_CHECK_BACKOFF: Final[float] = 2.0
 
-#: 撞上安全网关 code 37 之后，下一条之前再多歇多久（秒）。
-#: 37 有时是「令牌不对」，有时是**整段 IP / 会话被限速**——后者多打一发只会
-#: 撞得更狠。失败后先躺平一会儿，再碰下一条。
+#: 撞上 code 37 之后、下一条之前再多歇多久（秒）。37 有时是「令牌不对」，有时是
+#: **整段 IP / 会话被限速**——后者多打一发只会撞得更狠。
 BROWSER_CHECK_COOLOFF: Final[float] = 5.0
 
-#: **连续**撞上 code 37 几次就停整批。
-#: 实测（2026-10-08）：安全网关的限速墙是「一小段窗口里放行几发，然后整段拦」，
-#: 撞墙后继续一条条砸只会把窗口越压越久。连环 3 次 = 这一轮大概率已经全线拦了，
-#: 停批让人歇几分钟，比拿几十发请求去探墙厚道得多（也不容易把账号风控惹出来）。
+#: **连续**撞上 code 37 几次就停整批。安全网关的限速墙是「一小段窗口里放行几发，
+#: 然后整段拦」，撞墙后继续砸只会把窗口越压越久；连环 3 次 = 这轮大概率全线拦了，
+#: 停批歇几分钟比拿几十发请求探墙厚道，也不容易把账号风控惹出来。
 BROWSER_CHECK_GIVEUP: Final[int] = 3
 
 #: 默认最多翻几页。0 = 一直翻到接口回空页。
 DEFAULT_MAX_PAGES: Final[int] = 0
 
-# --------------------------------------------------------------------------- #
-# 入库
-# --------------------------------------------------------------------------- #
 
 #: 项目根（``F:\boss``），跟 cwd 无关。
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
@@ -285,14 +250,9 @@ PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 #: ``data/boss.db`` 里（见 :mod:`boss_db`）。环境变量 ``BOSS_DB`` 可覆盖。
 DEFAULT_DB_PATH: Final[Path] = boss_db.DEFAULT_DB_PATH
 
-# --------------------------------------------------------------------------- #
-# 薪资字体反混淆
-# --------------------------------------------------------------------------- #
 
-#: 列表页 HTML 里的薪资是私有区字符（防爬字体），映射见 chunk 的
-#: ``S=["&#xe031;",…,"&#xe03a;"]`` + ``mixFont`` → 下标即数字 0-9。
-#: **JSON 接口回的 salaryDesc 已经是明文**（"8-15K"），这表留给 HTML
-#: 兜底解析和历史脏数据用。
+#: 列表页 HTML 里薪资是私有区字符（防爬字体），下标即数字 0-9。**JSON 接口回的
+#: ``salaryDesc`` 已是明文**（"8-15K"），这表留给 HTML 兜底解析和历史脏数据用。
 FONT_DIGIT_ENTITIES: Final[tuple[str, ...]] = (
     "&#xe031;",
     "&#xe032;",

@@ -34,6 +34,9 @@ from boss_jobs.stoken import (
 REAL_SCRIPT = Path(__file__).resolve().parent.parent / ".scratch" / "sec_e948d594.js"
 
 
+# --------------------------------------------------------------------------- #
+# 假会话（与 test_jobs_client 同形，省得跨文件 import）
+# --------------------------------------------------------------------------- #
 
 
 class FakeResponse:
@@ -105,6 +108,9 @@ def challenge_payload(seed="Em6sUKm1q2j+AAA=", name="e948d594", ts=1790759239936
     }
 
 
+# --------------------------------------------------------------------------- #
+# 挑战解析
+# --------------------------------------------------------------------------- #
 
 
 def test_parse_challenge_三样齐全():
@@ -143,15 +149,18 @@ def test_stoken_challenge_ts_0_不算完整():
     assert not c.is_complete
 
 
+# --------------------------------------------------------------------------- #
+# security-js 的下载与缓存
+# --------------------------------------------------------------------------- #
 
 
 def test_load_security_js_下载一次之后走缓存(tmp_path):
-    """下载一次之后走缓存；第二次不再发请求。"""
     http = FakeHttp(get_responses=[FakeResponse(text="window.ABC=class{}")])
     first = load_security_js(http, "e948d594", cache_dir=tmp_path)
     assert "ABC" in first
     assert security_js_path("e948d594", tmp_path).read_text(encoding="utf-8") == first
 
+    # 第二次：不再发请求
     second = load_security_js(http, "e948d594", cache_dir=tmp_path)
     assert second == first
     assert http.get_calls == [{"url": "https://www.zhipin.com/web/common/security-js/e948d594.js", "timeout": 10.0}]
@@ -180,6 +189,9 @@ def test_security_js_path_把怪字符洗掉(tmp_path):
     assert p.parent == tmp_path
 
 
+# --------------------------------------------------------------------------- #
+# 算令牌
+# --------------------------------------------------------------------------- #
 
 
 def test_compute_stoken_喂给Node的命令行对(monkeypatch, tmp_path):
@@ -270,7 +282,7 @@ def test_mint_offline_纯算法不打网络(tmp_path):
 
     token = mint_offline(cache_dir=tmp_path)
 
-    assert token.startswith("TS=")
+    assert token.startswith("TS=")  # 样例脚本只回显 ts，证明 z() 真被调了
     assert SAMPLE_CHALLENGE.is_complete
 
 
@@ -289,9 +301,13 @@ def test_compute_stoken_真Node出0138前缀(tmp_path):
     for tok in (a, b):
         assert tok.startswith("0138")
         assert len(tok) > 100
+    # 生成器带随机量，同 seed+ts 连算两次不会一样
     assert a != b
 
 
+# --------------------------------------------------------------------------- #
+# StokenProvider：一条龙
+# --------------------------------------------------------------------------- #
 
 
 def test_provider_拿挑战下脚本算令牌并写cookie(tmp_path, monkeypatch):
@@ -308,8 +324,8 @@ def test_provider_拿挑战下脚本算令牌并写cookie(tmp_path, monkeypatch)
 
     assert token == "0138MINTED"
     assert http.cookies.get("__zp_stoken__") == "0138MINTED"
-    assert provider.ensure() == "0138MINTED"
-    assert len(http.get_calls) == 2
+    assert provider.ensure() == "0138MINTED"   # 第二次直接复用
+    assert len(http.get_calls) == 2            # 没有再打网络
 
 
 def test_provider_ensure_force_会重算(tmp_path, monkeypatch):
@@ -341,7 +357,7 @@ def test_provider_会话不支持cookie就报错(tmp_path, monkeypatch):
             FakeResponse(text="/* js */"),
         ]
     )
-    http.cookies = object()
+    http.cookies = object()  # 没有 set
     provider = StokenProvider(http=http, cache_dir=tmp_path)
     with pytest.raises(StokenError, match="cookies.set"):
         provider.ensure()
@@ -368,6 +384,9 @@ def test_provider_apply_用requests认的expires():
     assert before + 230000 <= cookie.expires <= before + 231000
 
 
+# --------------------------------------------------------------------------- #
+# JobClient：code 37 自动补令牌后重试
+# --------------------------------------------------------------------------- #
 
 
 def test_fetch_search_page_撞37_自动补令牌重试():
@@ -415,7 +434,7 @@ def test_fetch_search_page_撞37_自动补令牌重试():
 
 def test_fetch_search_page_撞37_换新没换到_不再打第三发():
     """force 冷却中回的是**同一枚**：刚被拒过，再打一发纯属撞墙。"""
-    provider = FakeProvider(token="0138SAME")
+    provider = FakeProvider(token="0138SAME")  # force 也只回同一枚
     http = FakeHttp(
         request_responses=[
             FakeResponse(challenge_payload()),   # 第一次：37
@@ -440,8 +459,8 @@ def test_fetch_search_page_撞37_换新没换到_不再打第三发():
     with pytest.raises(JobApiError) as excinfo:
         client.fetch_search_page(_F())
     assert excinfo.value.is_browser_check
-    assert provider.ensure_calls == [False, True]
-    assert len(http.request_calls) == 2
+    assert provider.ensure_calls == [False, True]  # 尝试了 force
+    assert len(http.request_calls) == 2            # 但**没有**打第三发
 
 
 def test_fetch_search_page_撞37_歇会儿就好了_不换新():
@@ -471,7 +490,7 @@ def test_fetch_search_page_撞37_歇会儿就好了_不换新():
     result = client.fetch_search_page(_F())
 
     assert result.raw_count == 0
-    assert provider.ensure_calls == [False]
+    assert provider.ensure_calls == [False]        # 没有 force
     assert len(http.request_calls) == 2
 
 
@@ -511,4 +530,4 @@ def test_fetch_search_page_撞36_不强制换新():
     with pytest.raises(JobApiError) as excinfo:
         client.fetch_search_page(_F())
     assert excinfo.value.is_risk_control
-    assert provider.ensure_calls == [False]
+    assert provider.ensure_calls == [False]           # 只有请求前那一次，没有 force

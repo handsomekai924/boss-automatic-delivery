@@ -1,6 +1,6 @@
 """列出项目里所有模块的命令与子命令。
 
-独立脚本：不依赖登录/筛选的业务逻辑，只 introspect 各模块 ``cli.build_parser()``
+独立脚本：不依赖登录/筛选的业务逻辑，只introspect 各模块 ``cli.build_parser()``
 构造出来的 argparse 解析器，所以新增命令后不用改这里。
 
     python tools/cli_commands.py                # 人读表格
@@ -23,6 +23,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+# --------------------------------------------------------------------------- #
+# 数据
+# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,9 @@ class ModuleCli:
     global_options: tuple[Option, ...] = field(default_factory=tuple)
 
 
+# --------------------------------------------------------------------------- #
+# argparse 挖掘
+# --------------------------------------------------------------------------- #
 
 
 def _option_from_action(action) -> Option | None:
@@ -125,6 +131,9 @@ def walk_parser(parser: argparse.ArgumentParser, name: str, help_text: str = "")
     )
 
 
+# --------------------------------------------------------------------------- #
+# 模块发现
+# --------------------------------------------------------------------------- #
 
 
 def discover_modules(only: str | None = None) -> list[ModuleCli]:
@@ -156,6 +165,9 @@ def discover_modules(only: str | None = None) -> list[ModuleCli]:
     return found
 
 
+# --------------------------------------------------------------------------- #
+# 输出
+# --------------------------------------------------------------------------- #
 
 
 def _fmt_option(opt: Option) -> str:
@@ -202,6 +214,9 @@ def to_text(modules: list[ModuleCli], *, with_options: bool = False) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+# --------------------------------------------------------------------------- #
+# 入口
+# --------------------------------------------------------------------------- #
 
 
 def build_parser() -> argparse.ArgumentParser:

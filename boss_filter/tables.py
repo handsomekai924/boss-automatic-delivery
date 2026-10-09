@@ -1,7 +1,25 @@
-"""筛选项兜底常量表（code / 文案与线上接口对齐）。
+"""筛选项兜底常量表。
 
-公司行业没有独立接口，只能从职位页 HTML 提取后写死，见 :mod:`boss_filter.fallback`。
-城市树约 900KB 不适合写死，兜底只留热点城市（:data:`HOT_CITIES`）。
+⚠️ 数据来源
+--------------------------------------------------------------------------------
+**已实测确认**（2026-09-30 直接打真实站点，Cookie 取自登录会话）：
+
+  GET /wapi/zpgeek/pc/all/filter/conditions.json
+      → zpData: {payTypeList, experienceList, salaryList, stageList,
+                 scaleList, partTimeList, degreeList, jobTypeList}
+      各项均为 ``{code, name}``（salaryList 另有 ``lowSalary`` / ``highSalary``）。
+  GET /wapi/zpgeek/search/job/hot/city.json
+      → zpData.hotCityList: [{code, name}]，共 15 项（含「全国」100010000）。
+  GET /wapi/zpCommon/data/city.json
+      → 省→市→区三级树，体量约 900KB，不适合写死；兜底时只留热点城市。
+
+**公司行业没有独立接口**：职位页 ``/web/geek/jobs`` 的行业下拉是 SSR 渲染进
+HTML 的（``ka="sel-industry-<code>"``，0-144 共 145 项，按 15 个分组展示）。
+当前 chunk（``app~2.1a6c0514.js``）里 ``industry`` 只出现 1 次（
+``/wapi/zpgeek/recommend/industry/query.json``，且要登录态），没有下发这张表。
+所以行业表只能从 HTML 提取后写死，见 :mod:`boss_filter.fallback` 的解析器。
+
+下表中的文案与 code 与线上接口逐项对齐，不是手抄界面。
 """
 
 from __future__ import annotations
@@ -61,7 +79,7 @@ SCALES: Final[tuple[tuple[str, str], ...]] = (
     ("306", "10000人以上"),
 )
 
-#: 结算方式 payTypeList（接口顺带返回，主流程未用，备用）
+#: 结算方式 payTypeList（接口顺带返回，todo.md 未列，先收下备用）
 PAY_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("0", "不限"),
     ("2501", "日结"),
@@ -95,7 +113,7 @@ PART_TIMES: Final[tuple[tuple[str, str], ...]] = (
 )
 
 #: 公司行业 —— 从职位页 HTML 的行业下拉提取（分组名, 组内选项）。
-#: code 是 ``ka="sel-industry-N"`` 的 N，0-144 连续无空洞。
+#: code 即 ``ka="sel-industry-N"`` 的 N，0-144 连续无空洞。
 INDUSTRY_GROUPS: Final[tuple[tuple[str, tuple[tuple[str, str], ...]], ...]] = (
     (
         "互联网/AI",

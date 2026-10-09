@@ -80,15 +80,18 @@ def saved_html_path() -> Path:
     return Path(__file__).resolve().parent.parent / ".saved_web" / "求职_找工作_招聘信息-BOSS直聘.html"
 
 
+# --------------------------------------------------------------------------- #
+# 写死表兜底
+# --------------------------------------------------------------------------- #
 
 
 class TestFallbackTables:
     def test_builds_all_seven_dimensions(self):
-        """七维齐全；城市树不写死，热点城市走 ``hot_cities``。"""
         cond = build_fallback_conditions()
         assert cond.source == "fallback"
         assert cond.job_types and cond.salaries and cond.experiences
         assert cond.degrees and cond.scales and cond.industries
+        # 城市树不写死；热点城市在 hot_cities
         assert cond.cities == ()
         assert cond.hot_cities
 
@@ -101,6 +104,9 @@ class TestFallbackTables:
         assert build_fallback_conditions().to_dict() == build_fallback_conditions().to_dict()
 
 
+# --------------------------------------------------------------------------- #
+# 内联 HTML 解析
+# --------------------------------------------------------------------------- #
 
 
 class TestParseMiniHtml:
@@ -148,6 +154,9 @@ class TestParseMiniHtml:
         assert parse_html_industries("<html></html>") == ()
 
 
+# --------------------------------------------------------------------------- #
+# 项目里那份真实存盘页
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.skipif(not saved_html_path().is_file(), reason="没有 .saved_web 存盘页")

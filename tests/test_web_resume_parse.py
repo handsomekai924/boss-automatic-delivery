@@ -21,6 +21,9 @@ from boss_web.services.resume_store import (
 )
 
 
+# --------------------------------------------------------------------------- #
+# resume_parser
+# --------------------------------------------------------------------------- #
 
 
 def test_build_messages_shape():
@@ -102,6 +105,9 @@ def test_parse_empty_content():
         parse_resume_llm("   ", llm=llm)
 
 
+# --------------------------------------------------------------------------- #
+# resume_store：meta.llm 落库 + 招呼语 PATCH
+# --------------------------------------------------------------------------- #
 
 
 @pytest.fixture()
@@ -115,7 +121,6 @@ def db(tmp_path, monkeypatch):
 
 
 def test_save_and_load_llm_parse(db):
-    """其余 meta 键不被覆盖。"""
     from boss_web.services.resume_store import save_resume
 
     draft = save_resume("# 简历\n正文", filename="a.md")
@@ -125,6 +130,7 @@ def test_save_and_load_llm_parse(db):
     save_llm_parse(draft.resume_id, payload)
     assert load_llm_parse(draft.resume_id) == payload
 
+    # 其余 meta 键不被覆盖
     from boss_web.services.resume_store import list_resumes
 
     items = list_resumes()
@@ -148,13 +154,16 @@ def test_update_greeting(db):
     from boss_web.services.resume_store import load_analysis
 
     payload = load_analysis("an_x")
-    assert payload["matches"][0]["greeting"] == "你好"
+    assert payload["matches"][0]["greeting"] == "你好"  # 只改那一条
     assert payload["matches"][1]["greeting"] == "改过的招呼语"
 
     with pytest.raises(KeyError):
         update_greeting("an_x", "nope", "x")
 
 
+# --------------------------------------------------------------------------- #
+# match_task：pros/cons + JD 注入
+# --------------------------------------------------------------------------- #
 
 
 def test_match_one_has_pros_and_cons():
@@ -222,6 +231,9 @@ def test_job_desc_fallback_when_missing():
     assert "Python" in block
 
 
+# --------------------------------------------------------------------------- #
+# API 层：parse / greeting PATCH
+# --------------------------------------------------------------------------- #
 
 
 def test_api_parse_requires_llm_config():
@@ -270,6 +282,9 @@ def test_api_greeting_patch_roundtrip():
     assert r.status_code == 404
 
 
+# --------------------------------------------------------------------------- #
+# 重新生成招呼语（只回草稿，不落库）
+# --------------------------------------------------------------------------- #
 
 
 def _seed_greet_world():
@@ -318,11 +333,7 @@ class _ScriptLLM:
 
 
 def test_regenerate_returns_draft_without_saving(db):
-    """生成的招呼语只回给前端，库里那条还是旧的——用户可能反复生成再挑一条。
-
-    prompt 里带上了 JD。
-    再生成一次仍是草稿，库里的还是旧的。
-"""
+    """生成的招呼语只回给前端，库里那条还是旧的——用户可能反复生成再挑一条。"""
     from boss_web.services.match_task import regenerate_greeting
     from boss_web.services.resume_store import load_analysis
 
@@ -330,9 +341,11 @@ def test_regenerate_returns_draft_without_saving(db):
     llm = _ScriptLLM(["您好，我有 3 年 Python 后端经验，想聊聊这个岗位"])
     text = regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=llm)
     assert "Python" in text
+    # prompt 里带上了 JD
     assert "负责后端开发" in llm.calls[0][1]["content"]
     assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
 
+    # 再生成一次也是草稿，库里的还是旧的
     llm2 = _ScriptLLM(["第二版招呼语"])
     assert regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=llm2) == "第二版招呼语"
     assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
@@ -359,10 +372,7 @@ def test_regenerate_missing_analysis_or_job(db):
 
 
 def test_api_greeting_regenerate(db):
-    """POST .../greeting/regenerate：回新文案，PATCH 才落库。
-
-    生成不落库；手动保存才落库。
-    """
+    """POST .../greeting/regenerate：回新文案，PATCH 才落库。"""
     from fastapi.testclient import TestClient
 
     from boss_web import create_app
@@ -392,8 +402,10 @@ def test_api_greeting_regenerate(db):
 
     assert r.status_code == 200
     assert r.json()["greeting"] == "API 生成的草稿"
+    # 生成不落库
     assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
 
+    # 手动保存才落库
     r = c.patch(
         "/api/match/an_re/greeting",
         json={"encrypt_job_id": "j1", "greeting": "API 生成的草稿"},
@@ -415,6 +427,9 @@ def test_api_greeting_regenerate_requires_llm_config(db):
     assert "LLM" in r.json()["message"]
 
 
+# --------------------------------------------------------------------------- #
+# 重新匹配：只改不增（原地覆盖那条 match，不新插 analysis 行）
+# --------------------------------------------------------------------------- #
 
 
 def _seed_failed_world():
@@ -486,10 +501,7 @@ def _analysis_row_count() -> int:
 
 
 def test_rematch_overwrites_failed_item_only(db):
-    """重跑成功：只改那条 match，analysis 行数不变（只改不增），快照/发送状态复用。
-
-    职位数据复用库里的那条（JD 进 prompt），快照 / 发送状态原样保留。
-"""
+    """重跑成功：只改那条 match，analysis 行数不变（只改不增），快照/发送状态复用。"""
     from boss_web.services.match_task import rematch_job
     from boss_web.services.resume_store import load_analysis
 
@@ -515,6 +527,7 @@ def test_rematch_overwrites_failed_item_only(db):
     assert item["match_score"] == 88
     assert item["error"] == ""
     assert item["greeting"] == "您好，想聊聊"
+    # 职位数据复用库里的那条（JD 进了 prompt），快照 / 发送状态原样保留
     assert "负责后端开发" in llm.calls[0][1]["content"]
     assert item["job_name"] == "Python"
     assert item["security_id"] == "sid"
@@ -522,12 +535,12 @@ def test_rematch_overwrites_failed_item_only(db):
     assert item["deliver_status"] == "sending"
 
     payload = load_analysis("an_fail")
-    assert len(payload["matches"]) == 2
+    assert len(payload["matches"]) == 2  # 只改不增：match 条数不变
     assert payload["matches"][0]["match_score"] == 88
-    assert payload["matches"][1]["job_name"] == "Java"
+    assert payload["matches"][1]["job_name"] == "Java"  # 另一条没动
     assert payload["matches"][1]["greeting"] == "你好"
 
-    assert _analysis_row_count() == 1
+    assert _analysis_row_count() == 1  # 只改不增：还是原来那一行
     import boss_db
 
     row = boss_db.acquire().execute(
@@ -568,11 +581,7 @@ def test_rematch_missing_refs(db):
 
 
 def test_rematch_patches_running_task_without_insert(db):
-    """分析还没落库（在跑的匹配任务）→ 改内存那条，同样一行不新插。
-
-    直接挂上 manager：start() 会开线程跑批，这里只要内存里的那条 match。
-    除 _seed_failed_world 那一行，没有新插。
-"""
+    """分析还没落库（在跑的匹配任务）→ 改内存那条，同样一行不新插。"""
     from boss_web.services import match_task as mt
     from boss_web.services.resume_store import save_resume
 
@@ -590,6 +599,7 @@ def test_rematch_patches_running_task_without_insert(db):
             "error": "boom",
         }
     )
+    # 直接挂上 manager：start() 会开线程跑批，这里只要内存里的那条 match
     with mt.match_tasks._lock:
         mt.match_tasks._task = task
     try:
@@ -603,8 +613,9 @@ def test_rematch_patches_running_task_without_insert(db):
 
     assert item["match_score"] == 70
     assert item["error"] == ""
-    assert task.matches[0]["match_score"] == 70
+    assert task.matches[0]["match_score"] == 70  # 内存那条被原地改掉
     assert task.matches[0]["security_id"] == "sid"
+    # 除了 _seed_failed_world 那一行，没有新插
     assert _analysis_row_count() == 1
 
 

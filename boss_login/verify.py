@@ -2,25 +2,40 @@
 
 业务请求被 400061 拦下后的那条链（passport 族）::
 
-    GET /wapi/zppassport/captcha/getTypeV2 → {gt, challenge, randKey}
-         ↓  本地帮助页加载官方极验组件（gt.0.5.0），你本人拖动滑块
-         ↓  {challenge, validate, seccode}
-    重试 send/smsCodeV2，票据在**表单**里（challenge / validate / seccode）
+    GET  /wapi/zppassport/captcha/getTypeV2  ──►  {gt, challenge, randKey}
+                                        │
+                                        ▼
+                          本地帮助页加载官方极验组件（gt.0.5.0）
+                          ┌──────────────────────────────────────┐
+                          │  你本人拖动滑块，极验在浏览器里出结果  │
+                          └──────────────────────────────────────┘
+                                        │  {challenge, validate, seccode}
+                                        ▼
+                     重试 —— 打 **send/smsCodeV2**，票据在**表单**里：
+                       challenge / validate / seccode
+                     （极验通道就这三个键；user-login.js 的 Ce 写死了）
 
-**这条链上没有 validate，也没有 Zp-Captcha 请求头**。passport 族没有 validate
-路由（404）；那套请求头是 zpsecureflow validate 的形状。极验票据是一次性凭证——
-先拿去 ``zpsecureflow/validate`` 会烧掉，业务请求再带同一张就只剩 400061。
+**这条链上没有 validate，也没有 Zp-Captcha 请求头**。passport 族根本没有
+validate 路由（实测 404）。那套请求头是 zpsecureflow validate 的形状；登录页
+chunk 里 ``Zp-Captcha`` 出现 0 次——业务请求只把票据放在表单上。极验票据是
+一次性凭证——先拿去 ``zpsecureflow/validate`` 会把它烧掉，业务请求再带同一张
+就只剩 400061（真机踩过）。
 
-``zpsecureflow/captcha/gettype + validate`` 是 verify.html 那条链，下发**另一个
-gt**，票据打不动 zppassport 的业务接口。见 :func:`validate_request_headers` /
-:meth:`ZhipinLoginClient.run_slider_verify`。
+``zpsecureflow/captcha/gettype + validate`` 是 verify.html 独立验证页那条链，
+下发的是**另一个 gt**，它的票据打不动 zppassport 的业务接口。见
+:func:`validate_request_headers` / :meth:`ZhipinLoginClient.run_slider_verify`。
 
-* **不破解滑块**：解题永远是浏览器里的官方极验组件 + 你的手。
-* 协议层只做三件事：取出挑战参数、架起官方组件、把结果装回请求。
-* 网络层 / 时钟 / 随机数可注入，``generate_trace_id`` 等纯函数可离线对拍。
+设计要点
+    * **不破解滑块**：缺口在哪、要拖多远、拖动轨迹怎么伪造，这里一概不管。
+      解题永远是浏览器里的官方极验组件 + 你的手。
+    * 协议层只做三件事：把挑战参数取出来、把官方组件架起来、把结果装回请求。
+    * 网络层 / 时钟 / 随机数全部可注入，``generate_trace_id`` 等纯函数可离线对拍。
 
-traceId 形状 ``F-<13 位十六进制时间戳 + 6 位随机字符><3 位校验符>``；校验符走
-浏览器那条 32 位位运算（见 :func:`_compute_checksum`）。
+关于 traceId
+    verify.html 的 ``getCommonHeaders()`` 会给每个请求带一个 ``traceId``，
+    形状是 ``F-<13 位十六进制时间戳 + 6 位随机字符><3 位校验符>``。校验符有两条
+    实现：Node 环境走 HMAC-SHA256，浏览器走一套 32 位位运算。真实站点是浏览器
+    发的请求，所以这里复刻**浏览器那条**（见 :func:`_compute_checksum`）。
 """
 
 from __future__ import annotations
@@ -51,6 +66,9 @@ EventHandler = Callable[[str, dict[str, Any]], None]
 _CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
+# --------------------------------------------------------------------------- #
+# 数据模型
+# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
@@ -147,6 +165,7 @@ class SliderSolution:
         那套头，它们是 zpsecureflow validate 的形状。
         """
         if self.captcha_type == C.CAPTCHA_TYPE_PICTURE:
+            # 图片通道：票据本体在 captcha 字段里，randKey 跟着走。
             return {
                 "captcha": self.validate,
                 **({"randKey": self.rand_key} if self.rand_key else {}),
@@ -161,11 +180,15 @@ class SliderSolution:
         }
 
 
+# --------------------------------------------------------------------------- #
+# traceId（复刻 verify.html 的浏览器实现）
+# --------------------------------------------------------------------------- #
 
 
 def _to_uint32(value: float | int) -> int:
     """JS 的 ``>>> 0``。传进来的可能是 float64 乘积，先按 JS 的 ToInteger 截断。"""
     if isinstance(value, float):
+        # float.is_integer() 之前先截断向零，与 JS ToInteger 一致
         value = int(value)
     return value % (1 << 32)
 
@@ -236,6 +259,9 @@ def generate_trace_id(
     return f"F-{seed}{_compute_checksum(seed)}"
 
 
+# --------------------------------------------------------------------------- #
+# 响应解析
+# --------------------------------------------------------------------------- #
 
 
 def parse_challenge(data: Mapping[str, Any], *, scene: str = "") -> SliderChallenge:
@@ -306,6 +332,9 @@ def parse_solution(payload: Mapping[str, Any]) -> SliderSolution:
     )
 
 
+# --------------------------------------------------------------------------- #
+# 本地帮助页
+# --------------------------------------------------------------------------- #
 
 #: 页面里内嵌了挑战参数，打开就能拖，不需要再回服务端取。
 _HELPER_HTML = """\
@@ -448,6 +477,9 @@ def build_helper_html(
     )
 
 
+# --------------------------------------------------------------------------- #
+# 本地帮助服务
+# --------------------------------------------------------------------------- #
 
 
 class SliderHelperError(BossLoginError):
@@ -574,6 +606,9 @@ def solve_via_helper(
         thread.join(timeout=2.0)
 
 
+# --------------------------------------------------------------------------- #
+# 顺手给出的请求头
+# --------------------------------------------------------------------------- #
 
 
 def validate_request_headers(

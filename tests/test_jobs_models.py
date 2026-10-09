@@ -55,6 +55,9 @@ def ok_payload(items, *, has_more: bool = True, lid: str = "") -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# 文本清洗
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -72,7 +75,7 @@ def test_clean_text(raw, want):
 
 
 def test_decode_salary_font_entities_and_chars():
-    """S 表：``&#xe031;``→0 … ``&#xe03a;``→9，实体与裸码点同一套映射。"""
+    # S 表：&#xe031;→0 … &#xe03a;→9
     assert decode_salary_font("&#xe039;-&#xe032;&#xe034;K") == "8-13K"
     assert decode_salary_font(f"{chr(0xE039)}-{chr(0xE032)}{chr(0xE034)}K") == "8-13K"
 
@@ -89,6 +92,9 @@ def test_join_location_skips_empty_segments():
     assert join_location("", "", "") == ""
 
 
+# --------------------------------------------------------------------------- #
+# Job.from_api
+# --------------------------------------------------------------------------- #
 
 
 def test_from_api_maps_todo_fields():
@@ -127,6 +133,9 @@ def test_from_api_rejects_non_dict():
         Job.from_api("not-a-dict")
 
 
+# --------------------------------------------------------------------------- #
+# clean_page
+# --------------------------------------------------------------------------- #
 
 
 def test_clean_page_keeps_valid_drops_invalid():
@@ -168,10 +177,10 @@ def test_clean_page_reads_has_more_and_lid():
 
 
 def test_clean_page_handles_empty_or_broken_payload():
-    """缺字段、空列表、``zpData`` 不是对象都只当空页，不抛。"""
     assert clean_page({"code": 0, "zpData": {}}, page=1).is_empty
     assert clean_page({"code": 0, "zpData": {"jobList": None}}, page=1).is_empty
     assert clean_page({"code": 0}, page=1).is_empty
+    # zpData 整个不是对象也不该炸
     assert clean_page({"code": 0, "zpData": "oops"}, page=1).is_empty
 
 
@@ -185,6 +194,9 @@ def test_clean_pages_stitches_across_pages():
     assert [j.page for j in jobs] == [1, 2]
 
 
+# --------------------------------------------------------------------------- #
+# 职位描述（JD）
+# --------------------------------------------------------------------------- #
 
 
 def test_clean_desc_strips_html_and_keeps_lines():

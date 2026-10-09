@@ -29,6 +29,8 @@ from .errors import (
     JobDataError,
     JobError,
     JobTransportError,
+    dig_chat_remind,
+    format_api_message,
 )
 from .models import PageResult, clean_page, extract_job_desc
 from .store import JobStore, SaveOutcome, open_store
@@ -180,7 +182,7 @@ class JobClient:
         每次搜索前会 ``ensure()`` 判过期、过期了自己换新；撞上 code 37 时会
         ``ensure(force=True)`` 强制再换一枚重试。不传就按老规矩报错。
     :param chat_host / chat_port / chat_path: 聊天 MQTT 网关（见
-        :mod:`boss_jobs.chat`），默认取 :mod:`boss_jobs.config` 里的实测值。
+        :mod:`boss_jobs.chat`），默认取 :mod:`boss_jobs.config` 里的值。
     :param chat_timeout: 聊天通道等 CONNACK 的超时（秒）
     :param chat_push_wait: 连上后等那帧**会话同步**的超时（秒）——发消息的
         ``mid`` 基数从里面取（见 :func:`boss_jobs.chat.max_message_id`）
@@ -242,9 +244,6 @@ class JobClient:
         else:  # 简易假会话：退化成每次请求都带
             self._default_headers = merged
 
-    # ------------------------------------------------------------------ #
-    # 单页
-    # ------------------------------------------------------------------ #
 
     def fetch_page(self, page: int = 1) -> dict[str, Any]:
         """打一页职位列表，返回完整响应体（未清洗）。
@@ -262,9 +261,6 @@ class JobClient:
         payload = self.fetch_page(page)
         return clean_page(payload, page=page)
 
-    # ------------------------------------------------------------------ #
-    # 搜索接口：JobSearchFilter → fetch_search_page
-    # ------------------------------------------------------------------ #
 
     def fetch_search_page(self, search_filter: Any, *, page: int | None = None) -> PageResult:
         """按 :class:`~boss_filter.search.JobSearchFilter` 抓**一页搜索结果**并清洗。
@@ -306,7 +302,7 @@ class JobClient:
         """打一发；撞 code 37 时**先歇一下拿同一枚重试**，还不行才强制换新。
 
         37 有两类原因：令牌不对、或者**请求太快 / 被安全网关拦着**。
-        实测（2026-10-08）连环 code 37 时换新**没用**——刚换的令牌一样被拒，
+        连环 code 37 时换新**没用**——刚换的令牌一样被拒，
         这时正确动作是**别再撞**，而不是多打一发。所以：
 
         - 先退避 2s 拿同一枚重试（「太快了」这一支）；
@@ -341,7 +337,6 @@ class JobClient:
         logger.info("歇完还 37，强制换新 %s 后再试一次", C.STOKEN_COOKIE)
         self._ensure_stoken(force=True)
         if self._get_cookie(C.STOKEN_COOKIE) == before:
-            # 冷却里没真换到新令牌：同一枚刚被拒过，再打一发纯属撞墙
             logger.info(
                 "%s 没换到新令牌（换新冷却中），不打第三发，交给上层停批",
                 C.STOKEN_COOKIE,
@@ -371,9 +366,6 @@ class JobClient:
         token = self.stoken_provider.ensure(force=force)
         self._set_cookie(C.STOKEN_COOKIE, token)
 
-    # ------------------------------------------------------------------ #
-    # 职位详情（JD 正文）
-    # ------------------------------------------------------------------ #
 
     def fetch_job_detail(self, *, security_id: str, lid: str) -> JobDetail:
         """拉一条职位详情，抽出 JD 正文。
@@ -382,7 +374,7 @@ class JobClient:
         query 只带 ``securityId`` + ``lid``（调用方 ``tc({securityId, lid})`` 就这
         两参形态）。列表接口不回 JD，正文在 ``zpData.jobInfo.postDescription``。
 
-        详情跟搜索一样要 ``__zp_stoken__``（实测 code 37），所以这里也走
+        详情跟搜索一样要 ``__zp_stoken__``（缺了回 code 37），所以这里也走
         :meth:`_get_json_with_stoken_retry`（撞 37 先退避再换新）。
 
         :param security_id: 职位的 ``securityId``（列表 item 里有）
@@ -411,16 +403,13 @@ class JobClient:
         return detail
 
     def _set_cookie(self, name: str, value: str) -> None:
-        from .stoken import put_cookie  # 延迟导入，避免跟 stoken 硬绑
+        from .stoken import put_cookie
 
         jar = getattr(self._http, "cookies", None)
         if jar is None:
             return
         put_cookie(jar, name, value)
 
-    # ------------------------------------------------------------------ #
-    # 打招呼 / 加好友
-    # ------------------------------------------------------------------ #
 
     def greet(
         self,
@@ -434,7 +423,7 @@ class JobClient:
     ) -> GreetResult:
         """发一条打招呼（``POST /wapi/zpgeek/friend/add.json``）。
 
-        **这条只建会话、不投递正文**——已实测（2026-10-08）：body 里带
+        **这条只建会话、不投递正文**——body 里带
         ``greeting`` 服务端直接忽略，回 ``code 0`` 但聊天框还是空的。
         真正的招呼语正文要走聊天通道（:meth:`deliver_greeting`，见
         :mod:`boss_jobs.chat`）。
@@ -453,6 +442,14 @@ class JobClient:
         :param extra: 额外的 form 字段（透传，值为 ``None`` 的丢掉）
         :raises JobApiError: code 36（账号风控，要人工处理）、code 1/7（登录失效）
             等非成功码
+
+        **「开聊提醒」会自动模拟点击确认**：``friend/add`` 回 ``code 1`` +
+        ``chatRemindDialog``（blockLevel 0 的提示弹窗，content 像「您今天已与
+        120 位 BOSS 沟通，还剩 30 次沟通机会哦」）时，照站点前端那条链路
+        补两发——弹窗埋点 ``addf-limit-popup-c``，再带 ``cid=1`` 重打一次
+        ``friend/add``（chunk ``1326.ad80b1c8.js`` 的 ``commonAction``）。
+        确认后能建会话就回 :class:`GreetResult`，把剩下的沟通次数用掉；
+        确认完还被拦才抛出来（话术仍是弹窗那句原话）。
         """
         if not security_id:
             raise ValueError("security_id 不能为空")
@@ -473,17 +470,94 @@ class JobClient:
 
         action = f"打招呼 {encrypt_job_id}"
         path = self.endpoints["friend_add"]
-        payload = self._request_with_stoken_retry(
-            lambda suffix: self._request_json(
-                "POST", path, params=params, data=body, action=action + suffix
-            ),
-            action=action,
-        )
+        try:
+            payload = self._request_with_stoken_retry(
+                lambda suffix: self._request_json(
+                    "POST", path, params=params, data=body, action=action + suffix
+                ),
+                action=action,
+            )
+        except JobApiError as exc:
+            if not exc.is_chat_remind:
+                raise
+            payload = self._confirm_chat_remind(
+                exc,
+                params=params,
+                body=body,
+                action=action,
+            )
         return GreetResult(message=str(payload.get("message") or ""), raw=payload)
 
-    # ------------------------------------------------------------------ #
-    # 聊天通道（建会话 + 真发招呼语正文）
-    # ------------------------------------------------------------------ #
+    def _confirm_chat_remind(
+        self,
+        exc: JobApiError,
+        *,
+        params: Mapping[str, Any],
+        body: Mapping[str, Any],
+        action: str,
+    ) -> dict[str, Any]:
+        """「开聊提醒」弹窗的**模拟点击确认**，回确认后 ``friend/add`` 的响应。
+
+        站点前端（chunk ``1326.ad80b1c8.js``）点弹窗上的「好」时干三件事：
+
+        1. 弹窗 ``created`` 时埋点 ``POST /wapi/zpCommon/actionLog/geek/chatremind.json``
+           body ``{action: "addf-limit-popup-c", ba: <弹窗 ba>}``；
+        2. ``commonAction`` 里 ``remindType > 262144``（实测 524288）且按钮
+           ``actionType == 11`` 时，**带 ``cid=1`` 再打一次 ``friend/add``**
+           （这就是「确认」本体——不带 ``cid`` 服务端一直弹窗）；
+        3. 再埋点 ``addf-limit-popup-connect`` + ``ba`` + ``p8=11``。
+
+        埋点两发**失败不挡确认**（少打一发埋点不影响建会话）；``friend/add``
+        那发才是判据。确认后仍弹窗就把原异常抛回去，让上层按话术记这条。
+        """
+        dialog = exc.chat_remind or {}
+        ba = str(dialog.get("ba") or "")
+        self._log_chat_remind({"action": "addf-limit-popup-c", "ba": ba})
+
+        confirm_body = {
+            str(k): v
+            for k, v in dict(body).items()
+            if v is not None and str(k) not in {"securityId", "jobId", "lid"}
+        }
+        confirm_body["cid"] = C.CHAT_REMIND_CONFIRM_CID
+        path = self.endpoints["friend_add"]
+        payload = self._request_with_stoken_retry(
+            lambda suffix: self._request_json(
+                "POST",
+                path,
+                params=params,
+                data=confirm_body,
+                action=f"{action}（模拟点「好」）{suffix}",
+            ),
+            action=f"{action}（模拟点「好」）",
+        )
+        self._log_chat_remind(
+            {"action": "addf-limit-popup-connect", "ba": ba, "p8": "11"}
+        )
+        logger.info(
+            "%s 撞「开聊提醒」已模拟确认（cid=%s），会话建起来了；弹窗原话：%s",
+            action,
+            C.CHAT_REMIND_CONFIRM_CID,
+            exc.message,
+        )
+        return payload
+
+    def _log_chat_remind(self, data: Mapping[str, Any]) -> None:
+        """补一发「开聊提醒」弹窗埋点；**失败不抛**，别挡确认。
+
+        这条要 ``zp_token`` 头（cookie ``bst``），见
+        :data:`boss_jobs.config.ZP_TOKEN_HEADER`。
+        """
+        try:
+            self._request_json(
+                "POST",
+                self.endpoints["chatremind_log"],
+                data=dict(data),
+                action="开聊提醒埋点",
+            )
+        except Exception:  # noqa: BLE001 - 埋点失败不影响确认
+            logger.debug("开聊提醒埋点没打上", exc_info=True)
+
 
     def fetch_wt(self) -> str:
         """取 MQTT 密码：``GET /wapi/zppassport/get/wt`` → ``zpData.wt2``。"""
@@ -497,7 +571,7 @@ class JobClient:
         """取自己的聊天身份：``token``（MQTT 用户名）+ ``userId``/``name``。
 
         另外把会话 Cookie 一起打包——聊天 WebSocket 握手**必须带 Cookie**
-        （不带回 HTTP 403，实测）。
+        （不带回直接 HTTP 403）。
         """
         payload = self._get_json(self.endpoints["get_user_info"], action="取登录用户")
         data = payload.get("zpData") or {}
@@ -546,10 +620,10 @@ class JobClient:
         """回读某个会话的历史消息（``GET /wapi/zpchat/geek/historyMsg``）。
 
         :param boss_uid: **对方的数字 uid**（``getBossData`` 的 ``bossId``），
-            **不是** ``encryptBossId``——2026-10-08 实测：传加密串回
+            **不是** ``encryptBossId``——传加密串回
             **code 19「参数值错误」**，传数字 uid 回 code 0。
 
-        **拿它核对送达是不行的**：2026-10-08 实测，对有消息、且刚确认送达到的
+        **拿它核对送达是不行的**：对有消息、且刚确认送达的
         会话，这个接口回 ``code 0`` + 空 ``zpData``（连 ``messages`` 都没有）。
         所以它现在只当「能不能读到历史」的探针留着，**不作为发送判据**。
         """
@@ -636,7 +710,7 @@ class JobClient:
 
         第 3 步的**成功判据是「帧发出去了」**（PUBLISH 无异常、``rc == 0``），
         **不是「等到 PUBACK」**：这条网关对文本帧根本不回 PUBACK，发完约 150ms
-        直接把连接关掉——**这是它的常态，不是拒收**（2026-10-08 实测的那几发
+        直接把连接关掉——**这是它的常态，不是拒收**（那几发
         站点上都显示「[送达]」，见 :mod:`boss_jobs.chat` 模块头）。所以
         :meth:`~boss_jobs.chat.ChatSocket.send_text` 只把 PUBACK 记进日志，
         等不到不抛。``mid`` 由 :class:`boss_jobs.chat.ChatSocket` 自己算
@@ -646,11 +720,17 @@ class JobClient:
 
         **不再回读聊天记录核对**：``GET /wapi/zpchat/geek/historyMsg`` 对这条
         账号返回 ``code 0`` + 空 ``zpData``——**有消息、刚确认送达的会话也读不
-        出来**（2026-10-08 实测），拿它当判据只会把成功报成失败。
+        出来**，拿它当判据只会把成功报成失败。
+
+        ``to.name`` 用会话对象的 ``encryptUid``（同源的 ``encryptBossId``）：
+        跟站点一样有值就写、空串就不写这个字段。日志里的耗时拆成「建会话 /
+        换 uid / 开通道 / 发帧」，其中「开通道」含取凭据（缓存命中就没有）
+        + MQTT 握手，「发帧」里再拆等推送与收尾停顿
+        （:attr:`ChatSocket.last_send_stats`）。
 
         :param greeting: 招呼语正文。**空的不发**（抛 :class:`ChatSendError`）——
             站点那条 ``friend/add`` 只建会话，不带正文的「打招呼」在 App 里
-            看着像打了、聊天框其实是空的，正是本次要修的症状。
+            看着像打了、聊天框其实是空的。
         :raises ChatSendError: 正文为空 / 换不到 boss uid / 通道发失败
         :raises JobApiError: 建会话那步的登录态失效 / 账号风控
         """
@@ -675,14 +755,9 @@ class JobClient:
             to_uid=boss.uid,
             text=text,
             to_source=boss.source,
-            # 站点前端 to.name 塞的是会话对象的 encryptUid，这里能拿到同源的
-            # encryptBossId（跟站点一样：有值就写，空串就不写这个字段）。
             to_name=boss.encrypt_boss_id or encrypt_boss_id,
         )
         sent_at = time.monotonic()
-        # 一行看清这条的时间花在哪：建会话 / 换 uid / 开通道 / 发帧。
-        # 「开通道」含取凭据（缓存命中就没有）+ MQTT 握手；「发帧」里再拆
-        # 等推送与收尾停顿，见 ChatSocket.last_send_stats。
         stats = getattr(chat, "last_send_stats", None) or {}
         logger.info(
             "打招呼 %s 耗时 %.2fs：建会话 %.2f + 换uid %.2f + 开通道 %.2f + 发帧 %.2f"
@@ -716,9 +791,6 @@ class JobClient:
             f"{c.name}={c.value}" for c in items if getattr(c, "value", None) is not None
         )
 
-    # ------------------------------------------------------------------ #
-    # 翻页：抓 → 洗 → 存 → 睡
-    # ------------------------------------------------------------------ #
 
     def crawl(
         self,
@@ -755,6 +827,10 @@ class JobClient:
             单条详情失败只发一条 ``detail_error`` 事件，**不**中断列表抓取。
         :param detail_interval: 补详情的条间隔（秒），默认 :data:`config.DETAIL_INTERVAL`
         :return: :class:`CrawlReport`（统计 + 每页明细）
+
+        收手判据：接口回空页，或「**不满页**且 ``hasMore=false``」。
+        ``hasMore`` 在 page=1 上不可靠（常回 ``false`` 却还有后续页），所以不单独
+        信它。下一页若已被 ``max_pages`` 拦下，也不再多等那一个页间隔。
         """
         interval = self.page_interval if page_interval is None else max(0.0, page_interval)
         detail_gap = (
@@ -805,7 +881,7 @@ class JobClient:
                     result = self.fetch_search_page(search_filter, page=page)
                 else:
                     result = self.fetch_page_clean(page)
-                outcome = store.save_page(result)  # 立刻入库
+                outcome = store.save_page(result)
                 report.pages.append(result)
                 stats = stats.add(result, outcome)
                 report.stats = stats
@@ -823,14 +899,11 @@ class JobClient:
                 if result.is_empty:
                     reason = f"第 {page} 页接口回空列表"
                     break
-                # hasMore 在 page=1 上不可靠（实测常回 false 却还有后续页），
-                # 所以只在「不满页 + 明说没有下一页」时提前收手。
                 if not result.has_more and result.raw_count < C.PAGE_SIZE:
                     reason = f"第 {page} 页不满页且 hasMore=false"
                     break
 
                 page += 1
-                # 下一页会被 max_pages 拦下的话，就别白睡这一秒
                 if max_pages and (page - start_page) >= max_pages:
                     reason = f"达到 max_pages={max_pages}"
                     break
@@ -864,6 +937,11 @@ class JobClient:
 
         **单条失败不拖垮列表抓取**：只发一条 ``detail_error`` 事件就下一条。
         描述抓到了也立刻 ``update_job_desc`` 落库，中途断了不丢。
+
+        撞安全网关 code 37 时按 :data:`config.BROWSER_CHECK_COOLOFF` 多躺一会儿
+        再碰下一条（限速墙抬手前别拿它探墙）；**连续**
+        :data:`config.BROWSER_CHECK_GIVEUP` 次就停掉本页补 JD，列表抓取本身
+        照常走。
         """
         def _emit(payload: dict[str, Any]) -> None:
             if on_detail is not None:
@@ -880,7 +958,6 @@ class JobClient:
             )
 
         done = 0
-        # 连续撞安全网关的计数：连环 N 次就别再砸了（见 C.BROWSER_CHECK_GIVEUP）
         consecutive_37 = 0
         for job in result.jobs:
             if job.encrypt_job_id in already:
@@ -915,7 +992,6 @@ class JobClient:
                 if isinstance(exc, JobApiError) and exc.is_browser_check:
                     consecutive_37 += 1
                     if consecutive_37 >= C.BROWSER_CHECK_GIVEUP:
-                        # 整段被限速了：停掉本页的补 JD，列表抓取本身照常走
                         logger.warning(
                             "连续 %d 次撞安全网关 code 37，本页补 JD 停手；"
                             "过几分钟再试（别在这时候继续砸）",
@@ -931,7 +1007,6 @@ class JobClient:
                             }
                         )
                         return
-                    # 限速墙抬手前多躺一会儿，别拿下一条去探墙
                     self._sleep(C.BROWSER_CHECK_COOLOFF)
             else:
                 consecutive_37 = 0
@@ -946,7 +1021,6 @@ class JobClient:
                     }
                 )
             done += 1
-            # 最后一条真抓的不睡，省掉尾部那一秒（下一页还有自己的页间隔）
             if interval > 0 and done < len(todo):
                 self._sleep(interval)
 
@@ -975,9 +1049,6 @@ class JobClient:
             if interval > 0:
                 self._sleep(interval)
 
-    # ------------------------------------------------------------------ #
-    # 传输层
-    # ------------------------------------------------------------------ #
 
     def _get_json(
         self,
@@ -1001,9 +1072,16 @@ class JobClient:
 
         ``data`` 非空时按 ``application/x-www-form-urlencoded`` 发（``requests``
         对 dict 的默认行为），打招呼那条 POST 用得上。
+
+        每发都补 ``zp_token`` 头（cookie ``bst``）——站点 axios 拦截器对**所有**
+        请求都贴这个；「开聊提醒」确认侧的埋点缺了直接 code 121「请求不合法」。
         """
         url = self.base_url + path
-        headers = getattr(self, "_default_headers", None)
+        headers = dict(getattr(self, "_default_headers", None) or {})
+        zp_token = self._get_cookie(C.ZP_TOKEN_COOKIE)
+        if zp_token:
+            headers[C.ZP_TOKEN_HEADER] = zp_token
+        headers = headers or None
         last_error: Exception | None = None
 
         for attempt in range(self.retries + 1):
@@ -1042,7 +1120,10 @@ class JobClient:
 
             code = _biz_code(payload)
             if code != C.CODE_OK:
-                message = str(payload.get("message") or payload.get("msg") or "")
+                # 顶层 message 常常只是个短标签（「开聊提醒」），真话在
+                # zpData.bizData.chatRemindDialog.content 那类嵌套里——见
+                # format_api_message。
+                message = format_api_message(payload)
                 raise JobApiError(code, message or f"{action or path} 返回异常码 {code}", raw=payload)
 
             return payload
@@ -1050,9 +1131,6 @@ class JobClient:
         raise last_error or JobTransportError(f"{action or path} 请求失败")
 
 
-# --------------------------------------------------------------------------- #
-# 会话装配
-# --------------------------------------------------------------------------- #
 
 
 def http_from_session(
@@ -1076,12 +1154,15 @@ def http_from_session(
     都没有就**先不带**——搜索类接口会回 code 37，由
     :func:`create_client` 挂上的 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`
     拉 Chrome（CDP）让站点自己算一枚补上（见 :mod:`boss_jobs.cdp_stoken`）。
+
+    写 ``__zp_stoken__`` 时走 :func:`boss_jobs.stoken.put_cookie`：它会把上面
+    ``cookies.set`` 不带 domain 写进去的同名旧 Cookie 清掉，否则请求头里会同时
+    出现两枚，服务端照旧的那枚拒。
     """
-    from boss_login.session import load_session  # 延迟导入，避免硬依赖
+    from boss_login.session import load_session
 
     import boss_db
 
-    # None → BOSS_DB → data/boss.db（调用时才解析，测试只改一个环境变量就隔离）
     path = boss_db.resolve_db_path(session_path)
     stored = load_session(path)
     if stored.is_empty:
@@ -1096,14 +1177,10 @@ def http_from_session(
         if hasattr(sess, "cookies") and hasattr(sess.cookies, "set"):
             sess.cookies.set(name, value)
 
-    # 取值顺序：显式参数 → doc('session') → 环境变量。先定序再落盘，
-    # 这样显式传进来的一定盖得过会话里旧的那份。
-    from .stoken import put_cookie  # 延迟导入
+    from .stoken import put_cookie
 
     token = stoken or stored.cookies.get(C.STOKEN_COOKIE) or os.environ.get(C.STOKEN_ENV, "")
     if token and hasattr(sess, "cookies") and hasattr(sess.cookies, "set"):
-        # 走 put_cookie：会把上面那行不带 domain 写进去的同名旧 Cookie 清掉，
-        # 否则请求头里会同时出现两枚 __zp_stoken__，服务端照旧的那枚拒。
         put_cookie(sess.cookies, C.STOKEN_COOKIE, token)
         logger.debug("已带上 %s（长度 %d）", C.STOKEN_COOKIE, len(token))
     else:
@@ -1130,16 +1207,17 @@ def create_client(
     每次搜索前判一次 ``__zp_stoken__`` 过期，过期了自动拉 Chrome（CDP）换新并
     落盘（``doc('stoken')`` + 镜像进 ``doc('session')``）。这是**真浏览器**自算，
     不是 Node 硬算——后者指纹对不上，服务端不认，见 :mod:`boss_jobs.cdp_stoken`。
+
+    会话路径总要解析一份传给 provider（``None`` 也要落到 ``BOSS_DB`` →
+    ``data/boss.db``），不能靠它「不给就不镜像」的契约——否则落盘会漏。
     """
     import boss_db
 
     http = http_from_session(session_path, stoken=stoken)
     provider = None
     if auto_stoken:
-        from .cdp_stoken import CdpStokenProvider  # 延迟导入
+        from .cdp_stoken import CdpStokenProvider
 
-        # create_client 总要镜像一份回登录态；None 也要解析到 BOSS_DB，
-        # 不能靠 CdpStokenProvider 的「不给就不镜像」契约。
         provider = CdpStokenProvider(
             http=http,
             session_path=boss_db.resolve_db_path(session_path),
@@ -1154,9 +1232,6 @@ def create_client(
     )
 
 
-# --------------------------------------------------------------------------- #
-# 小工具
-# --------------------------------------------------------------------------- #
 
 
 def _biz_code(payload: Mapping[str, Any]) -> int:

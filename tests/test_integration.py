@@ -32,14 +32,12 @@ def read_code(phone: str) -> str:
     return STORE[phone]["code"]
 
 
+# --------------------------------------------------------------------------- #
 
 
 class TestFullFlow:
     def test_complete_happy_path(self, client, tmp_path: Path):
-        """发码 → 输码 → 登录 → 落盘 → 带 Cookie 拉用户信息。
-
-        真实站点登录响应体里**没有** token——鉴权靠 Set-Cookie；落盘后新客户端可复用。
-    """
+        """发码 → 输码 → 登录 → 落盘 → 带 Cookie 拉用户信息。"""
         events: list[str] = []
 
         def provider(attempt, ticket):
@@ -51,6 +49,8 @@ class TestFullFlow:
             "13800138000", provider, on_event=lambda name, _p: events.append(name)
         )
 
+        # 真实站点的登录响应体里**没有** token——鉴权靠 Set-Cookie。假服务端照办，
+        # 所以这里断言的是 Cookie，不是 body 里的 token。
         assert result.token == ""
         assert result.user.name == "求职者8000"
         assert result.is_new_user is True
@@ -60,6 +60,7 @@ class TestFullFlow:
 
         assert events == ["code_sent", "need_code", "success"]
 
+        # 登录态落盘并可被新客户端复用
         path = persist_login(client, result, session_path=tmp_path / "session.json")
         restored = create_client(session_path=path, base_url=client.base_url)
         assert restored.is_logged_in() is True
@@ -86,9 +87,9 @@ class TestFullFlow:
             client.send_sms_code("13800000000")
 
     def test_server_side_rate_limit_over_real_http(self, client):
-        """本地冷却会先拦住重发，用 ``force`` 跳过本地判断，专门验证服务端 1001 限流。"""
         client.send_sms_code("13800138000")
 
+        # 本地冷却会先拦住重发，这里用 force 跳过本地判断，专门验证服务端的 1001 限流
         with pytest.raises(RateLimited) as info:
             client.send_sms_code("13800138000", force=True)
         assert info.value.retry_after > 0
@@ -141,7 +142,6 @@ class TestFullFlow:
 
 class TestSessionFileAcrossProcesses:
     def test_saved_session_survives_new_client(self, client, tmp_path: Path):
-        """鉴权靠 Cookie：落盘的就是登录那次种下的。"""
         client.send_sms_code("13800134000")
         result = client.run_sms_login("13800134000", lambda _a, _t: read_code("13800134000"))
 
@@ -150,6 +150,7 @@ class TestSessionFileAcrossProcesses:
         assert stored.phone_masked == "138****4000"
         assert stored.token == result.token
         assert stored.age_seconds >= 0
+        # 鉴权靠 Cookie：落盘的就是登录那次种下的
         assert stored.cookies["zp_at"] == result.new_cookies["zp_at"]
 
         fresh = create_client(session_path=path, base_url=client.base_url)
@@ -157,6 +158,9 @@ class TestSessionFileAcrossProcesses:
         assert fresh.http.cookies.get_dict()["zp_at"] == result.new_cookies["zp_at"]
 
 
+# --------------------------------------------------------------------------- #
+# 滑块验证链路
+# --------------------------------------------------------------------------- #
 
 
 SLIDER_PHONE = "13800138020"
@@ -178,10 +182,7 @@ class TestSliderVerifyChain:
         三处都要对，错一处服务端就还是 400061（真机踩过两轮）：
         路径是 V2、票据是表单三键 challenge/validate/seccode、不先调 validate
         （极验票据一次性，交出去就没了）。
-        
-
-        重试落在 V2，票据在**表单**（不是 Zp-Captcha-* 头）；业务链不烧票据。
-    """
+        """
         events: list[str] = []
         from tools.mock_server import BURNED_TICKETS, LAST_SMS_REQUEST
 
@@ -195,13 +196,16 @@ class TestSliderVerifyChain:
         assert SLIDER_PHONE in STORE, "重试应当真的把验证码发出去"
         assert "slider_required" in events
         assert "slider_retry" in events
+        # 业务链不该走到 validate，自然也不该有 slider_passed
         assert "slider_passed" not in events
         assert not BURNED_TICKETS, "业务链不能调 validate —— 那会把一次性票据烧掉"
 
+        # 重试必须落在 V2 上，而且票据在**表单**里（不是 Zp-Captcha-* 请求头）
         assert LAST_SMS_REQUEST["path"] == "smsCodeV2"
         assert LAST_SMS_REQUEST["form"].get("challenge")
         assert LAST_SMS_REQUEST["form"].get("validate")
         assert LAST_SMS_REQUEST["form"].get("seccode")
+        # 登录页的业务请求不带这套头，它们是 zpsecureflow validate 的形状
         assert not LAST_SMS_REQUEST["headers"].get("Zp-Captcha-Validate")
 
     def test_v2_form_matches_the_login_page_shape(self, client):
@@ -221,8 +225,10 @@ class TestSliderVerifyChain:
         assert form["pk"] == "cpc_user_sign_up"
         assert form["purpose"] == "0"
         assert form["regionCode"] == "+86"
+        # je() 把 phone 换成 encryptedAccount
         assert "phone" not in form
         assert decrypt_account(form["encryptedAccount"]) == SLIDER_PHONE
+        # Ce 的票据分支：极验就三个键，没有 verifyToken/captchaToken/randKey
         assert "verifyToken" not in form
         assert "captchaToken" not in form
         assert "randKey" not in form
@@ -285,10 +291,7 @@ class TestSliderVerifyChain:
         跟发码那张（``Ce(!0)``）只差两处：**没有** ``version``，但**多**一个
         ``phoneCode``。少写 phoneCode 服务端当没输验证码；留着 version 或
         phone 则跟登录页对不上。
-        
-
-        ``Ce()`` 不传 t → 无 version:1；票据仍是极验三键。
-    """
+        """
         from boss_login.crypto import decrypt_account
         from tools.mock_server import LAST_LOGIN_REQUEST
 
@@ -303,14 +306,16 @@ class TestSliderVerifyChain:
         form = LAST_LOGIN_REQUEST["form"]
 
         assert LAST_LOGIN_REQUEST["path"] == "phoneV2"
-        assert form["smsType"] == "7"
+        assert form["smsType"] == "7"  # Ce() 写死，跟场景无关
         assert form["purpose"] == "0"
         assert form["pk"] == "cpc_user_sign_up"
         assert form["regionCode"] == "+86"
         assert form["phoneCode"] == code
+        # Ce() 不传 t → 没有 version:1；je() 把 phone 换成 encryptedAccount
         assert "version" not in form
         assert "phone" not in form
         assert decrypt_account(form["encryptedAccount"]) == SLIDER_PHONE
+        # 票据仍是极验三键，没有 verifyToken/captchaToken/randKey
         assert form["challenge"] and form["validate"] and form["seccode"]
         assert "verifyToken" not in form
         assert "captchaToken" not in form
@@ -323,14 +328,11 @@ class TestSliderVerifyChain:
         登录页 Ce() 会把 verifyInfo 原样挂到 login 上，所以那一步**必须**带
         票据。这里钉住「裸的 login/phone 会被拦」，免得哪天把登录的滑块
         检查拆掉还测成绿的。
-        
-
-        假装没有现成票据，钉住「裸的 login/phone 会被拦」。
-    """
+        """
         from tools.mock_server import LAST_LOGIN_REQUEST
 
         client.send_sms_code(SLIDER_PHONE, slider_solver=fake_solver, force=True)
-        client._slider_solutions.pop(SLIDER_PHONE, None)
+        client._slider_solutions.pop(SLIDER_PHONE, None)  # 假装没有现成票据
         with pytest.raises(RiskControlRequired) as info:
             client.login_by_sms(SLIDER_PHONE, read_code(SLIDER_PHONE))
         assert info.value.code == 400061
@@ -339,10 +341,7 @@ class TestSliderVerifyChain:
     def test_login_reuses_the_send_ticket_like_the_page_does(self, client):
         """登录页的 ``verifyInfo`` 跨发码 / 登录共用，``Ce(!0)`` 和 ``Ce()`` 挂
         的是**同一张**票。发码那次的票据登录先试着复用，不再让你拖一遍。
-        
-
-        业务请求不烧票据——只有 zpsecureflow validate 会（登录页也这么用）。
-    """
+        """
         from tools.mock_server import BURNED_TICKETS, LAST_LOGIN_REQUEST, LAST_SMS_REQUEST
 
         client.send_sms_code(SLIDER_PHONE, slider_solver=fake_solver, force=True)
@@ -353,6 +352,7 @@ class TestSliderVerifyChain:
         )
         assert result.logged_in is True
         assert LAST_LOGIN_REQUEST["form"]["validate"] == send_ticket
+        # 业务请求不烧票据 —— 只有 zpsecureflow validate 会（登录页也这么用）
         assert not BURNED_TICKETS
 
     def test_login_falls_back_to_a_fresh_solve_when_reuse_is_burned(self, client):
@@ -361,7 +361,7 @@ class TestSliderVerifyChain:
 
         client.send_sms_code(SLIDER_PHONE, slider_solver=fake_solver, force=True)
         burned = client._slider_solutions[SLIDER_PHONE]
-        client.submit_slider_solution(burned)
+        client.submit_slider_solution(burned)  # 烧掉发码那张
 
         def fresh(challenge: SliderChallenge) -> SliderSolution:
             return SliderSolution(
@@ -427,17 +427,16 @@ class TestSliderVerifyChain:
 
         这条曾经是错的——假服务端用 Cookie 放行，把「只调 validate」这条
         死路测成了绿的。线上真实行为是票据必须挂在业务请求上。
-        
-
-        Cookie 不是通行证：validate 被调过、Cookie 种了，裸业务请求仍要被拦。
-    """
+        """
         from tools.mock_server import LAST_SMS_REQUEST
 
         solution = client.run_slider_verify(solver=fake_solver)
         assert solution.validate.startswith("validate-for-")
 
+        # validate 被调过、Cookie 也种了
         assert "mock_slider_pass" in client.http.cookies.get_dict()
 
+        # 但裸的业务请求仍然要被拦 —— 证明 Cookie 不是通行证
         with pytest.raises(RiskControlRequired) as info:
             client.send_sms_code(SLIDER_PHONE, force=True)
         assert info.value.code == 400061
@@ -449,16 +448,14 @@ class TestSliderVerifyChain:
         极验的 geetest_validate 是一次性凭证。真机上踩过：拖完滑块先调
         zpsecureflow/validate（code=0），再把同一套 Zp-Captcha-* 挂到 send/smsCode
         上，服务端照样回 400061——票据在 validate 那步已经用掉了。
-        
-
-        同一张票再挂业务请求也不算数——已经烧了。
-    """
+        """
         from tools.mock_server import BURNED_TICKETS
 
         burned = SliderSolution(challenge="c-burn", validate="v-burn", seccode="s-burn")
         client.submit_slider_solution(burned)
         assert "v-burn" in BURNED_TICKETS
 
+        # 同一张票挂在业务请求上：已经烧了，不算数
         with pytest.raises(RiskControlRequired) as info:
             client.send_sms_code(
                 SLIDER_PHONE, slider_solver=lambda _c: burned, force=True

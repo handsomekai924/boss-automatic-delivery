@@ -1,13 +1,16 @@
 """匹配任务：简历 vs 全库/勾选岗位，并行调 LLM，出匹配度 + 优缺点 + 招呼语。
 
-跟 :mod:`boss_web.services.resume_analyzer` 共用输出模板（含 ``pros`` / ``cons``），差别：
+跟老的 :mod:`boss_web.services.resume_analyzer` **共用输出模板**（含 ``pros`` /
+``cons``），差别在这边：
 
-- 简历侧优先吃 LLM 固定模板解析（``meta.llm.data``），没解析过才退回规则切章节摘要；
-- 职位侧注入 JD 正文，没抓到就用标签/技能兜底；
-- 范围是全库全部岗位或勾选的 job_id（C4 已拍板，不再 top_k 封顶）；
-- 结果写 ``analysis`` 表，单条失败可 :func:`rematch_job` 原地重跑——**只改不增**。
+- 简历侧优先吃 **LLM 固定模板解析结果**（``meta.llm.data`` 的 summary / skills /
+  work / intent），没解析过才退回规则切章节的摘要；
+- 职位侧注入 **JD 正文**（``job_desc``），没抓到就用标签/技能兜底；
+- 范围是**全库全部岗位**或勾选的 job_id（C4 已拍板，不再 top_k 封顶）；
+- 结果写 ``analysis`` 表，每条 match 带 ``encrypt_job_id``，招呼语可后改；
+- 单条失败可 :func:`rematch_job` 原地重跑——**只改不增**，不新插 analysis 行。
 
-并行最多 :data:`boss_web.config.MATCH_CONCURRENCY` 条，可随时取消；单条失败只记流水。
+并行（最多 ``MATCH_CONCURRENCY`` 条同时在途），可随时取消；单条失败只记流水，不拖垮整批。
 """
 
 from __future__ import annotations
@@ -185,12 +188,9 @@ class MatchTaskManager:
         task.cancel_flag = True
         return task
 
+    # ------------------------------------------------------------------ #
 
     def _run(self, task: MatchTask) -> None:
-        """组装简历 brief 后并行匹配，最后落 ``analysis``。
-
-        简历侧优先吃 LLM 固定模板结果，没解析过才退回规则摘要。
-        """
         try:
             resume = load_resume(task.resume_id)
         except FileNotFoundError:
@@ -206,6 +206,7 @@ class MatchTaskManager:
             task.ended_at = time.time()
             return
 
+        # 简历侧优先吃 LLM 固定模板结果，没解析过才退回规则摘要
         try:
             llm_parse = load_llm_parse(task.resume_id)
         except FileNotFoundError:
@@ -247,7 +248,7 @@ class MatchTaskManager:
                     task.current_job = job.job_name
                 task.push("job_start", {"job_name": job.job_name, "brand": job.brand_name})
                 pending[pool.submit(self._match_job, task, llm, resume_brief, job)] = job
-                if len(pending) >= window:  # 窗口满了先收一条，取消才不被大队列拖住
+                if len(pending) >= window:  # 窗口满了，收至少一条再派，取消才不会被大队列拖住
                     for done in wait(pending, return_when=FIRST_COMPLETED).done:
                         pending.pop(done)
                         _collect(done)
@@ -260,7 +261,7 @@ class MatchTaskManager:
     @staticmethod
     def _match_job(task: MatchTask, llm: LLMClient, resume_brief: str, job: Job) -> None:
         """跑一个职位并把结果落进任务；失败只记 ``error``，不抛。"""
-        if task.cancel_flag:  # 排队中被取消则不跑
+        if task.cancel_flag:  # 排队期间被取消，直接不跑
             return
         try:
             result = _match_one(llm, resume_brief, job)
@@ -287,6 +288,7 @@ class MatchTaskManager:
             "job_degree": job.job_degree,
             "brand_industry": job.brand_industry,
             "brand_scale_name": job.brand_scale_name,
+            # 发送要用的（C6），顺手带上，免得到时候再翻 raw_json
             "security_id": job.security_id,
             "lid": job.lid,
             **result,
@@ -300,6 +302,9 @@ class MatchTaskManager:
 match_tasks = MatchTaskManager()
 
 
+# --------------------------------------------------------------------------- #
+# 内部
+# --------------------------------------------------------------------------- #
 
 
 def _collect(future: Any) -> None:
@@ -321,7 +326,7 @@ def _pick_jobs(task: MatchTask) -> list[Job]:
                 if job is not None:
                     jobs.append(job)
             return jobs
-        # C4：全库全部岗位，不再 top_k 封顶
+        # 一键匹配：全库全部岗位（C4 已拍板，不再 top_k 封顶）
         return store.list_jobs(limit=100000, offset=0)
 
 
@@ -355,6 +360,7 @@ def _resume_brief(resume: Any, llm_parse: dict[str, Any] | None) -> str:
                 lines.append(f"  · {h}")
 
     if not lines:
+        # 兜底：规则切章节的摘要
         intent = (resume.sections.get("求职意向") or "").strip()
         if intent:
             lines.append(f"- 求职意向：{intent[:120]}")
@@ -376,6 +382,7 @@ def _job_desc_block(job: Job) -> str:
     desc = (job.job_desc or "").strip()
     if desc:
         return desc[:1500]
+    # 没抓到 JD 就用标签/技能兜底
     bits = [b for b in (job.job_labels + job.skills) if b]
     return "（未抓到 JD）标签/技能：" + ("、".join(bits[:12]) if bits else "无")
 
@@ -466,6 +473,7 @@ def regenerate_greeting(
     ]
     greeting = _clean_greeting(client.chat(messages))
     if not greeting:
+        # 偶尔模型爱补一句解释 / 包 JSON，再逼一次
         greeting = _clean_greeting(
             client.chat([*messages[:1], {"role": "user", "content": user + "\n\n请严格只输出私信正文。"}])
         )
@@ -474,7 +482,8 @@ def regenerate_greeting(
     return greeting
 
 
-#: 重跑回写的分析字段；职位快照与 ``deliver_*`` 不在此列，回写时复用库里已有数据。
+#: 重跑结果要回写的分析字段。职位快照（job_name / security_id / …）与
+#: 发送状态（deliver_*）不在此列——回写时原样复用库里已有的数据。
 RESULT_FIELDS: tuple[str, ...] = (
     "match_score",
     "matched_skills",

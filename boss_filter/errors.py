@@ -37,8 +37,13 @@ class FilterApiError(FilterError):
 
     @property
     def is_session_expired(self) -> bool:
-        """True 表示登录态失效（接口回了「当前登录状态已失效」这类话术/码）。"""
-        return self.code in (1, 7) or "登录" in self.message
+        """True 表示登录态失效（接口回了「当前登录状态已失效」这类话术/码）。
+
+        **code 1 不算**——它是业务失败的通用码，只有 code 7（实测的
+        「当前登录状态已失效」）或话术里明说了登录问题才算。跟
+        :attr:`boss_jobs.errors.JobApiError.is_session_expired` 同判据。
+        """
+        return self.code in (7,) or "登录" in self.message
 
 
 class FilterDataError(FilterError):

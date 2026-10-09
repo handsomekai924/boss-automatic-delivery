@@ -3,9 +3,6 @@
 import { api } from "../api.js";
 import { toast, escapeHtml, taskPanel } from "../ui.js";
 
-/**
- * 配置页。同步 HTTP 也可能要几十秒（LLM 测试超时 30s），全程用统一进度面板给反馈。
- */
 export async function renderLLM(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -92,6 +89,7 @@ export async function renderLLM(root) {
   /** 拉到的模型列表（用于下拉框） */
   let modelList = [];
 
+  // 同步 HTTP 也可能要几十秒（LLM 测试超时 30s），用统一面板给进度
   const linkPanel = taskPanel({ title: "链路检测", stopLabel: "" });
   $("llm-task").appendChild(linkPanel.el);
   linkPanel.update({ status: "idle", percent: 0 });
@@ -105,10 +103,10 @@ export async function renderLLM(root) {
     });
   }
 
-  /** 已保存但不在列表里的模型也保留，别把用户的选择弄丢 */
   function fillModelSelect(selected = "") {
     const sel = $("model");
     const ids = [...modelList];
+    // 已保存但不在列表里的模型也保留，别把用户的选择弄丢
     if (selected && !ids.includes(selected)) ids.unshift(selected);
     sel.innerHTML =
       `<option value="">${ids.length ? "请选择模型" : "先拉取模型列表"}</option>` +
@@ -125,7 +123,6 @@ export async function renderLLM(root) {
     $("fixed-params").innerHTML = `系统固定参数：温度 <span class="mono">${f.temperature ?? 0.7}</span> · max_tokens <span class="mono">${f.max_tokens ?? 2048}</span> · 超时 <span class="mono">${f.timeout ?? 120}s</span> <span class="muted">（不可改）</span>`;
   }
 
-  /** 读回配置；已有 Key 和 Base URL 就顺手把模型列表拉下来 */
   async function load() {
     try {
       const c = await api.get("/api/llm/config");
@@ -142,6 +139,7 @@ export async function renderLLM(root) {
         $("llm-ring").style.setProperty("--p", 100);
         $("llm-ring").innerHTML = `<div>OK<small>READY</small></div>`;
       }
+      // 已有 Key 和 Base URL 就顺手把模型列表拉下来
       if (c.has_key && c.base_url) {
         await fetchModels({ silent: true });
         fillModelSelect(c.model || "");
@@ -152,7 +150,7 @@ export async function renderLLM(root) {
   }
 
   /**
-   * 拉模型列表。未保存的 Key 也带上，方便「改完先拉再存」。
+   * 拉模型列表。
    * @param {{silent?: boolean}} opts silent=失败不弹 toast
    */
   async function fetchModels(opts = {}) {
@@ -164,6 +162,7 @@ export async function renderLLM(root) {
     try {
       const payload = {
         base_url: $("base-url").value.trim(),
+        // 未保存的 Key 也带上，改完先拉再存
         api_key: $("api-key").value.trim() || undefined,
       };
       const r = await api.post("/api/llm/models", payload);

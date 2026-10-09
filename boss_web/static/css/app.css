@@ -16,15 +16,18 @@
   --sp-7: 48px;
   --sp-8: 64px;
 
+  /* 圆角 */
   --r-xs: 6px;
   --r-s: 10px;
   --r-m: 14px;
   --r-l: 18px;
   --r-pill: 999px;
 
+  /* 字体 */
   --font: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 
+  /* 字级 */
   --fs-xs: 11px;
   --fs-s: 12px;
   --fs-13: 13px;
@@ -36,8 +39,10 @@
   --fs-2xl: 34px;
   --fs-hero: clamp(28px, 3.6vw, 40px);
 
+  /* 顶栏 */
   --bridge-h: 60px;
 
+  /* z-index 阶梯 */
   --z-page: 1;
   --z-sticky: 40;
   --z-dropdown: 50;
@@ -46,6 +51,7 @@
   --z-modal: 110;
   --z-toast: 130;
 
+  /* 动效 */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --dur-1: 140ms;
   --dur-2: 220ms;
@@ -342,6 +348,7 @@ input, textarea { caret-color: var(--accent); }
 .signal.bad   { background: var(--danger);  box-shadow: 0 0 8px oklch(0.72 0.15 25 / 0.5); }
 .signal.busy  { background: var(--accent);  box-shadow: 0 0 8px oklch(0.85 0.11 215 / 0.55); }
 
+/* 主题切换 */
 .theme-toggle {
   appearance: none;
   border: 1px solid var(--stroke);
@@ -455,6 +462,7 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
   font-family: var(--mono);
 }
 
+/* 便当格 */
 .bento {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
@@ -600,6 +608,7 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
   text-align: right;
 }
 
+/* 下拉 */
 .select {
   appearance: none;
   -webkit-appearance: none;
@@ -876,6 +885,7 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
   flex-shrink: 0;
 }
 
+/* 进度条 */
 .progress {
   position: relative;
   height: 8px;
@@ -918,6 +928,7 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
   to   { transform: translateX(310%); }
 }
 
+/* 元信息行：当前项 / 计数 / 预估 */
 .task-meta {
   display: flex;
   flex-wrap: wrap;
@@ -946,6 +957,7 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
 .task-meta .tm-v.warn { color: var(--warn); }
 .task-meta .tm-v.bad { color: var(--danger); }
 
+/* 事件流水 */
 .task-log {
   font-family: var(--mono);
   font-size: var(--fs-xs);
@@ -979,6 +991,7 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
 .ticker .ev time { color: var(--text-3); opacity: 0.7; flex-shrink: 0; }
 .ticker .ev .name { color: var(--accent); }
 
+/* 信号球大号 */
 .orb-ring {
   --p: 0;
   width: 112px;
@@ -1004,6 +1017,7 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
   font-weight: 500;
 }
 
+/* 匹配分环 */
 .score-ring {
   --p: 0;
   width: 56px;

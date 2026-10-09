@@ -8,9 +8,6 @@ import { refreshBridge } from "../app.js";
 //: 用它区分「刷新页面」与「页内切走再切回」——前者当放弃，后者接上原有流程。
 let bootstrapped = false;
 
-/**
- * 登录门 UI。点「发送验证码」就先推进到滑块那一步——命中人机验证时后端会把弹窗挂出来。
- */
 export async function renderLogin(root) {
   const freshPageLoad = !bootstrapped;
   bootstrapped = true;
@@ -149,16 +146,11 @@ export async function renderLogin(root) {
 
   function closeSlider() {
     if (!sliderModal) return;
-    sliderAutoClose = true;
+    sliderAutoClose = true; // 告诉 onClose：这是程序化关闭，不是用户放弃
     sliderModal.close();
     sliderModal = null;
   }
 
-  /**
-   * 打开极验滑块弹窗。极验的 challenge 一次性：重载旧页面必然报错，重试要先
-   * `/refresh` 换一张新的（`?t=` 顺便破缓存）。用户手动关闭弹窗 = 放弃本次登录，
-   * 回到手机号阶段；程序化关闭靠 `sliderAutoClose` 区分。
-   */
   function openSlider(task) {
     const url = `/api/auth/slider/${task.task_id}`;
     if (sliderModal) return;
@@ -182,14 +174,16 @@ export async function renderLogin(root) {
           sliderAutoClose = false;
           return;
         }
+        // 用户手动关闭弹窗 = 放弃本次登录，回到手机号阶段
         abandonLogin("已关闭滑块验证，本次登录已放弃。");
       },
     });
     body.querySelector("#btn-retry-slider").addEventListener("click", async () => {
       const f = body.querySelector("iframe");
       try {
+        // 极验的 challenge 一次性：重载旧页面必然报错，得先换一张新的。
         await api.post(`/api/auth/slider/${task.task_id}/refresh`);
-        f.src = `${url}?t=${Date.now()}`;
+        f.src = `${url}?t=${Date.now()}`; // 换新挑战，顺便破缓存
       } catch (err) {
         toast(err.message || "刷新滑块失败", "bad");
       }
@@ -213,10 +207,6 @@ export async function renderLogin(root) {
     if (message) toast(message, "warn");
   }
 
-  /**
-   * 按任务状态推进步骤条。`need_slider` 时后端已把帮助页挂出来，这里弹窗给人拖；
-   * `pending`/`sending_sms` 若上一状态是滑块，说明滑块已通过，直接进等验证码那一步。
-   */
   function applyTask(task) {
     if (!task || !task.task_id) return;
     taskId = task.task_id;
@@ -229,9 +219,11 @@ export async function renderLogin(root) {
     lastStatus = st;
 
     if (st === "need_slider") {
+      // 第二步：人机验证。后端已把帮助页挂出来，这里弹窗给人拖。
       goStep(2);
       if (!sliderModal) openSlider(task);
     } else if (st === "need_code") {
+      // 第三步：验证码已发出，等输入 + 点「登录」。
       closeSlider();
       goStep(3);
       $("code-hint").textContent = task.error
@@ -241,6 +233,7 @@ export async function renderLogin(root) {
       closeSlider();
       goStep(3);
     } else if (st === "pending" || st === "sending_sms") {
+      // 滑块刚通过 → 关掉弹窗、进入等验证码那一步；否则保持在滑块那一步。
       if (prev === "need_slider") {
         closeSlider();
         goStep(3);
@@ -284,6 +277,7 @@ export async function renderLogin(root) {
       const task = await api.post("/api/auth/sms", { phone, dial_code: $("dial").value.trim() || "86" });
       taskId = task.task_id;
       lastStatus = null;
+      // 点「发送验证码」先进滑块那一步；命中人机验证时后端会把弹窗挂出来。
       goStep(2);
       applyTask(task);
       clearInterval(pollTimer);
@@ -332,6 +326,7 @@ export async function renderLogin(root) {
 
   refreshSession();
 
+  // 若已有进行中的任务：整页刷新时视为放弃，清掉残留；页内切回时接上。
   try {
     const st = await api.get("/api/auth/status");
     const running = st.task && !["done", "error", "cancelled"].includes(st.task.status);

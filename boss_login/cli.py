@@ -219,6 +219,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
 
+# --------------------------------------------------------------------------- #
+# 子命令
+# --------------------------------------------------------------------------- #
 
 
 def _cmd_login(args: argparse.Namespace, client: Any) -> int:
@@ -275,8 +278,8 @@ def _cmd_login(args: argparse.Namespace, client: Any) -> int:
     if result.is_new_user:
         print("  说明：该手机号首次验证，已自动完成注册")
     print(f"  token：{_short(result.token) if result.token else '（以 Cookie 鉴权）'}")
-    # 真实站点登录响应体里没有 token，鉴权靠 Set-Cookie；名字可能不在已知名单里。
-    # 打出这次实际种下的 Cookie 名，好据此补 AUTH_COOKIES。
+    # 真实站点的登录响应体里没有 token，鉴权靠 Set-Cookie；名字可能不在
+    # 已知名单里。把这次实际拿到的 Cookie 名打出来，好据此补 AUTH_COOKIES。
     if result.new_cookies:
         print(f"  本次登录种下的 Cookie：{sorted(result.new_cookies)}")
     elif result.cookies:
@@ -368,6 +371,9 @@ def _cmd_probe(args: argparse.Namespace, client: Any) -> int:
     return EXIT_OK
 
 
+# --------------------------------------------------------------------------- #
+# 辅助
+# --------------------------------------------------------------------------- #
 
 
 def _prompt_code() -> str | None:

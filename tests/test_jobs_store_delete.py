@@ -80,7 +80,7 @@ def test_clear_jobs_with_condition(store: JobStore):
 
 
 def test_clear_jobs_all(store: JobStore):
-    """清职位不动抓取流水。"""
     assert store.clear_jobs() == 3
     assert store.count_jobs() == 0
+    # 抓取流水保留
     assert store.count_pages() == 1

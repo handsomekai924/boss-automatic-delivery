@@ -1,7 +1,12 @@
-"""接通三件事的端到端脚本：JobSearchFilter → fetch_search_page → 会话带 ``__zp_stoken__``。
+"""接通三件事的端到端脚本：JobSearchFilter → fetch_search_page → 会话带 __zp_stoken__。
 
-跑一遍真实站点的搜索流水线（会话 → ``__zp_stoken__`` → 筛选条件 →
-JobSearchFilter → fetch_search_page），并把每一段的耗时打出来。
+跑一遍真实站点的搜索流水线，并把每一段的耗时打出来：
+
+    1. 装配会话（状态库 data/boss.db 的 doc('session')）
+    2. **全自动**获取 ``__zp_stoken__``（拉 Chrome，CDP，让站点自己算一枚并落盘）
+    3. 拿筛选条件（boss_filter.get_filter_conditions）
+    4. 装配 JobSearchFilter（**库里的条件** → 查询串）
+    5. fetch_search_page 抓一页搜索结果并清洗
 
 筛选条件默认读状态库里那份（没有就留空 = 全部「不限」）；``--filter my.json``
 可指定一份 JSON（只读，不写库），命令行其余参数只做覆盖。
@@ -148,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     timer = Timer()
     summary: dict[str, object] = {}
 
+    # 1. 会话装配
     client = create_client(
         page_interval=args.interval,
         stoken=args.stoken or None,
@@ -155,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     session_span = timer.mark("会话装配 状态库 doc('session')")
 
+    # 2. __zp_stoken__ 全自动获取
     stoken_len = 0
     stoken_note = "跳过"
     if args.skip_stoken:
@@ -188,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     stoken_value = client._http.cookies.get(STOKEN_COOKIE) or ""
     stoken_len = stoken_len or len(stoken_value)
 
-    # 筛选条件是代码里的 7 类可选值表，跟用户配置无关
+    # 3. 筛选条件（代码里的 7 类可选值表，跟用户配置无关）
     try:
         conditions = get_filter_conditions()
     except Exception as exc:  # noqa: BLE001 - 兜底表救回来
@@ -196,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         conditions = get_filter_conditions(html_path=str(ROOT / ".saved_web" / "求职_找工作_招聘信息-BOSS直聘.html"))
     filter_span = timer.mark("拿筛选条件 get_filter_conditions")
 
+    # 4. JobSearchFilter 装配：库里的条件打底 + 命令行覆盖
     if args.filter:
         base = search_filter_from_file(args.filter)
         filter_file = args.filter
@@ -224,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{STOKEN_COOKIE}：{stoken_note}（长度 {stoken_len or '（缺）'}）")
     print()
 
+    # 5. fetch_search_page
     jobs_total = 0
     pages_done = 0
     stopped = ""

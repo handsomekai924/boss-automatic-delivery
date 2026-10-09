@@ -15,11 +15,8 @@
 
 const fs = require("fs");
 
-/**
- * 塞一个够用的浏览器外壳——ABC.z 会做环境指纹（canvas / plugins /
- * screen / localStorage 等），缺了它生成的 token 服务端不认。
- * canvas 的 getImageData 挡掉指纹读回，返回一张稳定的假图。
- */
+/** 塞一个够用的浏览器外壳——ABC.z 会做环境指纹（canvas / plugins /
+ *  screen / localStorage 等），缺了它生成的 token 服务端不认。 */
 function installDom() {
   const nav = {
     userAgent:
@@ -117,6 +114,7 @@ function installDom() {
       return { addColorStop() {} };
     },
     getImageData(x, y, w, h) {
+      // 挡掉 canvas 指纹读回；返回一张稳定的假图
       const data = new Uint8ClampedArray(Math.max(1, w * h * 4));
       for (let i = 0; i < data.length; i++) data[i] = (i * 37) % 256;
       return { data, width: w, height: h };
@@ -375,7 +373,6 @@ function installDom() {
   global.Option = class Option {};
 }
 
-/** 跑 security-js，把 token 打到 stdout。`getTimezoneOffset()` 是「UTC 比本地慢多少分钟」（北京 = -480） */
 function main() {
   const [, , scriptPath, seed, tsStr, tzStr] = process.argv;
   if (!scriptPath || seed === undefined || tsStr === undefined) {
@@ -397,6 +394,7 @@ function main() {
     process.stderr.write("ts 不是数字: " + tsStr + "\n");
     process.exit(2);
   }
+  // 浏览器里 getTimezoneOffset() = UTC 比本地慢多少分钟（北京 = -480）
   const tz =
     tzStr === undefined || tzStr === ""
       ? new Date().getTimezoneOffset()

@@ -30,6 +30,9 @@ from typing import Any, Iterable
 from . import config as C
 
 
+# --------------------------------------------------------------------------- #
+# 文本清洗小工具
+# --------------------------------------------------------------------------- #
 
 _WS_RE = re.compile(r"\s+")
 
@@ -112,33 +115,35 @@ def clean_desc(value: Any) -> str:
     return text.strip()
 
 
+# --------------------------------------------------------------------------- #
+# 职位
+# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
 class Job:
     """一条清洗后的职位。字段顺序对应 todo.md 第四节的 8 项。"""
 
-    job_name: str
-    brand_name: str
-    #: 工作地点，三段拼好的「广州·天河区·棠下」
-    location: str
-    salary_desc: str
-    job_experience: str
-    job_degree: str
-    brand_industry: str
-    brand_scale_name: str
+    # ---- todo.md 列出的 8 项 ----
+    job_name: str                 # 岗位名称
+    brand_name: str               # 公司名称
+    location: str                 # 工作地点（三段拼好的）
+    salary_desc: str              # 薪资待遇
+    job_experience: str           # 工作经验要求
+    job_degree: str               # 学历要求
+    brand_industry: str           # 公司行业
+    brand_scale_name: str         # 公司规模
 
-    #: 职位加密 id，全站唯一，入库主键
-    encrypt_job_id: str
-    #: 原始 item，清洗前后可对照
-    raw_json: str = ""
+    # ---- 主键与追溯 ----
+    encrypt_job_id: str           # 职位加密 id，全站唯一，入库主键
+    raw_json: str = ""            # 原始 item，清洗前后可对照
 
-    #: 地点分量在拼好之外另存，方便按区筛
+    # ---- 地点分量（拼好之外另存，方便按区筛）----
     city_name: str = ""
     area_district: str = ""
     business_district: str = ""
 
-    #: 接口顺带回的、todo.md 没列但先收下的字段
+    # ---- 接口顺带回的，todo.md 没列但先收下 ----
     brand_stage_name: str = ""
     job_labels: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
@@ -267,6 +272,9 @@ class PageResult:
         return not self.jobs
 
 
+# --------------------------------------------------------------------------- #
+# 页级清洗
+# --------------------------------------------------------------------------- #
 
 
 def clean_page(payload: dict[str, Any], *, page: int) -> PageResult:
@@ -332,9 +340,9 @@ def clean_pages(pages: Iterable[dict[str, Any]]) -> tuple[Job, ...]:
 def extract_job_desc(payload: dict[str, Any]) -> str:
     """从详情响应里抠出 JD 正文并清洗。
 
-    正文在 ``zpData.jobInfo.postDescription``，纯文本（带 ``\\n``），不是 HTML；
-    顶层 ``zpData.postDescription`` 没有这格。按这条路径优先，再兜几个同义位置，
-    万一以后包一层也不用改。
+    **实测**（2026-10-08）：正文在 ``zpData.jobInfo.postDescription``，
+    纯文本（带 ``\\n``），不是 HTML。顶层 ``zpData.postDescription`` 没有这格。
+    这里按实测路径优先，再兜几个同义位置，万一以后包一层也不用改。
     """
     data = payload.get("zpData")
     if data is None:
@@ -354,6 +362,9 @@ def extract_job_desc(payload: dict[str, Any]) -> str:
     return ""
 
 
+# --------------------------------------------------------------------------- #
+# 小工具
+# --------------------------------------------------------------------------- #
 
 
 def _as_str(value: Any) -> str:

@@ -57,7 +57,6 @@ def test_mask_key():
 
 
 def test_save_load_roundtrip(tmp_path):
-    """温度 / max_tokens / 超时是系统常量，存进去的 0.3 等值会被拉回。"""
     p = tmp_path / "boss.db"
     cfg = LLMConfig(api_key="sk-secret", base_url="https://x/v1", model="m1", temperature=0.3)
     save_config(cfg, p)
@@ -67,6 +66,7 @@ def test_save_load_roundtrip(tmp_path):
     assert loaded.configured
     assert loaded.masked()["api_key"] == "sk-***cret"
     assert loaded.masked()["has_key"] is True
+    # 采样参数被拉回系统常量，0.3 存不进去
     assert loaded.temperature == C.LLM_TEMPERATURE
     assert loaded.max_tokens == C.LLM_MAX_TOKENS
     assert loaded.timeout == C.LLM_TIMEOUT
@@ -81,7 +81,7 @@ def test_update_keeps_old_key(tmp_path):
 
 
 def test_update_ignores_sampling_params(tmp_path):
-    """温度 / max_tokens / 超时是系统固定值，传进来也要被丢掉；落库同样写常量。"""
+    """温度 / max_tokens / 超时是系统固定值，传进来也要被丢掉。"""
     p = tmp_path / "boss.db"
     save_config(LLMConfig(api_key="sk-a", model="m1"), p)
     cfg = update_config(
@@ -97,6 +97,7 @@ def test_update_ignores_sampling_params(tmp_path):
     assert cfg.temperature == C.LLM_TEMPERATURE
     assert cfg.max_tokens == C.LLM_MAX_TOKENS
     assert cfg.timeout == C.LLM_TIMEOUT
+    # 落库的也是常量
     raw = boss_db.doc_get(boss_db.DOC_LLM_CONFIG, p)
     assert raw["temperature"] == C.LLM_TEMPERATURE
     assert raw["max_tokens"] == C.LLM_MAX_TOKENS
@@ -143,6 +144,7 @@ def test_chat_posts_to_completions():
     assert kwargs["headers"]["Authorization"] == "Bearer sk-1"
     body = json.loads(kwargs["data"].decode("utf-8"))
     assert body["model"] == "m1"
+    # 采样参数来自系统常量
     assert body["temperature"] == C.LLM_TEMPERATURE
     assert body["max_tokens"] == C.LLM_MAX_TOKENS
 

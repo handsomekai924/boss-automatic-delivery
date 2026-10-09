@@ -26,7 +26,7 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = ""
-    # 以下三项系统固定，构造时被 normalize() 拉齐到常量
+    # 下面三项是系统固定值，构造时会被 normalize() 拉齐到常量
     temperature: float = C.LLM_TEMPERATURE
     max_tokens: int = C.LLM_MAX_TOKENS
     timeout: float = C.LLM_TIMEOUT
@@ -104,12 +104,16 @@ def save_config(cfg: LLMConfig, path: Path | str | None = None) -> Path:
     return resolved
 
 
-#: 用户可改的字段；其余一律忽略（采样参数即使传进来也会被丢掉）
+#: 用户可改的字段；其余一律忽略
 _UPDATABLE = ("api_key", "base_url", "model")
 
 
 def update_config(payload: dict[str, Any], path: Path | str | None = None) -> LLMConfig:
-    """合并更新可配置项：api_key 留空则保留旧值。采样参数以系统常量为准。"""
+    """合并更新可配置项：api_key 留空则保留旧值。
+
+    ``temperature`` / ``max_tokens`` / ``timeout`` 即使传进来也会被丢掉，
+    采样参数由系统常量说了算。
+    """
     current = load_config(path)
     data = current.to_dict()
     for key in _UPDATABLE:

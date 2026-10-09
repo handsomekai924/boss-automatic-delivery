@@ -1,8 +1,16 @@
-"""兜底来源：写死的选项表（:mod:`boss_filter.tables`）+ 解析已保存 HTML。
+"""兜底来源：写死的选项表 + 解析已保存 HTML。
 
-:func:`parse_html_conditions` 从 ``.saved_web`` 页面现场再解析一遍，用来校对
-写死表或在接口挂掉时凑一份。公司行业**只有** HTML 这一个来源（见
-:mod:`boss_filter.config`）。
+todo.md 第二节的说明：
+
+    以上筛选项应优先通过 BOSS 直聘接口获取。如果接口不可用，也可以基于我提供
+    的已保存 HTML 静态文件进行分析提取，并将可选值直接写死在项目中作为兜底方案。
+
+所以这里两件事：
+  1. :data:`boss_filter.tables` 里那套写死表（从线上接口 / 已存 HTML 抄下来的）；
+  2. :func:`parse_html_conditions` —— 现场从 ``.saved_web`` 那份页面再解析一遍，
+     用来校对写死表有没有过期，或在接口挂掉时现场凑一份。
+
+公司行业**只有** HTML 这一个来源：接口侧没有下发这张表（见 config 模块的说明）。
 """
 
 from __future__ import annotations
@@ -26,6 +34,9 @@ from .models import (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 写死表 → FilterConditions
+# --------------------------------------------------------------------------- #
 
 
 def build_fallback_conditions() -> FilterConditions:
@@ -57,6 +68,9 @@ def _industry_groups_from_tables() -> tuple[IndustryGroup, ...]:
     )
 
 
+# --------------------------------------------------------------------------- #
+# HTML 解析
+# --------------------------------------------------------------------------- #
 
 
 def parse_html_conditions(html: str) -> FilterConditions:
@@ -99,11 +113,12 @@ def parse_html_industries(html: str) -> tuple[IndustryGroup, ...]:
     """只解析行业下拉：分组名取 ``<span class="label">``，组内取 ``ka="sel-industry-N"``。
 
     分组边界按标签切分，不依赖 ``</li>`` 的具体嵌套——存盘页和裁剪片段的
-    收尾标签不一定一致。行业块终点取筛选条收尾（清空按钮），比配嵌套 div 稳。
+    收尾标签不一定一致。
     """
     idx = html.find(HTML_INDUSTRY_MARKER)
     if idx < 0:
         return ()
+    # 行业块的终点是筛选条收尾（清空按钮）——比配一堆嵌套 div 稳。
     end = html.find('ka="empty-filter"', idx)
     block = html[idx:] if end < 0 else html[idx:end]
 

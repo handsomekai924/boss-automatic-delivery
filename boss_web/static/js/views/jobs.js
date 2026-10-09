@@ -3,10 +3,6 @@
 import { api } from "../api.js";
 import { toast, modal, escapeHtml, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
 
-/**
- * 职位舱。补抓 JD 不传 `interval` = 服务端默认 1s（防风控）；上一轮补抓结果
- * 也会渲染出来，方便接着看。
- */
 export async function renderJobs(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -137,6 +133,7 @@ export async function renderJobs(root) {
   let pollTimer = null;
   let crawlTaskId = null;
 
+  // 统一长任务面板：抓取 + 补抓 JD
   const crawlPanel = taskPanel({ title: "抓取任务", stopLabel: "停止抓取" });
   $("crawl-task").appendChild(crawlPanel.el);
   crawlPanel.onStop(async () => {
@@ -162,6 +159,7 @@ export async function renderJobs(root) {
     }
   });
 
+  // ---------- 筛选 ----------
   /** @type {{code:string,name:string,children?:any[]}|null} */
   let cityTree = [];
   let hotCities = [];
@@ -189,7 +187,6 @@ export async function renderJobs(root) {
     return null;
   }
 
-  /** 筛选条件的省/市/区级联。选到叶子（没有下级）自动收起；回填时把高亮滚进可视区；直辖市常见「北京 / 北京」，同名只留一层 */
   function renderCityCascader() {
     const cols = [$("city-col-0"), $("city-col-1"), $("city-col-2")];
     const levels = [
@@ -229,9 +226,11 @@ export async function renderJobs(root) {
           cityPath = [...cityPath.slice(0, level), node];
           renderCityCascader();
           updateFilterSummary();
+          // 选到叶子（没有下级）就算选完，自动收起；省/市还得继续往下钻
           if (!(node.children || []).length) setCityOpen(false);
         });
       });
+      // 回填已选项时滚进可视区，别让高亮落在折下
       const picked = col.querySelector(".cascader-item.picked");
       if (picked) picked.scrollIntoView({ block: "nearest" });
     });
@@ -240,6 +239,7 @@ export async function renderJobs(root) {
     if (!cityPath.length) {
       pathEl.textContent = "未选择 = 站点当前城市";
     } else {
+      // 直辖市常见「北京 / 北京」，同名只留一层
       const names = [];
       for (const n of cityPath) {
         if (!names.length || names[names.length - 1] !== n.name) names.push(n.name);
@@ -260,7 +260,6 @@ export async function renderJobs(root) {
         .join("");
   }
 
-  /** 热点城市可能不在省→市树里（如直辖市拍平），点中后直接构造单节点路径 */
   function renderHotCities() {
     $("city-hot").innerHTML = hotCities
       .map((c) => `<span class="pill" data-code="${escapeHtml(c.code)}" data-name="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>`)
@@ -269,6 +268,7 @@ export async function renderJobs(root) {
       p.addEventListener("click", () => {
         const code = p.dataset.code;
         const byCode = findCityPath(cityTree, code) || findCityByName(cityTree, p.dataset.name);
+        // 热点城市可能不在省→市树里（如直辖市拍平），直接构造单节点路径
         cityPath = byCode || [{ code, name: p.dataset.name, children: [] }];
         renderCityCascader();
         updateFilterSummary();
@@ -348,6 +348,7 @@ export async function renderJobs(root) {
   $("f-query").addEventListener("input", updateFilterSummary);
   $("f-salary").addEventListener("change", updateFilterSummary);
 
+  // 城市级联平时只占一行，点击触发按钮才弹出浮层
   const cityField = $("city-field");
   const cityTrigger = $("city-trigger");
   const cityPop = $("city-pop");
@@ -378,7 +379,6 @@ export async function renderJobs(root) {
     setCityOpen(false);
   });
 
-  /** 渲染经验/学历/规模的多选 pill。多选暂存在 DOM 的 `.on` 上，保存时才写进 filter */
   function renderPills(cond) {
     const groups = [
       ["experience", "经验", cond.experience],
@@ -396,6 +396,7 @@ export async function renderJobs(root) {
       })
       .join("") + (cond.source && cond.source !== "api" ? `<div class="banner warn">当前选项来自离线兜底（source=${escapeHtml(cond.source)}）</div>` : "");
 
+    // 多选暂存在 data，保存时写进 filter
     $("filter-pills").querySelectorAll(".pill").forEach((p) => {
       p.addEventListener("click", () => {
         p.classList.toggle("on");
@@ -445,6 +446,7 @@ export async function renderJobs(root) {
     }
   });
 
+  // ---------- 抓取 ----------
   $("use-search").addEventListener("click", (e) => {
     const pill = e.currentTarget;
     const cb = pill.querySelector("input");
@@ -526,6 +528,7 @@ export async function renderJobs(root) {
     }, 1000);
   }
 
+  // ---------- 职位列表 ----------
   async function loadJobs() {
     const keyword = $("q").value.trim();
     const city = $("city-f").value.trim();
@@ -686,9 +689,9 @@ export async function renderJobs(root) {
     }
   });
 
+  // ---------- 手动补抓 JD ----------
   let descPollTimer = null;
 
-  /** 渲染补抓 JD 的进度面板。撞安全网关停批时，从 `stopped` 事件里捞出原因展示 */
   function renderDesc(s) {
     const p = s.progress || {};
     const total = p.total || 0;
@@ -701,6 +704,7 @@ export async function renderJobs(root) {
     $("btn-fetch-desc").disabled = running;
     $("btn-fetch-desc").textContent = running ? `补抓 ${done}/${total}` : "补抓描述";
 
+    // 撞安全网关停批时，从事件里捞出原因展示
     const stopEvent = (s.events || []).find((e) => e.event === "stopped");
     const eta = running ? fmtEta((total - done) * (interval + 0.6)) : undefined;
 
@@ -759,7 +763,8 @@ export async function renderJobs(root) {
     if (descPollTimer) return toast("补抓任务已在跑", "warn");
     try {
       // interval 不传 = 服务端默认 1s（防风控）
-      const task = await api.post("/api/jobs/fetch-descriptions", { limit: 0 });      toast(`补抓已启动（${task.progress?.total ?? "?"} 条）`, "ok");
+      const task = await api.post("/api/jobs/fetch-descriptions", { limit: 0 });
+      toast(`补抓已启动（${task.progress?.total ?? "?"} 条）`, "ok");
       renderDesc(task);
       startDescPoll();
     } catch (err) {
@@ -785,6 +790,7 @@ export async function renderJobs(root) {
   await loadFilter();
   await loadJobs();
 
+  // 恢复进行中的抓取
   try {
     const s = await api.get("/api/crawl/status");
     if (s.task_id && s.status === "running") {
@@ -795,13 +801,14 @@ export async function renderJobs(root) {
     }
   } catch { /* ignore */ }
 
+  // 恢复进行中的补抓
   try {
     const s = await api.get("/api/jobs/fetch-descriptions/status");
     if (s.task_id && s.status === "running") {
       renderDesc(s);
       startDescPoll();
     } else if (s.task_id) {
-      renderDesc(s);
+      renderDesc(s); // 上一轮结果留着看
     }
   } catch { /* ignore */ }
 

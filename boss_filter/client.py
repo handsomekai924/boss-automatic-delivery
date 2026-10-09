@@ -65,9 +65,12 @@ class FilterClient:
         merged = {**C.DEFAULT_HEADERS, **(headers or {})}
         if hasattr(self._http, "headers"):
             self._http.headers.update(merged)
-        else:  # 简易假会话无 headers：退化成每次请求都带
+        else:  # 简易假会话：退化成每次请求都带
             self._default_headers = merged
 
+    # ------------------------------------------------------------------ #
+    # 对外入口
+    # ------------------------------------------------------------------ #
 
     def get_filter_conditions(self, *, use_fallback: bool = True) -> FilterConditions:
         """拿齐 todo.md 列的 7 类筛选条件。
@@ -174,6 +177,9 @@ class FilterClient:
         payload = self._get_json(self.endpoints["default_city"], action="默认城市接口")
         return _zpdata(payload).get("city") or {}
 
+    # ------------------------------------------------------------------ #
+    # 传输层
+    # ------------------------------------------------------------------ #
 
     def _get_json(self, path: str, *, action: str = "") -> dict[str, Any]:
         url = self.base_url + path
@@ -222,12 +228,15 @@ class FilterClient:
         raise last_error or FilterTransportError(f"{action or path} 请求失败")
 
 
+# --------------------------------------------------------------------------- #
+# 响应解析
+# --------------------------------------------------------------------------- #
 
 
 def parse_conditions_payload(payload: Mapping[str, Any]) -> dict[str, tuple]:
     """把 ``conditions.json`` 的 ``zpData`` 映射成模型字段。
 
-    线上形状::
+    线上形状（2026-09-30 实测）::
 
         zpData: {jobTypeList, salaryList, experienceList, degreeList,
                  scaleList, payTypeList, stageList, partTimeList}
@@ -281,6 +290,9 @@ def get_filter_conditions(
     return client.get_filter_conditions(use_fallback=use_fallback)
 
 
+# --------------------------------------------------------------------------- #
+# 小工具
+# --------------------------------------------------------------------------- #
 
 
 def _zpdata(payload: Mapping[str, Any]) -> dict[str, Any]:

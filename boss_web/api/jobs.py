@@ -26,9 +26,9 @@ class ClearBody(BaseModel):
 
 
 class FetchDescBody(BaseModel):
-    #: 最多补几条；0 = 全部没描述的
+    #: 本次最多补几条；0 = 全部没描述的
     limit: int = Field(0, ge=0, le=5000)
-    #: 条间隔（秒）；0/不传 = 默认 ``DETAIL_INTERVAL``，防风控
+    #: 条间隔（秒）。0/不传 = 服务端默认 ``DETAIL_INTERVAL``（1s），防风控。
     interval: float = Field(0.0, ge=0.0, le=30.0)
 
 
@@ -52,14 +52,11 @@ def list_jobs(
 
 @router.get("/stats")
 def stats() -> dict[str, Any]:
-    """库摘要 + 最近翻页流水。
-
-    ``list_pages`` 回表原始列名（``inserted_count``），流水事件用 ``inserted``；
-    这里统一成事件键名，前端一套字段吃两种来源。
-    """
     with JobStore() as store:
         summary = store.summary()
         summary["missing_desc"] = store.count_jobs_missing_desc()
+        # list_pages 回的是表原始列名（inserted_count），流水事件用的是 inserted
+        # ——这里统一成事件的键名，前端一套字段吃两种来源。
         pages_log = []
         for row in store.list_pages(limit=20):
             item = dict(row)
@@ -70,12 +67,12 @@ def stats() -> dict[str, Any]:
     return summary
 
 
+# ---- 手动补抓 JD：必须排在 /{encrypt_job_id} 之前，免得被动态路由吃掉 ----
+
+
 @router.post("/fetch-descriptions")
 def fetch_descriptions(body: FetchDescBody | None = None) -> dict[str, Any]:
-    """``POST /fetch-descriptions``：对 ``detail_fetched_at = ''`` 的职位批量补 JD（后台任务）。
-
-    注册顺序要排在 ``/{encrypt_job_id}`` 之前，否则被动态路由吃掉。
-    """
+    """对 ``detail_fetched_at = ''`` 的职位批量补 JD（后台任务）。"""
     limit = (body.limit if body else 0) or 0
     interval = (body.interval if body else 0.0) or None
     task = desc_tasks.start(limit=limit, interval=interval)

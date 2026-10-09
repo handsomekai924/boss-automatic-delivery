@@ -53,13 +53,10 @@ class FakeGreetClient:
 
 @pytest.fixture
 def client():
-    # 状态库由 conftest 的 isolated_db 统一指到 tmp_path
+    """状态库由 ``isolated_db`` 统一指到 ``tmp_path``，这里只起 app。"""
     return TestClient(create_app())
 
 
-# --------------------------------------------------------------------------- #
-# 存取层
-# --------------------------------------------------------------------------- #
 
 
 def test_default_is_70(tmp_path):
@@ -99,16 +96,13 @@ def test_corrupt_payload_falls_back(tmp_path):
 
 
 def test_update_config_persists(tmp_path):
+    """写得进、读得出；传 ``None`` = 不改原值。"""
     p = tmp_path / "boss.db"
     assert update_config({"min_score": 60}, p).min_score == 60
     assert load_config(p).min_score == 60
-    # 传 None = 不改
     assert update_config({"min_score": None}, p).min_score == 60
 
 
-# --------------------------------------------------------------------------- #
-# 接口层
-# --------------------------------------------------------------------------- #
 
 
 def test_api_get_default(client: TestClient):
@@ -126,15 +120,12 @@ def test_api_put_roundtrip(client: TestClient):
 
 @pytest.mark.parametrize("bad", [150, -1])
 def test_api_put_rejects_out_of_range(client: TestClient, bad: int):
+    """越界直接 422，坏值写不进去，读出来仍是默认分。"""
     r = client.put("/api/deliver/config", json={"min_score": bad})
     assert r.status_code == 422
-    # 坏的写不进去，还是默认值
     assert client.get("/api/deliver/config").json()["min_score"] == C.DEFAULT_DELIVER_MIN_SCORE
 
 
-# --------------------------------------------------------------------------- #
-# 发送任务（DeliverTaskManager）
-# --------------------------------------------------------------------------- #
 
 
 def _match(jid: str, **overrides) -> dict:
@@ -190,14 +181,16 @@ def _match_of(analysis_id: str, jid: str) -> dict:
 
 
 def test_deliver_happy_path_sends_and_writes_back():
-    """正常：逐条发完 → 任务 done，结果写回 payload（status ok + delivered_at）。"""
+    """正常：逐条发完 → 任务 done，结果写回 payload（status ok + delivered_at）。
+
+    打招呼用 payload 里的 securityId / lid（库里没有这条职位时的兜底）。
+    """
     client = FakeGreetClient()
     snap, aid = _run_deliver([_match("j1"), _match("j2")], ["j1", "j2"], client)
 
     assert snap["status"] == "done"
     assert (snap["total"], snap["done"], snap["ok"], snap["failed"]) == (2, 2, 2, 0)
     assert [c["encrypt_job_id"] for c in client.calls] == ["j1", "j2"]
-    # 打招呼用的是 payload 里的 securityId / lid（库里没有这条职位时的兜底）
     assert client.calls[0]["security_id"] == "sec-j1"
     assert client.calls[0]["lid"] == "L1"
     assert client.calls[0]["greeting"] == "你好，我对 j1 很感兴趣"
@@ -219,7 +212,6 @@ def test_deliver_skips_already_delivered():
     assert (snap["total"], snap["ok"]) == (1, 1)
     assert [c["encrypt_job_id"] for c in client.calls] == ["j2"]
     assert [i["status"] for i in snap["items"] if i["encrypt_job_id"] == "j1"] == ["skipped"]
-    # 老时间戳原样留着，没被覆盖
     assert _match_of(aid, "j1")["delivered_at"] == 123.0
 
 
@@ -233,18 +225,17 @@ def test_deliver_all_skipped_is_done_not_error():
 
 
 def test_deliver_code36_stops_whole_batch():
-    """code 36（账号异常）→ 立刻停整批，后面的不再发，等人工处理。"""
+    """code 36（账号异常）→ 立刻停整批，后面的不再发，等人工处理；j3 从头到尾不被碰。"""
     client = FakeGreetClient([None, JobApiError(36, "您的账户存在异常行为")])
     matches = [_match("j1"), _match("j2"), _match("j3")]
     snap, aid = _run_deliver(matches, ["j1", "j2", "j3"], client)
 
     assert snap["status"] == "error"
     assert "账号异常" in snap["error"]
-    assert [c["encrypt_job_id"] for c in client.calls] == ["j1", "j2"]  # j3 没发
+    assert [c["encrypt_job_id"] for c in client.calls] == ["j1", "j2"]
     assert (snap["ok"], snap["failed"]) == (1, 1)
     assert _match_of(aid, "j2")["deliver_status"] == "failed"
     assert "账号异常" in _match_of(aid, "j2")["deliver_error"]
-    # j3 从头到尾没被碰过
     assert "deliver_status" not in _match_of(aid, "j3")
 
 
@@ -255,6 +246,65 @@ def test_deliver_session_expired_stops_batch():
     assert snap["status"] == "error"
     assert "登录" in snap["error"]
     assert len(client.calls) == 1
+
+
+def _chat_remind_exc(content: str) -> JobApiError:
+    """按真实弹窗结构造一个「开聊提醒」异常，让 ``is_chat_remind`` 靠结构认出来。"""
+    from boss_jobs.errors import format_api_message
+
+    raw = {
+        "code": 1,
+        "message": "开聊提醒",
+        "zpData": {
+            "bizData": {
+                "chatRemindDialog": {
+                    "title": "温馨提示",
+                    "content": content,
+                    "remindType": 524288,
+                    "blockLevel": 0,
+                }
+            }
+        },
+    }
+    return JobApiError(1, format_api_message(raw), raw=raw)
+
+
+def test_deliver_chat_remind_continues_batch_without_login_hint():
+    """「开聊提醒」是**提示弹窗**，不是停批信号；更别叫人去重新登录。
+
+    实测（2026-10-09）：``friend/add.json`` 回 code 1 + chatRemindDialog，
+    话术是「您今天已与120位BOSS沟通，还剩30次沟通机会哦」——那 30 是**还能再
+    发的次数**。以前 code 1 被一律当登录态失效，界面提示「请先到登录页重新
+    登录」；后来又改成整批停手，剩下的 30 次白白浪费。
+
+    ``JobClient.greet`` 里已经做过「模拟点击确认」（cid=1）；确认完还被拦
+    （这条用例）只记这一条，**继续发剩下的**。
+    """
+    exc = _chat_remind_exc("您今天已与120位BOSS沟通，还剩30次沟通机会哦")
+    client = FakeGreetClient([exc, None])
+    snap, aid = _run_deliver([_match("j1"), _match("j2")], ["j1", "j2"], client)
+
+    assert snap["status"] == "done"
+    assert snap["error"] is None
+    assert (snap["ok"], snap["failed"]) == (1, 1)
+    assert len(client.calls) == 2
+    assert "还剩30次沟通机会" in _match_of(aid, "j1")["deliver_error"]
+    assert "重新登录" not in _match_of(aid, "j1")["deliver_error"]
+    assert _match_of(aid, "j2")["deliver_status"] == "ok"
+
+
+def test_deliver_chat_remind_remaining_zero_stops_batch():
+    """话术明说「还剩 0 次」= 今天的量真见底了，停批（但仍不是登录失效）。"""
+    exc = _chat_remind_exc("您今天已与150位BOSS沟通，还剩0次沟通机会哦")
+    client = FakeGreetClient([exc])
+    snap, aid = _run_deliver([_match("j1"), _match("j2")], ["j1", "j2"], client)
+
+    assert snap["status"] == "error"
+    assert "沟通配额" in snap["error"]
+    assert "还剩0次沟通机会" in snap["error"]
+    assert "重新登录" not in snap["error"]
+    assert len(client.calls) == 1
+    assert "开聊提醒" in _match_of(aid, "j1")["deliver_error"]
 
 
 def test_deliver_single_failure_does_not_stop_batch():
@@ -373,13 +423,16 @@ def test_deliver_unknown_analysis_fails_task():
 
 
 def test_deliver_cancel_stops_between_items():
-    """取消：发完手上这条就停，状态置 cancelled；已发的不回滚。"""
+    """取消：发完手上这条就停，状态置 cancelled；已发的不回滚。
+
+    sleep 留出窗口，让测试在第一条发完前按下取消。
+    """
     started = threading.Event()
 
     class BlockingClient(FakeGreetClient):
         def deliver_greeting(self, **kwargs):
             started.set()
-            time.sleep(0.15)  # 让测试有机会在第一条发完前按下取消
+            time.sleep(0.15)
             return super().deliver_greeting(**kwargs)
 
     client = BlockingClient()
@@ -421,9 +474,6 @@ def test_deliver_refuses_second_task_while_running():
     assert _wait_task(mgr)["status"] == "done"
 
 
-# --------------------------------------------------------------------------- #
-# 接口层：发送任务
-# --------------------------------------------------------------------------- #
 
 
 @pytest.fixture

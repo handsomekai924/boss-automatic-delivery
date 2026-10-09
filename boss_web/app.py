@@ -37,8 +37,8 @@ def create_app() -> FastAPI:
 
         @app.middleware("http")
         async def _no_cache_static(request: Request, call_next):  # noqa: ANN202
-            """静态资源 / 壳页不走浏览器缓存——JS/CSS 是 ES module 依赖图，缓存过期会版本错配。"""
             response = await call_next(request)
+            # JS/CSS 是 ES module 依赖图的一部分，缓存过期会造成跨文件版本错配
             if request.url.path.startswith("/static/") or request.url.path == "/":
                 response.headers["Cache-Control"] = "no-cache, must-revalidate"
             return response
@@ -49,7 +49,7 @@ def create_app() -> FastAPI:
 
         @app.get("/{full_path:path}", include_in_schema=False)
         async def spa_fallback(full_path: str) -> FileResponse:  # noqa: ANN202
-            """前端 hash 路由：未命中路径都回壳页。"""
+            # 前端 hash 路由，任意未命中路径都回壳；真静态资源已在 /static 下
             candidate = static_dir / full_path
             if full_path and candidate.is_file():
                 return FileResponse(candidate)

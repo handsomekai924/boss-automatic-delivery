@@ -1,24 +1,8 @@
 """筛选条件相关接口地址、请求头等常量。
 
-⚠️ 关于接口地址的可信度
---------------------------------------------------------------------------------
-**已实测确认**（2026-09-30 直接打真实站点，Cookie 取自 ``boss_login`` 保存的
-登录会话；全部 200 + ``{"code":0,"message":"Success",…}``）：
-
-  GET /wapi/zpgeek/pc/all/filter/conditions.json   7 类筛选项 + 3 类辅助项
-  GET /wapi/zpgeek/pc/recommend/conditions.json    同上，但少了 stageList
-  GET /wapi/zpgeek/search/job/condition.json       搜索页那份；salary 无 low/high
-  GET /wapi/zpCommon/data/city.json                省→市→区树 + 热点城市 + 定位城市
-  GET /wapi/zpCommon/data/cityGroup.json           按拼音首字母分组的城市表
-  GET /wapi/zpgeek/search/job/hot/city.json        只有热点城市（15 项）
-  GET /wapi/zpgeek/common/data/defaultcity.json    默认城市（广州 101280100）
-  GET /wapi/zpgeek/businessDistrict.json?city=…    商圈（广州为空）
-
-路由来自按需 chunk ``static.zhipin.com/zhipin-geek-spa/web/v6748/`` 的
-``app~2.1a6c0514.js``（``(0,r.ZV)(path)`` 是 GET 工厂，不是猜的）。
-
-**公司行业没有接口**：职位页的行业下拉是 SSR 写进 HTML 的，chunk 里没有
-下发这张表的调用。行业数据只能走 HTML 解析 / 写死，见 :mod:`boss_filter.fallback`。
+主路径（``conditions`` / ``city`` / ``hot_city`` 等）是真实 wapi GET 接口。
+**公司行业没有接口**：行业下拉是 SSR 写进 HTML 的，只能走 HTML 解析 / 写死，
+见 :mod:`boss_filter.fallback`。
 """
 
 from __future__ import annotations
@@ -30,8 +14,7 @@ import boss_db
 
 BASE_URL: Final[str] = "https://www.zhipin.com"
 
-#: 职位推荐页（``/web/geek/jobs``，即 ``.saved_web`` 存的那页）的 Referer。
-#: 接口不校验它，但带上更像浏览器，也方便服务端定位城市。
+#: 职位推荐页（``/web/geek/jobs``）的 Referer。接口不校验，带上更像浏览器。
 GEEK_JOBS_REFERER: Final[str] = f"{BASE_URL}/web/geek/jobs"
 
 ENDPOINTS: Final[dict[str, str]] = {
@@ -80,9 +63,11 @@ DEFAULT_HEADERS: Final[dict[str, str]] = {
 #: 通用成功码（与 wapi 网关一致）
 CODE_OK: Final[int] = 0
 
-#: 业务码「未登录 / 登录态失效」。实测 ``/wapi/zpgeek/recommend/industry/query.json``
-#: 在 Cookie 过期时回 ``{"code":7,"message":"当前登录状态已失效"}``。
-CODE_SESSION_EXPIRED: Final[frozenset[int]] = frozenset({1, 7})
+#: 业务码「未登录 / 登录态失效」。**只有 7 是实测确认的**（Cookie 过期时回
+#: ``{"code":7,"message":"当前登录状态已失效"}``）。
+#: **code 1 是业务失败的通用码**，别一律当登录失效——判据见
+#: :attr:`boss_filter.errors.FilterApiError.is_session_expired`。
+CODE_SESSION_EXPIRED: Final[frozenset[int]] = frozenset({7})
 
 #: 默认超时（秒）
 DEFAULT_TIMEOUT: Final[float] = 10.0
@@ -90,23 +75,15 @@ DEFAULT_TIMEOUT: Final[float] = 10.0
 #: 默认重试次数（网络层/5xx）
 DEFAULT_RETRIES: Final[int] = 2
 
-# --------------------------------------------------------------------------- #
-# 兜底 HTML
-# --------------------------------------------------------------------------- #
 
-#: 已保存的职位页（浏览器「另存为」），行业下拉等筛选项的离线来源。
-#: 路径相对项目根目录；不存在时兜底表仍然可用（只是没法现场重解析）。
+#: 已保存的职位页 HTML（行业下拉等筛选项的离线来源）。路径相对项目根；
+#: 不存在时兜底表仍然可用（只是没法现场重解析）。
 DEFAULT_SAVED_HTML: Final[str] = (
     r".saved_web/求职_找工作_招聘信息-BOSS直聘.html"
 )
 
-#: HTML 里筛选下拉的定位标记，来自实存页面，不是猜的：
-#:   求职类型  <li ka="sel-job-rec-jobType-{code}">
-#:   薪资待遇  <li ka="sel-job-rec-salary-{code}">
-#:   工作经验  <li ka="sel-job-rec-exp-{code}">
-#:   学历要求  <li ka="sel-job-rec-degree-{code}">
-#:   公司规模  <li ka="sel-job-rec-scale-{code}">
-#:   公司行业  <a ka="sel-industry-{code}">，外面套 <span class="label">分组名
+#: HTML 筛选下拉的 ``ka="sel-job-rec-*-<code>"`` 标记 → (维度字段, 提取正则)。
+#: 行业是 ``ka="sel-industry-<code>"``，整块定位见 :data:`HTML_INDUSTRY_MARKER`。
 HTML_OPTION_PATTERNS: Final[dict[str, str]] = {
     "job_types": r'ka="sel-job-rec-jobType-(\d+)"[^>]*>\s*([^<]+?)\s*<i',
     "salaries": r'ka="sel-job-rec-salary-(\d+)"[^>]*>\s*([^<]+?)\s*<i',
@@ -118,15 +95,10 @@ HTML_OPTION_PATTERNS: Final[dict[str, str]] = {
 #: 行业下拉整块（含分组标签）的定位标记
 HTML_INDUSTRY_MARKER: Final[str] = "condition-industry-select"
 
-# --------------------------------------------------------------------------- #
-# 搜索条件的落盘位置
-# --------------------------------------------------------------------------- #
 
 #: 项目根目录（跟 cwd 无关）
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
-#: 状态库路径。用户的搜索条件存在库里 ``doc('search_filter')`` 那一行
-#: （见 :mod:`boss_db`）；环境变量 ``BOSS_DB`` 可覆盖。
-#: 用户点名的 JSON 文件（``--filter my.json``）不走这里，见
-#: :func:`boss_filter.search.search_filter_from_file`。
+#: 状态库路径（搜索条件在 ``doc('search_filter')``，见 :mod:`boss_db`）；``BOSS_DB`` 可覆盖。
+#: 用户点名的 JSON 文件不走这里，见 :func:`boss_filter.search.search_filter_from_file`。
 DEFAULT_DB_PATH: Final[Path] = boss_db.DEFAULT_DB_PATH

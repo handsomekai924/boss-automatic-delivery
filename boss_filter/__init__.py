@@ -1,7 +1,11 @@
-"""BOSS直聘职位筛选条件获取（城市 / 求职类型 / 薪资 / 经验 / 学历 / 行业 / 规模）。
+"""BOSS直聘职位筛选条件获取。
 
-优先打真实 wapi 接口，不可用时退回 :mod:`boss_filter.tables` 写死表。
-公司行业没有接口，永远用写死表（或解析已保存 HTML）。
+按 todo.md 第二节，拿齐 7 类筛选维度的**可选值**（供用户配置筛选条件用）：
+
+    城市 / 求职类型 / 薪资待遇 / 工作经验 / 学历要求 / 公司行业 / 公司规模
+
+优先打真实 wapi 接口，接口不可用时退回项目内写死表（数据来自线上接口与
+已保存的职位页 HTML）。公司行业没有接口，永远用写死表。
 
 >>> from boss_filter import get_filter_conditions
 >>> cond = get_filter_conditions()          # 打真实接口，挂了自动兜底
@@ -72,23 +76,28 @@ from .search import (
 __version__ = "0.1.0"
 
 __all__ = [
+    # 核心
     "FilterClient",
     "get_filter_conditions",
+    # 模型
     "CityNode",
     "FilterConditions",
     "FilterOption",
     "IndustryGroup",
     "JobSearchFilter",
     "ResolvedSearchFilter",
+    # 搜索条件（状态库 + 用户点名的 JSON）
     "filter_path",
     "load_search_filter",
     "save_search_filter",
     "search_filter_from_dict",
     "search_filter_from_file",
+    # 异常
     "FilterApiError",
     "FilterDataError",
     "FilterError",
     "FilterTransportError",
+    # 兜底 / HTML
     "build_fallback_conditions",
     "conditions_from_html",
     "load_industries",
@@ -96,9 +105,11 @@ __all__ = [
     "parse_conditions_payload",
     "parse_html_conditions",
     "parse_html_industries",
+    # 工具
     "normalize_code",
     "options_from_api",
     "options_from_rows",
+    # 常量
     "BASE_URL",
     "DEFAULT_DB_PATH",
     "DEFAULT_SAVED_HTML",

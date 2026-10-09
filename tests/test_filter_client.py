@@ -22,6 +22,9 @@ from boss_filter.errors import (
 from tools.mock_server import MOCK_CONDITIONS, MOCK_HOT_CITIES, FILTER_ROUTES
 
 
+# --------------------------------------------------------------------------- #
+# 假会话
+# --------------------------------------------------------------------------- #
 
 
 class FakeResponse:
@@ -117,6 +120,9 @@ def json_from_output(text: str) -> dict:
     return json.loads(text[start:])
 
 
+# --------------------------------------------------------------------------- #
+# 响应解析
+# --------------------------------------------------------------------------- #
 
 
 class TestParseConditionsPayload:
@@ -144,6 +150,9 @@ class TestParseConditionsPayload:
             parse_conditions_payload({"code": 0, "zpData": {"mystery": []}})
 
 
+# --------------------------------------------------------------------------- #
+# 客户端（假会话）
+# --------------------------------------------------------------------------- #
 
 
 class TestClientTransport:
@@ -299,6 +308,9 @@ class TestClientAssembly:
         assert seen[0].startswith("https://www.zhipin.com/wapi/zpgeek/pc/all/filter/conditions.json")
 
 
+# --------------------------------------------------------------------------- #
+# 集成（假服务端）
+# --------------------------------------------------------------------------- #
 
 
 class TestAgainstMockServer:
@@ -336,6 +348,9 @@ class TestAgainstMockServer:
         assert cond.job_types and cond.industries
 
 
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
 
 
 def run(argv: list[str]) -> int:

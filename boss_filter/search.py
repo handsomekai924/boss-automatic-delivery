@@ -1,12 +1,19 @@
-"""搜索条件装配：把筛选维度拼成 ``/wapi/zpgeek/search/joblist.json`` 的查询串。
+"""搜索条件装配：把 todo.md 第二节的筛选维度拼成搜索接口的查询串。
 
-参数名对齐职位页 ``getFormData()``：``city/experience/payType/partTime/degree/
-industry/scale/salary/jobType`` + ``query/page/pageSize/scene/encryptExpectId``。
-多选维度（``payType/partTime/experience/degree/industry/scale/stage``）逗号 join，
-单选维度（``city/jobType/salary``）原样传。
+「JobSearchFilter」就是这一步——用户选好城市/求职类型/薪资/经验/学历/行业/规模
+之后，把这些选中值编成 ``/wapi/zpgeek/search/joblist.json`` 认的参数。
+
+参数名不是猜的，来自职位页 chunk ``job~1.59fdd3bf.js`` 的 ``getFormData()``::
+
+    {city, experience, payType, partTime, degree, industry, scale,
+     salary, jobType}          ← 数组用逗号 join，单项原样
+    + query / page / pageSize / scene / encryptExpectId
+
+对照同 chunk 的筛选状态 ``Q``：``payType/partTime/experience/degree/
+industry/scale/stage`` 是多选，``city/jobType/salary`` 是单选。
 
 选中值一律用 :class:`~boss_filter.models.FilterConditions` 里的 **code**
-（如薪资 10-20K = ``405``），不是显示名。
+（如薪资 10-20K = ``405``），不是显示名。code 从哪来见 :mod:`boss_filter`。
 """
 
 from __future__ import annotations
@@ -83,6 +90,9 @@ class JobSearchFilter:
         if self.page_size < 1:
             raise ValueError(f"每页条数至少 1，收到 {self.page_size}")
 
+    # ------------------------------------------------------------------ #
+    # 装配
+    # ------------------------------------------------------------------ #
 
     def to_params(self) -> dict[str, str]:
         """拼成搜索接口的查询串参数。**空值不进参数**，让站点走自己的默认。
@@ -161,6 +171,9 @@ class JobSearchFilter:
             )
         )
 
+    # ------------------------------------------------------------------ #
+    # 从筛选条件构造
+    # ------------------------------------------------------------------ #
 
     @classmethod
     def from_codes(
@@ -306,6 +319,9 @@ class ResolvedSearchFilter:
         }
 
 
+# --------------------------------------------------------------------------- #
+# 配置文件：把筛选条件放磁盘，没有就留空
+# --------------------------------------------------------------------------- #
 
 #: 配置文件里认的键 → :class:`JobSearchFilter` 的字段。
 #: 单选维度收字符串，多选维度收数组（也兼容逗号串）。``page``/``scene``
@@ -395,7 +411,7 @@ def search_filter_from_dict(data: Mapping[str, Any]) -> JobSearchFilter:
         else:
             fields[attr] = _to_codes(value)
 
-    # 同一字段给了两种键名（job_type 与 jobType）时，后写的胜出
+    # 同一字段给了两种键名（job_type 与 jobType）时，后写的胜出且要一致
     return JobSearchFilter(**fields)
 
 

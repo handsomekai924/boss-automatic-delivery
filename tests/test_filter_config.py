@@ -24,6 +24,9 @@ from boss_filter.search import (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 定位路径
+# --------------------------------------------------------------------------- #
 
 
 def test_filter_path_默认是_data_boss_db(tmp_path, monkeypatch):
@@ -43,6 +46,9 @@ def test_filter_path_显式参数优先(tmp_path, monkeypatch):
     assert filter_path(tmp_path / "explicit.db") == tmp_path / "explicit.db"
 
 
+# --------------------------------------------------------------------------- #
+# 库里没有 = 留空
+# --------------------------------------------------------------------------- #
 
 
 def test_load_库里没有_留空不报错(tmp_path):
@@ -85,6 +91,9 @@ def test_load_键都在但值都空_等于不限(tmp_path):
     assert load_search_filter(p).is_blank
 
 
+# --------------------------------------------------------------------------- #
+# 库里有 = 按那行装配
+# --------------------------------------------------------------------------- #
 
 
 def test_load_单选与多选都收(tmp_path):
@@ -144,7 +153,7 @@ def test_load_多余键不炸(tmp_path):
     boss_db.doc_set(boss_db.DOC_SEARCH_FILTER, {"query": "go", "乱写的键": 1, "page": 3}, p)
     f = load_search_filter(p)
     assert f.query == "go"
-    assert f.page == 1
+    assert f.page == 1          # 页码是运行期的，配置说了不算
 
 
 def test_load_pageSize_不是数字就报清楚(tmp_path):
@@ -168,6 +177,9 @@ def test_load_不是对象就报清楚(tmp_path):
         load_search_filter(p)
 
 
+# --------------------------------------------------------------------------- #
+# 写回
+# --------------------------------------------------------------------------- #
 
 
 def test_save_再读回来是同一个条件(tmp_path):
@@ -196,6 +208,9 @@ def test_save_空条件写出来是空值(tmp_path):
     assert load_search_filter(p).is_blank
 
 
+# --------------------------------------------------------------------------- #
+# search_filter_from_file：用户点名的 JSON，只读不写库
+# --------------------------------------------------------------------------- #
 
 
 def test_from_file_读得到(tmp_path):
@@ -243,6 +258,9 @@ def test_from_file_空文件_留空(tmp_path):
     assert search_filter_from_file(p).is_blank
 
 
+# --------------------------------------------------------------------------- #
+# is_blank
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(

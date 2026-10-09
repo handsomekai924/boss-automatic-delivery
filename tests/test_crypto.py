@@ -41,10 +41,10 @@ class TestAccountAes:
         assert len(raw) % 16 == 0, "Pkcs7 之后整块"
 
     def test_round_trip(self):
-        """往返可还原；同号两次加密因随机 IV 必须给出不同密文。"""
         token = encrypt_account("13800138000")
         assert decrypt_account(token) == "13800138000"
         assert decrypt_account(GOLDEN_TOKEN) == "13800138000"
+        # 同号不同 IV，密文必须不一样（IV 是随机的）
         assert encrypt_account("13800138000") != token
 
     def test_empty_stays_empty(self):

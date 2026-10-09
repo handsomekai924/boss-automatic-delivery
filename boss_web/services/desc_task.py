@@ -1,7 +1,9 @@
 """手动补抓职位描述（JD）：后台任务 + 进度 + 可取消。
 
-抓取流程里顺带补 JD 是主路径（见 :mod:`boss_web.services.crawl_task`）；这里是兜底
-（老数据 / 抓取时详情失败）。单条失败只记流水、下一条继续，不拖垮整批。
+抓取流程里顺带补 JD 是主路径（见 :mod:`boss_web.services.crawl_task`）；
+这份是兜底——老数据、或某次抓取时详情失败的职位，点一下批量补。
+
+单条失败只记流水、下一条继续，绝不拖垮整批（跟列表抓取同一条规矩）。
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ class DescTask:
             "skipped": 0,
             "already": 0,
             "current": "",
-            # 条间隔（秒），给前端算「还要多久」；默认同 DETAIL_INTERVAL
+            # 条间隔（秒），给前端算「还要多久」用；默认跟 DETAIL_INTERVAL 一致
             "interval": float(params.get("interval") or DETAIL_INTERVAL),
         }
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
@@ -115,9 +117,9 @@ class DescTaskManager:
         task.push({"event": "cancel_requested"})
         return task
 
+    # ------------------------------------------------------------------ #
 
     def _run(self, task: DescTask) -> None:
-        """补抓缺描述的职位。连续撞安全网关 ``BROWSER_CHECK_GIVEUP`` 次则停批。"""
         limit = int(task.params.get("limit") or 0)
         interval = float(task.progress.get("interval") or DETAIL_INTERVAL)
         try:
@@ -129,6 +131,7 @@ class DescTaskManager:
                     task.progress["total"] = len(missing)
                 task.push({"event": "start", "total": len(missing)})
 
+                # 连续撞安全网关的计数：连环 N 次就整批停（见 BROWSER_CHECK_GIVEUP）
                 consecutive_37 = 0
                 for i, job in enumerate(missing):
                     if task.cancel_flag:
@@ -138,7 +141,8 @@ class DescTaskManager:
                         task.push({"event": "cancelled"})
                         return
 
-                    # 列表本就没带这些字段，跑起来再确认；已有描述的不重复抓
+                    # 兜底：列表本来就没带这些，但真跑起来再确认一次——
+                    # 已有描述的不再重复获取。
                     if job.job_desc or job.detail_fetched_at:
                         with task.lock:
                             task.progress["done"] += 1
@@ -182,7 +186,7 @@ class DescTaskManager:
                         if isinstance(exc, JobApiError) and exc.is_browser_check:
                             consecutive_37 += 1
                             if consecutive_37 >= BROWSER_CHECK_GIVEUP:
-                                # 连环撞安全网关：整段被限速，停批
+                                # 整段被限速了：别再砸，停下来等人歇几分钟
                                 msg = (
                                     f"连续 {consecutive_37} 次撞安全网关 code 37，"
                                     "已停；过几分钟再试"
@@ -196,7 +200,8 @@ class DescTaskManager:
                                     task.progress["failed"] += 1
                                 task.push({"event": "stopped", "reason": msg})
                                 return
-                            time.sleep(BROWSER_CHECK_COOLOFF)  # 限速墙抬手前多躺一会儿
+                            # 限速墙抬手前多躺一会儿，别拿下一条去探墙
+                            time.sleep(BROWSER_CHECK_COOLOFF)
 
                     with task.lock:
                         task.progress["done"] += 1
@@ -216,7 +221,8 @@ class DescTaskManager:
                                 "has_desc": bool(detail and detail.has_desc),
                             }
                         )
-                    if interval > 0 and i < len(missing) - 1:  # 最后一条不睡
+                    # 最后一条不睡，省掉尾部那一秒
+                    if interval > 0 and i < len(missing) - 1:
                         time.sleep(interval)
 
                 with task.lock:
