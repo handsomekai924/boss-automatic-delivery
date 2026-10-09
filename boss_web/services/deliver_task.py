@@ -343,6 +343,11 @@ class DeliverTaskManager:
             self._record(task, item, status=DELIVER_FAILED, error=f"账号异常：{exc.message}")
             self._stop(task, f"账号异常（code {exc.code}）：{exc.message}。请人工处理后再发。")
             return "stop"
+        if exc.is_chat_rate_limited and exc.is_chat_remind:
+            error = f"每日沟通配额限制：{exc.message}"
+            self._record(task, item, status=DELIVER_FAILED, error=error)
+            self._stop(task, f"{error}。已立即停止后续发送，请明天再试。")
+            return "stop"
         if exc.is_chat_limit_exhausted and not exc.is_chat_remind:
             error = f"每日沟通配额已耗尽：{exc.message}"
             self._record(task, item, status=DELIVER_FAILED, error=error)

@@ -1361,6 +1361,13 @@ def test_chat_limit_exhausted_recognizes_tomorrow_message_only():
     assert not unknown.is_chat_limit_exhausted
 
 
+def test_chat_rate_limit_phrase_recognizes_real_api_error():
+    err = JobApiError(1, "您的操作过于频繁，请稍后再试")
+
+    assert err.is_chat_rate_limited
+    assert err.is_chat_limit_exhausted
+
+
 @pytest.mark.parametrize(
     ("security_id", "encrypt_job_id"),
     [("", "J1"), ("SEC1", "")],
