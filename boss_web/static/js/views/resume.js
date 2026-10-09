@@ -49,9 +49,10 @@ function rawPart(head) {
   return "";
 }
 
-/** 原文按它自己的标题切块：一块一个标题，正文逐字留着。 */
+/** rawBlocks 的结果缓存（切面重绘很频繁） */
 let blockCache = { key: "", blocks: [] };
 
+/** 原文按它自己的标题切块：一块一个标题，正文逐字留着。 */
 function rawBlocks(raw) {
   const text = String(raw || "");
   const key = `${text.length}:${text.slice(0, 32)}`;
@@ -84,6 +85,10 @@ function rawBlocks(raw) {
   return blockCache.blocks;
 }
 
+/**
+ * 简历页。LLM 解析是同步 HTTP，一次调用十几秒——用统一进度面板给可视化反馈；
+ * 整条库条都是拖放落点，拖进来就传。
+ */
 export async function renderResume(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -140,7 +145,6 @@ export async function renderResume(root) {
   const scrollTops = { parsed: 0, source: 0 };
   let spyFrame = 0;
 
-  // LLM 解析是同步 HTTP，一次调用十几秒——用统一进度面板给可视化反馈
   const parsePanel = taskPanel({ title: "LLM 解析", stopLabel: "" });
   $("rs-task").appendChild(parsePanel.el);
   parsePanel.update({ status: "idle", percent: 0 });
@@ -154,7 +158,6 @@ export async function renderResume(root) {
     });
   }
 
-  // ---------- 小工具 ----------
   function relTime(ts) {
     if (!ts) return "—";
     const d = Math.floor(Date.now() / 1000 - ts);
@@ -186,16 +189,18 @@ export async function renderResume(root) {
     return { state: text ? "on" : "off", note: text ? `${text.length} 字` : "空" };
   }
 
-  // ---------- 目录（导航 + 解析审计） ----------
-  /** 这一面里有没有这一段的落点——没有就不给点，免得点了没反应。 */
+  /**
+   * 这一面里有没有这一段的落点——没有就不给点，免得点了没反应。
+   * 姓名与意向那两段恒在场，其余段有内容才渲染。
+   */
   function targetExists(sec, onFace) {
     if (onFace === "source") return rawHas.has(sec);
     const s = SECTIONS.find((x) => x.sec === sec);
     if (!s || !(current && current.llm && current.llm.data)) return false;
-    // 姓名与意向那两段恒在场，其余段有内容才渲染
     return s.key === "basic" || s.key === "intent" || coverage(s).state === "on";
   }
 
+  /** 目录（导航 + 解析审计）。模板没接住的原文章节也列进来：文件自己的一级章节（标题那层不算，它已经变成了上面的姓名） */
   function renderToc() {
     const d = current && current.llm && current.llm.data;
     const captured = SECTIONS.filter((s) => coverage(s).state === "on").length;
@@ -216,7 +221,6 @@ export async function renderResume(root) {
         </button>`;
     }).join("");
 
-    // 模板没接住的原文章节：文件自己的一级章节（标题那层不算，它已经变成了上面的姓名）
     const orphans = rawBlocks(current && current.raw).filter((b) => !b.part && b.level === 2);
     const orphanRows = orphans.length
       ? `<div class="rs-toc-sep">模板没接住</div>
@@ -243,11 +247,10 @@ export async function renderResume(root) {
     paintToc();
   }
 
+  /** 两个面共用同一套锚点：原文面里高亮的也是「这一段」那一行；在自己那一面里没有落点的段安静下来，别让人点了没反应 */
   function paintToc() {
     root.querySelectorAll(".rs-toc-row").forEach((b) => {
-      // 两个面共用同一套锚点：原文面里高亮的也是「这一段」那一行
       b.classList.toggle("is-active", b.dataset.sec === activeSec);
-      // 这一段在它自己那一面里没有落点：安静下来，别让人点了没反应
       b.classList.toggle("is-dead", b.dataset.has === "0");
     });
   }
@@ -258,6 +261,7 @@ export async function renderResume(root) {
     if (target) target.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
   }
 
+  /** 原文里比章节更深的那些块没有自己的行，保持上一段高亮不闪 */
   function spy() {
     const marks = [...body.querySelectorAll("[data-sec]")];
     if (!marks.length) return;
@@ -266,7 +270,6 @@ export async function renderResume(root) {
     for (const m of marks) {
       if (m.getBoundingClientRect().top <= top) hit = m;
     }
-    // 原文里比章节更深的那些块没有自己的行，保持上一段高亮不闪
     const key = hit.dataset.part || hit.dataset.sec;
     if (key !== activeSec && root.querySelector(`.rs-toc-row[data-sec="${key}"]`)) {
       activeSec = key;
@@ -282,7 +285,6 @@ export async function renderResume(root) {
     });
   });
 
-  // ---------- 两个面 ----------
   function flipTo(next, sec) {
     if (next === face) return;
     scrollTops[face] = body.scrollTop;
@@ -308,7 +310,6 @@ export async function renderResume(root) {
   $("sw-parsed").addEventListener("click", () => flipTo("parsed"));
   $("sw-source").addEventListener("click", () => flipTo("source"));
 
-  // ---------- 解析结果面 ----------
   function entryHtml(e, opts) {
     const when = escapeHtml(e.period || "");
     const title = opts.titleOf(e);
@@ -461,7 +462,7 @@ export async function renderResume(root) {
       </div>`;
   }
 
-  // ---------- 原文面：一个字没改，只把文件自己的标题提上来 ----------
+  /** 原文面：一个字没改，只把文件自己的标题提上来 */
   function renderSourceFace() {
     const blocks = rawBlocks(current && current.raw);
     const head = `
@@ -499,7 +500,6 @@ export async function renderResume(root) {
     );
   }
 
-  // ---------- 渲染调度 ----------
   function renderBody(animate = false) {
     let html;
     if (!current) {
@@ -590,7 +590,6 @@ export async function renderResume(root) {
       : `<span class="muted">尚未解析</span>`;
   }
 
-  // ---------- 库条与新鲜度 ----------
   function renderBar() {
     const lib = $("rs-lib");
     if (!resumes.length) {
@@ -644,7 +643,6 @@ export async function renderResume(root) {
     }
   }
 
-  // ---------- 数据 ----------
   async function loadList() {
     try {
       const r = await api.get("/api/resume/list");
@@ -687,6 +685,9 @@ export async function renderResume(root) {
     }
   }
 
+  /**
+   * 调 LLM 解析一份简历。后端不会覆盖原有解析结果——失败了也要把它留在屏幕上。
+   */
   async function runParse(resumeId) {
     if (parsing) return;
     const prev = current && current.llm;
@@ -701,13 +702,12 @@ export async function renderResume(root) {
       }
       parsing = false;
       paintParse("done", "解析完成", 100);
-      renderBody(true); // 解析完成：八段依次落位
+      renderBody(true);
       toast("解析完成", "ok");
       await loadList();
     } catch (err) {
       parsing = false;
       paintParse("error", err.message || "解析失败", 100);
-      // 后端不会覆盖原有解析结果——失败了也要把它留在屏幕上
       renderBody();
       const banner = `
         <div class="banner bad">
@@ -742,7 +742,6 @@ export async function renderResume(root) {
     }
   }
 
-  // ---------- 事件 ----------
   $("btn-upload").addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", () => {
     if (fileInput.files[0]) upload(fileInput.files[0]);
@@ -754,7 +753,6 @@ export async function renderResume(root) {
   });
   $("btn-del").addEventListener("click", remove);
 
-  // 整条库条都是落点：拖进来就传
   ["dragenter", "dragover"].forEach((ev) =>
     bar.addEventListener(ev, (e) => {
       e.preventDefault();
@@ -773,7 +771,6 @@ export async function renderResume(root) {
     if (f) upload(f);
   });
 
-  // ---------- 起步 ----------
   renderBody();
   await Promise.all([loadLlmCfg(), loadList()]);
   renderBar();

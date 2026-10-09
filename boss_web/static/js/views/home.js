@@ -3,6 +3,9 @@
 import { api } from "../api.js";
 import { fmtTime, taskPanel, taskStateOf, renderEvents } from "../ui.js";
 
+/**
+ * 抓取取消要带 task_id（没有统一的 `/api/crawl/stop`）；crawl 事件的字段名是 `event`，不是 `name`。
+ */
 export async function renderHome(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -92,7 +95,6 @@ export async function renderHome(root) {
 
   const $ = (id) => root.querySelector("#" + id);
 
-  // 会话
   api.get("/api/auth/status").then((st) => {
     const name = (st.user?.name || "").trim();
     $("sess-num").textContent = st.logged_in ? "在线" : "离线";
@@ -116,7 +118,6 @@ export async function renderHome(root) {
     }
   }).catch(() => {});
 
-  // 职位
   api.get("/api/jobs/stats").then((s) => {
     $("jobs-num").textContent = s.jobs ?? 0;
     $("jobs-pages").textContent = `流水 ${s.pages ?? 0} 页 · 原始 ${s.raw_seen ?? 0} 条`;
@@ -131,7 +132,6 @@ export async function renderHome(root) {
     }
   }).catch(() => {});
 
-  // LLM
   api.get("/api/llm/config").then((c) => {
     const sig = $("llm-signal");
     if (c.configured) {
@@ -143,7 +143,6 @@ export async function renderHome(root) {
     }
   }).catch(() => {});
 
-  // 分析
   api.get("/api/resume/analyses").then((r) => {
     const items = r.items || [];
     $("an-sub").textContent = items.length ? `${items.length} 份` : "—";
@@ -160,12 +159,10 @@ export async function renderHome(root) {
       .join("");
   }).catch(() => {});
 
-  // 抓取任务：统一进度面板
   const crawl = taskPanel({ title: "职位抓取", stopLabel: "停止抓取" });
   $("home-crawl-task").appendChild(crawl.el);
   crawl.onStop(async () => {
     try {
-      // 取消要带 task_id，没有统一的 /api/crawl/stop
       const s = await api.get("/api/crawl/status");
       if (s.task_id) await api.post(`/api/crawl/${s.task_id}/cancel`);
     } catch { /* ignore */ }
@@ -195,7 +192,6 @@ export async function renderHome(root) {
           ["JD", `${p.desc_ok || 0} 成功 / ${p.desc_failed || 0} 失败`],
         ],
         error: s.status === "error" ? s.error : undefined,
-        // crawl 事件的字段名是 event，不是 name
         log: renderEvents(s.events, { limit: 12, nameKey: "event" }),
       });
     } catch { /* ignore */ }

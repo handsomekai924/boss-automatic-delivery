@@ -107,12 +107,11 @@ export async function renderMatch(root) {
   let analysisId = null;
   let pollTimer = null;
   let taskId = null;
-  let deliverTimer = null;    // 发送任务轮询
+  let deliverTimer = null;
   let deliverTaskId = null;
   const greetDrafts = new Map();   // 手改中的招呼语草稿，弹窗关掉 / 轮询重绘不丢
   let detailApi = null;            // 当前打开的详情弹窗 { jid, close, setStatus }
 
-  // ---------- 长任务面板（匹配 / 发送） ----------
   const matchPanel = taskPanel({ title: "批量匹配", stopLabel: "停止匹配" });
   $("match-task").appendChild(matchPanel.el);
   matchPanel.onStop(async () => {
@@ -191,7 +190,6 @@ export async function renderMatch(root) {
     $("btn-match-sel").classList.toggle("hidden", running);
   }
 
-  // ---------- 简历选择 ----------
   async function loadResumes() {
     try {
       const r = await api.get("/api/resume/list");
@@ -225,7 +223,6 @@ export async function renderMatch(root) {
     updateLlmBadge();
   });
 
-  // ---------- 岗位列表 ----------
   async function loadJobs() {
     try {
       const r = await api.get(`/api/jobs?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`);
@@ -279,7 +276,6 @@ export async function renderMatch(root) {
     $("send-sel-n").textContent = String(selected.size);
   }
 
-  // ---------- 一键发送的评分阈值 ----------
   function minScore() {
     const v = parseInt($("send-min-score").value, 10);
     if (Number.isNaN(v)) return MIN_SCORE_DEFAULT;
@@ -344,7 +340,6 @@ export async function renderMatch(root) {
     }
   });
 
-  // ---------- 匹配 ----------
   $("btn-match-all").addEventListener("click", () => startMatch([]));
   $("btn-match-sel").addEventListener("click", () => {
     if (!selected.size) return toast("先在左侧勾选岗位", "warn");
@@ -440,11 +435,11 @@ export async function renderMatch(root) {
     }, 1200);
   }
 
-  // ---------- 匹配结果（列表只留摘要，整卡可点 → 弹窗看全部信息） ----------
+  /** 匹配结果列表只留摘要，整卡可点 → 弹窗看全部信息 */
   function renderMatches() {
     const box = $("an-results");
     const keepScroll = box.scrollTop;
-    updateSendCounts();  // 「一键发送全部」的待发条数随匹配结果走
+    updateSendCounts();
 
     if (!matches.length) {
       box.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>还没有匹配结果</p></div>`;
@@ -490,7 +485,12 @@ export async function renderMatch(root) {
     box.scrollTop = keepScroll;
   }
 
-  /** 整卡点开的详情弹窗：匹配分析 + 职位全量信息 + 招呼语手改 / 单发。 */
+  /**
+   * 整卡点开的详情弹窗：匹配分析 + 职位全量信息 + 招呼语手改 / 单发。
+   * 职位全量信息（经验 / 学历 / 行业 / 规模 / 技能 / 福利 / JD）异步补进来，
+   * 招聘人单独放到顶部工作地点下方。重新生成的招呼语只写进草稿不落库（用户可能
+   * 反复生成再挑一条）；「重新匹配」只重跑这一条，结果原地覆盖（不新增分析记录）。
+   */
   function openMatchDetail(jid) {
     const m = matches.find((x) => x.encrypt_job_id === jid);
     if (!m) return;
@@ -595,7 +595,6 @@ export async function renderMatch(root) {
         });
         const text = (r.greeting || "").trim();
         if (!text) return toast("LLM 没回招呼语，再点一次试试", "bad");
-        // 只写进草稿，不落库——用户可能反复生成再挑一条
         ta.value = text;
         syncDraft();
         toast("已生成新草稿（未保存，可反复生成）", "ok");
@@ -629,7 +628,6 @@ export async function renderMatch(root) {
       if (cur) confirmAndSend([cur]);
     });
 
-    // 匹配失败才有的补救入口：只重跑这一条，结果原地覆盖（不新增分析记录）
     const rematchBtn = dlg.box.querySelector(".btn-rematch");
     if (rematchBtn) {
       rematchBtn.addEventListener("click", async () => {
@@ -645,7 +643,6 @@ export async function renderMatch(root) {
           renderMatches();
           if (item.error) toast(`重新匹配又失败了：${item.error}`, "bad");
           else toast("重新匹配完成，结果已原地覆盖", "ok");
-          // 弹窗还开着才就地刷新；用户已关掉就别把弹窗弹回来
           if (detailApi && detailApi.jid === jid) openMatchDetail(jid);
         } catch (err) {
           toast(err.message || "重新匹配失败", "bad");
@@ -657,8 +654,6 @@ export async function renderMatch(root) {
       });
     }
 
-    // 职位全量信息（经验 / 学历 / 行业 / 规模 / 技能 / 福利 / JD）异步补进来；
-    // 招聘人单独放到顶部工作地点下方
     api
       .get("/api/jobs/" + encodeURIComponent(jid))
       .then((j) => {
@@ -704,7 +699,7 @@ export async function renderMatch(root) {
     return m.deliver_status === "sending" ? "发送中…" : "";
   }
 
-  // ---------- 发送：三种粒度共用一个任务（C6） ----------
+  /** 三种粒度（全部 / 选中 / 单条）共用一个发送任务 */
   async function startDeliver(targets) {
     if (!analysisId) return toast("先跑一次匹配再发送", "warn");
     if (deliverTaskId) return toast("已有发送任务在跑，等它结束", "warn");
@@ -723,7 +718,7 @@ export async function renderMatch(root) {
     }
   }
 
-  /** 把发送任务的每条状态贴回对应的匹配结果行。 */
+  /** 把发送任务的每条状态贴回对应的匹配结果行；详情弹窗若开着，里面的发送状态也跟着走。 */
   function applyDeliverSnapshot(s) {
     let touched = false;
     (s.items || []).forEach((it) => {
@@ -737,7 +732,6 @@ export async function renderMatch(root) {
       touched = true;
     });
     if (touched) renderMatches();
-    // 详情弹窗若开着，里面的发送状态也跟着走
     if (detailApi) {
       const cur = matches.find((x) => x.encrypt_job_id === detailApi.jid);
       if (cur) detailApi.setStatus(deliverLabel(cur));
@@ -797,7 +791,6 @@ export async function renderMatch(root) {
     }
   }
 
-  // ---------- 发送入口（确认弹窗 → startDeliver） ----------
   $("btn-send-all").addEventListener("click", () => {
     const min = minScore();
     const targets = sendAllTargets();
@@ -810,6 +803,7 @@ export async function renderMatch(root) {
     confirmAndSend(targets);
   });
 
+  /** 确认弹窗 → startDeliver。按钮要用自己的 `dlg.box.querySelector`，别 `document.querySelector`——详情弹窗可能压在下面 */
   function confirmAndSend(targets, scopeNote = "") {
     const rows = targets
       .map(
@@ -833,7 +827,6 @@ export async function renderMatch(root) {
         </div>`,
       wide: true,
     });
-    // 用自己的 close，别 document.querySelector——详情弹窗可能压在下面
     const ok = dlg.box.querySelector("#m-confirm");
     const no = dlg.box.querySelector("#m-cancel");
     if (!ok || !no) return;
@@ -844,7 +837,6 @@ export async function renderMatch(root) {
     });
   }
 
-  // ---------- 历史 ----------
   async function loadHistory() {
     try {
       const r = await api.get("/api/match/analyses");
