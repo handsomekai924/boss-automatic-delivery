@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from boss_jobs import chat
@@ -278,7 +280,7 @@ def test_没等到_puback_照样算成功():
     不能因为等不到回执把成功报成失败。
     """
     paho = FakePahoClient(puback=False)
-    sock = _make_socket(paho)
+    sock = _make_socket(paho, puback_wait=0.01)  # 真等一小会儿，也没等到
     mid = sock.send_text(to_uid=777, text="您好，方便聊聊吗？")
     assert mid > C.CHAT_MID_FLOOR  # 落在服务端数轴上
     assert sock.published == []  # 一个 PUBACK 都没等到
@@ -287,11 +289,71 @@ def test_没等到_puback_照样算成功():
 
 def test_等到_puback_只记日志不改判据():
     paho = FakePahoClient(puback=True)
-    sock = _make_socket(paho)
+    sock = _make_socket(paho, puback_wait=0.01)
     mid = sock.send_text(to_uid=777, text="您好")
     assert mid > 0
     # 两发 PUBACK 都到了：presence 一发、正文一发（记的是 paho 包 id）
     assert len(sock.published) == 2
+
+
+def test_puback_wait_为0就整个不等():
+    """默认 :data:`config.CHAT_PUBACK_WAIT` = 0：回执从来不到，等它纯烧时间。"""
+    paho = FakePahoClient(puback=False)
+    sock = _make_socket(paho)  # puback_wait=0.0
+    waited: list = []
+    sock._wait_puback = lambda *a, **k: waited.append(a) or False
+    sock.send_text(to_uid=777, text="您好")
+    assert waited == []
+
+
+def test_send_text_记下分段耗时():
+    """分段耗时给上层打「时间花在哪」的日志，别靠猜。"""
+    sock = _make_socket(FakePahoClient())
+    sock.send_text(to_uid=777, text="您好")
+    assert set(sock.last_send_stats) == {"wait_push", "publish", "flush"}
+
+
+def test_发完等出站队列写空才断():
+    """``publish()`` 的 ``rc==0`` 只是入队；没写完就 close 会把这帧丢掉。
+
+    而这条网关又不回 PUBACK，丢了只会表现成「会话建了、招呼语没了」——
+    所以发完要等 paho 的 ``_out_packet`` 排空再断。
+    """
+    paho = FakePahoClient(puback=False)
+    paho._out_packet = ["p1", "p2"]  # loop 线程还没写出去
+
+    def sleeper(_seconds):
+        if paho._out_packet:  # 睡一觉写出去一帧
+            paho._out_packet.pop()
+
+    sock = _make_socket(paho, sleeper=sleeper)
+    sock.send_text(to_uid=777, text="您好")
+    assert paho._out_packet == []
+    assert paho.disconnected
+
+
+def test_没有出站队列就退回兜底停顿():
+    """测试替身 / 换了 paho 版本拿不到 ``_out_packet``：退回睡 ``flush_wait``。"""
+    paho = FakePahoClient()
+    slept: list = []
+    sock = _make_socket(paho, flush_wait=0.25, sleeper=lambda s: slept.append(s))
+    sock.send_text(to_uid=777, text="您好")
+    assert slept == [0.25]
+
+
+def test_缺_paho_依赖时报一句能照做的提示(monkeypatch):
+    """缺依赖时别只回「No module named 'paho'」——说清楚装什么。
+
+    这个坑真踩过：``friend/add`` 建好会话了、招呼语一条没发出去，任务流水里
+    就一行 ``No module named 'paho'``。
+    """
+    sock = _make_socket(FakePahoClient())
+    for name in [m for m in list(sys.modules) if m == "paho" or m.startswith("paho.")]:
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.setitem(sys.modules, "paho", None)
+    with pytest.raises(ChatSendError) as ei:
+        sock._make_paho_client()
+    assert "paho-mqtt" in str(ei.value)
 
 
 def test_正文帧不带_retain_标志():
@@ -318,6 +380,66 @@ def test_发送用推送里的最大_id_当基数():
     mid = sock.send_text(to_uid=777, text="您好")
     # 基数取自 last；再往上加的「当前毫秒」是 1.7e12 量级，留足余量
     assert last < mid < last + 10**13
+
+
+class SpyEvent:
+    """记下 ``wait()`` 收了几个超时，用来验「到底等没等」。"""
+
+    def __init__(self) -> None:
+        self.waits: list = []
+        self._set = False
+
+    def is_set(self) -> bool:
+        return self._set
+
+    def set(self) -> None:
+        self._set = True
+
+    def clear(self) -> None:
+        self._set = False
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return self._set
+
+
+def test_手头没基数才等会话同步():
+    """第一条没基数，只能等那帧推送（最多 :data:`config.CHAT_PUSH_WAIT` 秒）。"""
+    sock = _make_socket(FakePahoClient(), push_wait=4.0)  # mid_base 默认 0
+    sock._seen_push = SpyEvent()
+    sock.send_text(to_uid=777, text="您好")
+    assert sock._seen_push.waits == [4.0]
+
+
+def test_有基数就不再等那帧会话同步():
+    """基数从上一条带过来了就直接发——等了也是白等，每条白烧 4s。"""
+    sock = _make_socket(FakePahoClient(), push_wait=4.0, mid_base=394570988736768)
+    sock._seen_push = SpyEvent()
+    sock.send_text(to_uid=777, text="您好")
+    assert sock._seen_push.waits == []
+
+
+def test_mid_直接用带过来的基数():
+    """带过来的基数落在服务端数轴上，等不到推送也够用。"""
+    last = 394570988736768
+    sock = _make_socket(FakePahoClient(), mid_base=last)
+    mid = sock.send_text(to_uid=777, text="您好")
+    assert last < mid < last + 10**13
+
+
+def test_重建连接不清掉带过来的基数():
+    """``connect`` 只作废「从推送里抬到的」，种子基数要留着（单调不减）。"""
+    seed = 394570988736768
+    sock = _make_socket(FakePahoClient(), mid_base=seed)
+    sock.connect()
+    assert sock.max_msg_id == seed
+    sock._on_message(
+        None, None, type("M", (), {"topic": "chat", "payload": _sync_push(uid=1, last_mid=seed + 5)})()
+    )
+    assert sock.max_msg_id == seed + 5
+    sock.close()
+    sock.connect()  # 发完断了又连
+    assert sock.max_msg_id == seed  # 退回种子，不是 0
 
 
 def test_publish_抛异常包成_ChatSendError():
@@ -422,3 +544,76 @@ def test_deliver_greeting_没正文不发(monkeypatch):
         client.deliver_greeting(
             security_id="SEC1", encrypt_job_id="J1", encrypt_boss_id="EB1", greeting="   "
         )
+
+
+# --------------------------------------------------------------------------- #
+# JobClient.open_chat：凭据整批一份，mid 基数跨条带过去
+# --------------------------------------------------------------------------- #
+
+
+class StubChatSocket:
+    """够 ``open_chat`` 用：记构造参数，connect/close 只翻连接状态。"""
+
+    def __init__(self, credentials, **kw) -> None:
+        self.credentials = credentials
+        self.kwargs = kw
+        self.max_msg_id = int(kw.get("mid_base") or 0)
+        self.connected = False
+
+    def connect(self):
+        self.connected = True
+        return self
+
+    def close(self):
+        self.connected = False
+
+
+def _stub_chat_client(monkeypatch):
+    client = JobClient(http=FakeHttp([]))
+    fetched: list = []
+    monkeypatch.setattr(client, "fetch_me", lambda: fetched.append(1) or CREDS)
+    monkeypatch.setattr("boss_jobs.client.ChatSocket", StubChatSocket)
+    return client, fetched
+
+
+def test_open_chat_断了重建时凭据只取一次(monkeypatch):
+    """发完就断（网关常态），但 ``getUserInfo``+``get/wt`` 整批只取一份。"""
+    client, fetched = _stub_chat_client(monkeypatch)
+    first = client.open_chat()
+    first.close()  # send_text 发完主动断
+    second = client.open_chat()
+    assert len(fetched) == 1
+    assert second.credentials is first.credentials
+
+
+def test_open_chat_把上一条的_mid_基数带给下一条(monkeypatch):
+    """一帧一条连接；基数不带过去就每条都得重新等那帧会话同步。"""
+    client, _ = _stub_chat_client(monkeypatch)
+    first = client.open_chat()
+    first.max_msg_id = 394570988736768  # 这条从推送里抬到的
+    first.close()
+    second = client.open_chat()
+    assert second.kwargs["mid_base"] == 394570988736768
+
+
+def test_open_chat_基数只往上抬不往下走(monkeypatch):
+    """网关按「id 太旧」毙帧：基数必须单调不减。"""
+    client, _ = _stub_chat_client(monkeypatch)
+    first = client.open_chat()
+    first.max_msg_id = 394570988736768
+    first.close()
+    second = client.open_chat()
+    second.max_msg_id = 394570988736700  # 更旧的推送，不该把基数拉低
+    second.close()
+    third = client.open_chat()
+    assert third.kwargs["mid_base"] == 394570988736768
+
+
+def test_close_chat_收尾也把基数留下(monkeypatch):
+    """任务收尾 ``close_chat`` 之后接着发，基数同样不能丢。"""
+    client, _ = _stub_chat_client(monkeypatch)
+    chat = client.open_chat()
+    chat.max_msg_id = 394570988736768
+    client.close_chat()
+    again = client.open_chat()
+    assert again.kwargs["mid_base"] == 394570988736768

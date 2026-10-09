@@ -51,14 +51,16 @@
 
 所以 ``mid`` 的基数从**连上后服务端推的那帧会话同步**里取：那帧带着每个会话最后
 一条消息的 id（见 :func:`max_message_id`），取其中最大值当基数，等不到就用
-:data:`config.CHAT_MID_FLOOR` 兜底。
+:data:`config.CHAT_MID_FLOOR` 兜底。同一批里后续的帧**把上一条的基数带过来**
+（:class:`ChatSocket` 的 ``mid_base``），不用每条都重新等那帧同步。
 
 **别拿 PUBACK 当判据**（这条踩过，报告里也一度说错过）：这条网关对文本帧
 **根本不回 PUBACK**——PUBLISH 完约 150ms 直接把 WebSocket 关掉，
 ``close code=1000 reason="Bye"``，**这是它的常态，不是拒收**。2026-10-08 实测的
 那几发（站点会话列表里都出现了招呼语并标「[送达]」，重载页面、从服务端重拉也还在）
 **一发 PUBACK 都没等到**。所以发送成功的判据是「帧发出去了」（PUBLISH 无异常、
-``rc == 0``），PUBACK 只是顺带看一眼、记进日志（见 :data:`config.CHAT_PUBACK_WAIT`）。
+``rc == 0``），PUBACK 只是顺带看一眼、记进日志，而且默认**整个不等**（回执
+从来不到，等它纯烧时间，见 :data:`config.CHAT_PUBACK_WAIT`）。
 「回读聊天记录」同样当不了判据：``GET /wapi/zpchat/geek/historyMsg`` 对这条账号
 返回 ``code 0`` + 空 ``zpData``，**连着有消息、刚确认送达的会话也读不出来**。
 
@@ -316,9 +318,10 @@ class ChatSocket:
     """一条 MQTT over WSS 长连接，用来往 ``chat`` 主题发消息。
 
     **一次发送流程**（:meth:`send_text`）：:meth:`connect` 建连并等到 CONNACK，
-    连上先报一帧 ``presence``（对齐站点），**等那帧会话同步**（拿 ``mid`` 的
-    基数，见 :func:`max_message_id`），再 PUBLISH 一帧文本消息，停
-    :data:`config.CHAT_FLUSH_WAIT` 秒、主动断开。
+    连上先报一帧 ``presence``（对齐站点），**手头没 ``mid`` 基数才等那帧会话
+    同步**（见 :func:`max_message_id`；基数能跨条带过来就不再等），再 PUBLISH
+    一帧文本消息，等它**真正写到 socket 上**（:meth:`_flush_to_socket`）、主动
+    断开。
 
     **判据是「帧发出去了」**（PUBLISH 无异常、``rc == 0``），**不是「等到
     PUBACK」**：这条网关对文本帧根本不回 PUBACK，PUBLISH 完约 150ms 直接把连接
@@ -336,12 +339,17 @@ class ChatSocket:
     :param path: WebSocket path，默认 :data:`config.CHAT_WS_PATH`
     :param timeout: 等 CONNACK 的超时（秒）
     :param push_wait: 等那帧会话同步（``mid`` 基数）的超时（秒），默认
-        :data:`config.CHAT_PUSH_WAIT`；等不到就用
+        :data:`config.CHAT_PUSH_WAIT`；**手头已有基数就整个不等**，等不到就用
         :data:`config.CHAT_MID_FLOOR` 兜底
     :param puback_wait: 发完顺带等 PUBACK 的超时（秒），默认
-        :data:`config.CHAT_PUBACK_WAIT`；**等不到正常**，只记日志
-    :param flush_wait: 发完再停多久才断（秒），默认
-        :data:`config.CHAT_FLUSH_WAIT`
+        :data:`config.CHAT_PUBACK_WAIT`；**等不到正常**，只记日志，``<= 0``
+        就直接跳过这段等待
+    :param flush_wait: 出站队列拿不到时的兜底停顿（秒），默认
+        :data:`config.CHAT_FLUSH_WAIT`；正常走 :meth:`_flush_to_socket` 等真写完
+    :param mid_base: 带过来的 ``mid`` 基数（上一条见过的最大消息 id）。
+        一帧一条连接，每次重建都从 0 重新等会话同步太亏——把上一条的基数
+        带过来，第二条起就不用等了。**必须单调不减**（网关按「id 太旧」毙帧，
+        见模块头），带过来的基数只会被更新的推送抬高。
     :param client_factory: 造 paho ``Client`` 的工厂（测试里注入假的）
     :param sleeper: 可替换的 sleep（测试里注入 no-op）
     """
@@ -357,6 +365,7 @@ class ChatSocket:
         push_wait: float = C.CHAT_PUSH_WAIT,
         puback_wait: float = C.CHAT_PUBACK_WAIT,
         flush_wait: float = C.CHAT_FLUSH_WAIT,
+        mid_base: int = 0,
         client_factory: Any | None = None,
         sleeper: Any = time.sleep,
     ) -> None:
@@ -368,6 +377,7 @@ class ChatSocket:
         self.push_wait = push_wait
         self.puback_wait = puback_wait
         self.flush_wait = flush_wait
+        self._seed_mid_base = max(0, int(mid_base))
         self._sleep = sleeper
         self._client_factory = client_factory
         self._client: Any = None
@@ -381,9 +391,14 @@ class ChatSocket:
         self.last_connack: Any = None
         #: 推送里见过的最大的消息 id——发消息的 ``mid`` 就从它往上加
         #: （见 :func:`max_message_id`）
-        self.max_msg_id: int = 0
+        self.max_msg_id: int = self._seed_mid_base
         #: 收到过一帧能扒出消息 id 的推送（:meth:`send_text` 等它）
         self._seen_push = threading.Event()
+        #: 上一发的分段耗时（秒）：``wait_push`` / ``publish`` / ``flush``。
+        #: 上层拿去打一条「时间花在哪」的日志，别靠猜。
+        self.last_send_stats: dict[str, float] = {}
+        #: 最近一次建连（握手 → CONNACK）耗时（秒）
+        self.connect_seconds: float = 0.0
 
     # ------------------------------------------------------------------ #
 
@@ -413,7 +428,13 @@ class ChatSocket:
         return client
 
     def _make_paho_client(self) -> Any:
-        import paho.mqtt.client as mqtt  # 延迟导入：只有真发消息才要 paho
+        try:
+            import paho.mqtt.client as mqtt  # 延迟导入：只有真发消息才要 paho
+        except ImportError as exc:  # 缺依赖别抛成 'No module named ...' 就完事
+            raise ChatSendError(
+                "缺 MQTT 依赖 paho-mqtt，招呼语发不出去"
+                "（装上再试：pip install -r requirements.txt）"
+            ) from exc
 
         client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
@@ -509,9 +530,11 @@ class ChatSocket:
             self.close()
             self._connected.clear()
             self.last_connack = None
-            # 新连接 = 新一批推送：上一轮的 ``mid`` 基数作废（服务端会重新
-            # 推一次会话同步，基数一般还更大）。
-            self.max_msg_id = 0
+            # 新连接 = 新一批推送：上一轮**从推送里**抬到的基数作废，但
+            # :attr:`_seed_mid_base`（上一条带过来的）留着——服务端重新推的
+            # 会话同步基数一般还更大，真到了会再往上抬。没有它就得每条都
+            # 重新等那帧推送，白烧 :data:`config.CHAT_PUSH_WAIT` 秒。
+            self.max_msg_id = self._seed_mid_base
             self._seen_push.clear()
             self._client = self._build_client()
             logger.debug(
@@ -521,6 +544,7 @@ class ChatSocket:
                 self.path,
                 creds.token[:4] + "…" if creds.token else "",
             )
+            started = time.monotonic()
             try:
                 self._client.connect(self.host, self.port, keepalive=C.CHAT_KEEPALIVE)
                 self._client.loop_start()
@@ -535,6 +559,8 @@ class ChatSocket:
         if int(getattr(code, "value", code if code is not None else -1)) != 0:
             self.close()
             raise ChatSendError(f"聊天通道被拒（CONNACK {code}）")
+        self.connect_seconds = time.monotonic() - started
+        logger.debug("聊天通道建连耗时 %.2fs", self.connect_seconds)
         return self
 
     def _on_connect(
@@ -582,9 +608,9 @@ class ChatSocket:
     ) -> int:
         """发一条文本消息，返回这条消息的 ``mid``。
 
-        没连上会先 :meth:`connect`，然后**等那帧会话同步**（最多
-        :attr:`push_wait` 秒）拿 ``mid`` 的基数，PUBLISH，再停
-        :attr:`flush_wait` 秒、主动断开。
+        没连上会先 :meth:`connect`，然后**手头没基数才等那帧会话同步**（最多
+        :attr:`push_wait` 秒）拿 ``mid`` 的基数，PUBLISH，等这帧写出 socket
+        （:meth:`_flush_to_socket`）、主动断开。
 
         ``mid`` = 基数 + 当前毫秒，``time`` = 当前毫秒（站点就是
         ``getMaxMsgId() + Date.now()`` / ``Date.now()``）。**基数取服务端那个
@@ -593,17 +619,28 @@ class ChatSocket:
         **判据是「帧发出去了」，不是「等到 PUBACK」**：这条网关对文本帧根本不回
         PUBACK，发完约 150ms 就把 WebSocket 关掉——这是它的常态，不是拒收
         （2026-10-08 实测：这么发的几发，站点会话列表里都出现了招呼语并标
-        「[送达]」，重载页面还在）。所以这里只 :attr:`puback_wait` 秒等一下、
-        把「有回执」这种非常态记进日志，**等不到不算失败**。
+        「[送达]」，重载页面还在）。所以 :attr:`puback_wait` 默认 0 = **整个
+        不等**，只把「有回执」这种非常态记进日志（调大它才等），**等不到不算
+        失败**。
+
+        分段耗时记进 :attr:`last_send_stats`（``wait_push`` / ``publish`` /
+        ``flush``），上层打一条汇总日志用。
 
         :raises ChatSendError: 没连上 / 凭据不全 / PUBLISH 直接抛 / ``rc != 0``
         """
+        stats: dict[str, float] = {}
         if not self.connected:
             self.connect()
-        # 等那帧会话同步落地——``mid`` 的基数就在里面。等不到就用兜底基数
+        # 等那帧会话同步落地——``mid`` 的基数就在里面。**手头已有基数就整个
+        # 不等**（整批从上一条带过来的，见构造参数 ``mid_base``）：手里的
+        # 基数已经够新，等推送只会再抬一点、不值那几秒。等不到就用兜底基数
         # （CHAT_MID_FLOOR），照样是服务端量级，只是不如真实 id 准。
-        if not self._seen_push.is_set():
+        if self.max_msg_id == 0 and not self._seen_push.is_set():
+            started = time.monotonic()
             self._seen_push.wait(self.push_wait)
+            stats["wait_push"] = time.monotonic() - started
+        else:
+            stats["wait_push"] = 0.0
         when = int(time.time() * 1000)
         temp_id = self._mid_base() + when
         frame = encode_text_message(
@@ -616,6 +653,7 @@ class ChatSocket:
             time_ms=when,
             quote_id=quote_id,
         )
+        started = time.monotonic()
         try:
             # retain 必须 False：站点前端传 true，但那样一条消息会在对方那里
             # 变成两条（留存的那份被收件人订阅/同步时再投一遍）。2026-10-09
@@ -629,20 +667,59 @@ class ChatSocket:
         if getattr(info, "rc", 0) != 0:
             self.close()
             raise ChatSendError(f"发聊天消息失败：broker 回 rc={info.rc}")
+        stats["publish"] = time.monotonic() - started
         # 帧已经交给 socket 了（QoS1 的 PUBLISH，本地无异常）。
         # PUBACK 只是顺带看一眼：这条网关通常不回，还会顺手把连接关掉。
-        if self._wait_puback(info.mid, self.puback_wait):
-            logger.debug("聊天消息 PUBACK 到了（包 id=%s）：%d 字节", info.mid, len(frame))
+        # ``puback_wait <= 0``（默认）就整个跳过——实测回执从来不到，
+        # 等它只是每条干烧 :data:`config.CHAT_PUBACK_WAIT` 秒。
+        if self.puback_wait > 0:
+            if self._wait_puback(info.mid, self.puback_wait):
+                logger.debug("聊天消息 PUBACK 到了（包 id=%s）：%d 字节", info.mid, len(frame))
+            else:
+                logger.debug(
+                    "聊天消息没等到 PUBACK（常态；网关随后会掐线）：mid=%s，%d 字节",
+                    temp_id,
+                    len(frame),
+                )
         else:
             logger.debug(
-                "聊天消息没等到 PUBACK（常态；网关随后会掐线）：mid=%s，%d 字节",
-                temp_id,
+                "聊天消息已交给 socket（%d 字节，mid=%s），不等 PUBACK",
                 len(frame),
+                temp_id,
             )
-        # 停一小会儿：网关还没掐线的那种情况，让清收/推送先落地，然后自己断。
-        self._sleep(self.flush_wait)
+        # 把这帧真正写到 socket 上再断：``publish()`` 回 ``rc == 0`` 只是入队，
+        # 写出去是 loop 线程干的。没写完就 close 会把这帧连同连接一起丢——
+        # 而这条网关又不回 PUBACK，丢了只会表现成「会话建了、招呼语没了」。
+        started = time.monotonic()
+        self._flush_to_socket()
+        stats["flush"] = time.monotonic() - started
+        self.last_send_stats = stats
         self.close()
         return temp_id
+
+    def _flush_to_socket(self) -> None:
+        """等 PUBLISH 真正写到 socket 上（**不等 PUBACK**），写完就回。
+
+        看 paho 的出站队列 ``_out_packet`` 排空（写完就出队）；拿不到这个
+        属性（换版本 / 测试替身）就退回固定睡 :attr:`flush_wait`。整个等待
+        不超过 :data:`config.CHAT_FLUSH_DEADLINE`。
+        """
+        queue = getattr(self._client, "_out_packet", None)
+        if queue is None:
+            self._sleep(self.flush_wait)
+            return
+        deadline = time.monotonic() + C.CHAT_FLUSH_DEADLINE
+        while True:
+            try:
+                pending = len(queue)
+            except Exception:  # noqa: BLE001 - 属性没了就当已写完
+                break
+            if pending == 0:
+                break
+            if time.monotonic() >= deadline:
+                logger.warning("PUBLISH 还有 %d 帧没写出去就断连，这发可能丢", pending)
+                break
+            self._sleep(0.02)
 
     def close(self) -> None:
         """断开连接（幂等）。

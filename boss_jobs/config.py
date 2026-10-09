@@ -162,9 +162,9 @@ DELIVER_INTERVAL: Final[float] = 1.0
 #    见 :mod:`boss_jobs.chat` 模块头。
 # 3. **这条网关不给文本帧回 PUBACK**，PUBLISH 完约 150ms 直接把 WebSocket
 #    关掉——**这是它的常态，不是拒收**（那几发都真送达了）。所以判据是
-#    「帧发出去了」，不是「等到 PUBACK」（见 :data:`CHAT_PUBACK_WAIT`）。
-#    ``GET /wapi/zpchat/geek/historyMsg`` 对这条账号回 ``code 0`` + 空
-#    ``zpData``，连有消息的会话也读不出来，也当不了判据。
+#    「帧发出去了」，不是「等到 PUBACK」（见 :data:`CHAT_PUBACK_WAIT`，默认
+#    0 = 不等）。``GET /wapi/zpchat/geek/historyMsg`` 对这条账号回 ``code 0``
+#    + 空 ``zpData``，连有消息的会话也读不出来，也当不了判据。
 #
 # 生产服务器的 host/port 来自 chunk ``26308``：
 #    ``{useSSL:true, server:"ws6.zhipin.com", port:443,
@@ -186,7 +186,9 @@ CHAT_TIMEOUT: Final[float] = 15.0
 
 #: 连上之后等多久去收服务端主动推的那帧**会话同步**（秒）。
 #: 它带着每个会话最后一条消息的 id，是本地算 ``mid`` 的唯一现成基数（见
-#: :data:`CHAT_MID_FLOOR`）。等不到就退回基数兜底值。
+#: :data:`CHAT_MID_FLOOR`）。**只在手里没基数时才等**（整批第一条）——
+#: 基数能跨条带过来（见 :class:`boss_jobs.chat.ChatSocket` 的 ``mid_base``），
+#: 有了就直接发，别每条都白等这 4 秒。等不到就退回基数兜底值。
 CHAT_PUSH_WAIT: Final[float] = 4.0
 
 #: ``mid`` 的基数兜底值。**服务端的消息 id 是 3.9e14 量级的雪花号**
@@ -206,12 +208,21 @@ CHAT_MID_RANGE: Final[tuple[int, int]] = (10**13, 10**17)
 #: 2026-10-08 实测：这条网关对文本帧**不回 PUBACK**，发完约 150ms 直接把
 #: WebSocket 关掉（``close code=1000 reason="Bye"``）。可那几发（站点界面上
 #: 都显示「[送达]」）是真真切切进了服务端的——所以「没等到 PUBACK」不等于
-#: 失败。等一会儿只是为了在日志里记下「这回倒是有回执」这种非常态。
-CHAT_PUBACK_WAIT: Final[float] = 1.5
+#: 失败。既然回执**从来不到**，默认 0 = 发完不等，省掉每条干烧的 1.5s；
+#: 想抓「这回倒是有回执」这种非常态再临时调大。
+CHAT_PUBACK_WAIT: Final[float] = 0.0
 
-#: 发完再停多久才主动断（秒）。**PUBACK 通常是等不到的**（见上），
-#: 这个停顿是留给「网关还没来得及掐线」的那种情况，让回执/推送先落地。
-CHAT_FLUSH_WAIT: Final[float] = 0.6
+#: 发完再停多久才主动断（秒）。PUBACK 等不到（见上），这停顿只留给
+#: 「网关还没来得及掐线」——它常态 **约 150ms** 就把 WebSocket 关掉，所以
+#: 停 0.15s 就够，再多是每条干烧。
+CHAT_FLUSH_WAIT: Final[float] = 0.15
+
+#: 把 PUBLISH**真正写到 socket 上**最多等多久（秒）。``publish()`` 回
+#: ``rc == 0`` 只是**入队成功**，真写出去是 paho 的 loop 线程干的——没写完
+#: 就断连，这帧随连接一起丢，而这条网关又不回 PUBACK，没法用回执发现，
+#: 只会表现成「会话建了、招呼语没了」。所以发完等它出队（一般几十毫秒），
+#: 这个数只是硬上限。
+CHAT_FLUSH_DEADLINE: Final[float] = 1.0
 
 #: 正文帧的 MQTT ``retain``（保留消息）标志。**定案 ``False``**（2026-10-09 实测）。
 #: 站点前端用的是 ``true``（``client.send("chat", frame, 1, true)``），照抄会出问题：

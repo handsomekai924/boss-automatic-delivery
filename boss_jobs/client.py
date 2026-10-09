@@ -228,6 +228,12 @@ class JobClient:
         self.chat_flush_wait = chat_flush_wait
         #: 本批的聊天连接（:meth:`open_chat` 懒建，:meth:`close_chat` 断）
         self._chat: ChatSocket | None = None
+        #: 整批一份聊天凭据（``getUserInfo`` + ``get/wt``）。一帧一条连接、
+        #: 发完就断，凭据却是会话级的——别每条都重打这两发。
+        self._chat_credentials: ChatCredentials | None = None
+        #: 上一条见过的最大消息 id，重建连接时当 ``mid`` 基数带过去（不然
+        #: 每条都要重新等那帧会话同步）。见 :meth:`open_chat`。
+        self._chat_mid_base: int = 0
 
         self._http = http or requests.Session()
         merged = {**C.DEFAULT_HEADERS, **(headers or {})}
@@ -556,20 +562,28 @@ class JobClient:
         return [m for m in messages if isinstance(m, dict)]
 
     def open_chat(self, credentials: ChatCredentials | None = None) -> ChatSocket:
-        """拿到一条聊天 MQTT 连接（:attr:`_chat` 缓存）；已连上就复用。
+        """拿到一条聊天 MQTT 连接；已连上就复用，断了就重建。
 
-        缓存的意义只是省掉 ``getUserInfo`` / ``get/wt`` 两次 HTTP——
-        :meth:`~boss_jobs.chat.ChatSocket.send_text` 发完会主动断开
-        （网关自己也断），所以下一条进来时这里多半是「重建」而不是「复用」。
+        一帧一条连接：:meth:`~boss_jobs.chat.ChatSocket.send_text` 发完就主动
+        断（网关自己也约 150ms 就掐线），所以「复用连接」基本不发生——真正
+        要复用的是**凭据**和 **``mid`` 基数**：
+
+        - 凭据（``getUserInfo`` + ``get/wt`` 两发 HTTP）整批取一次，存在
+          :attr:`_chat_credentials`；token/wt 是会话级的，重取只是白打两发。
+        - 上一条见过的最大消息 id 带给新连接当 ``mid`` 基数
+          （:attr:`_chat_mid_base`），第二条起就不用再等那帧会话同步。
+
+        :param credentials: 显式给一份就用它（并顶掉缓存）；不给走缓存 / 现取
         """
-        from .chat import ChatSocket  # 延迟导入，聊天通道只在真发消息时才碰
-
         if self._chat is not None and self._chat.connected:
             return self._chat
         if self._chat is not None:
+            self._stash_chat_state(self._chat)
             self._chat.close()
+        creds = credentials or self._chat_credentials or self.fetch_me()
+        self._chat_credentials = creds
         self._chat = ChatSocket(
-            credentials or self.fetch_me(),
+            creds,
             host=self.chat_host,
             port=self.chat_port,
             path=self.chat_path,
@@ -577,14 +591,27 @@ class JobClient:
             push_wait=self.chat_push_wait,
             puback_wait=self.chat_puback_wait,
             flush_wait=self.chat_flush_wait,
+            mid_base=self._chat_mid_base,
             sleeper=self._sleep,
         )
         self._chat.connect()
         return self._chat
 
+    def _stash_chat_state(self, chat: ChatSocket) -> None:
+        """收下这条连接见过的 ``mid`` 基数，重建时带给下一条。
+
+        基数必须单调不减（网关按「id 太旧」毙帧，见 :mod:`boss_jobs.chat`
+        模块头），所以只往上抬、不往下走。
+        """
+        seen = int(getattr(chat, "max_msg_id", 0) or 0)
+        if seen > self._chat_mid_base:
+            logger.debug("mid 基数抬到 %d（带给下一条连接）", seen)
+            self._chat_mid_base = seen
+
     def close_chat(self) -> None:
         """断开聊天连接（幂等）。整批发完 / 任务收尾时调。"""
         if self._chat is not None:
+            self._stash_chat_state(self._chat)
             self._chat.close()
             self._chat = None
 
@@ -614,7 +641,8 @@ class JobClient:
         :meth:`~boss_jobs.chat.ChatSocket.send_text` 只把 PUBACK 记进日志，
         等不到不抛。``mid`` 由 :class:`boss_jobs.chat.ChatSocket` 自己算
         （基数取服务端推的会话同步里的最大消息 id，见
-        :func:`boss_jobs.chat.max_message_id`），调用方不用管。
+        :func:`boss_jobs.chat.max_message_id`；整批内上一条的基数会带过来，
+        第二条起不再等那帧同步），调用方不用管。
 
         **不再回读聊天记录核对**：``GET /wapi/zpchat/geek/historyMsg`` 对这条
         账号返回 ``code 0`` + 空 ``zpData``——**有消息、刚确认送达的会话也读不
@@ -630,6 +658,7 @@ class JobClient:
         if not text:
             raise ChatSendError("没有招呼语正文，不发空消息（这条跳过或先补一句招呼语）")
 
+        started = time.monotonic()
         self.greet(
             security_id=security_id,
             encrypt_job_id=encrypt_job_id,
@@ -637,8 +666,11 @@ class JobClient:
             encrypt_boss_id=encrypt_boss_id,
             session_id=session_id,
         )
+        after_greet = time.monotonic()
         boss = self.fetch_boss_data(encrypt_boss_id)
+        after_boss = time.monotonic()
         chat = self.open_chat()
+        after_open = time.monotonic()
         temp_id = chat.send_text(
             to_uid=boss.uid,
             text=text,
@@ -646,6 +678,23 @@ class JobClient:
             # 站点前端 to.name 塞的是会话对象的 encryptUid，这里能拿到同源的
             # encryptBossId（跟站点一样：有值就写，空串就不写这个字段）。
             to_name=boss.encrypt_boss_id or encrypt_boss_id,
+        )
+        sent_at = time.monotonic()
+        # 一行看清这条的时间花在哪：建会话 / 换 uid / 开通道 / 发帧。
+        # 「开通道」含取凭据（缓存命中就没有）+ MQTT 握手；「发帧」里再拆
+        # 等推送与收尾停顿，见 ChatSocket.last_send_stats。
+        stats = getattr(chat, "last_send_stats", None) or {}
+        logger.info(
+            "打招呼 %s 耗时 %.2fs：建会话 %.2f + 换uid %.2f + 开通道 %.2f + 发帧 %.2f"
+            "（等推送 %.2f / 收尾 %.2f）",
+            encrypt_job_id,
+            sent_at - started,
+            after_greet - started,
+            after_boss - after_greet,
+            after_open - after_boss,
+            sent_at - after_open,
+            float(stats.get("wait_push", 0.0)),
+            float(stats.get("flush", 0.0)),
         )
         return GreetingDelivery(
             boss_uid=boss.uid,
