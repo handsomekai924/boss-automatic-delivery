@@ -245,7 +245,10 @@ class LoginTaskManager:
         try:
             challenge = refresher()
         except BossLoginError as exc:
-            raise UpstreamError(f"重新拉取滑块挑战失败：{exc}") from exc
+            raise UpstreamError(
+                "没能取到新的滑块验证。请在滑块弹窗里点「重新加载」，"
+                "还不行就关掉弹窗，回「登录」页重新走一遍。"
+            ) from exc
         html = build_helper_html(
             challenge,
             post_url=f"/api/auth/slider/{task.task_id}/solution",

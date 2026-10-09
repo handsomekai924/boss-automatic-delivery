@@ -9,9 +9,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from boss_jobs.cdp_stoken import StokenError
+
 from . import config as C
 from .api import api_router
 from .errors import WebError
+from .services.troubleshoot import humanize
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,36 @@ def create_app() -> FastAPI:
     @app.exception_handler(WebError)
     async def _web_error(_: Request, exc: WebError) -> JSONResponse:  # noqa: ANN202
         return JSONResponse(status_code=exc.status_code, content=exc.payload())
+
+    @app.exception_handler(StokenError)
+    async def _stoken_error(_: Request, exc: StokenError) -> JSONResponse:  # noqa: ANN202
+        """取令牌失败基本都是本机环境问题（没装 Chrome / 上个 Chrome 没关干净）。
+
+        原文里带 ``ws://127.0.0.1:9222/devtools/browser/<uuid>`` 这种内容，
+        直接摆给用户等于没提示，所以翻成人话再回。
+        """
+        logger.warning("取安全令牌失败：%s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "code": "environment", "message": humanize(exc)},
+        )
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:  # noqa: ANN202
+        """兜底：没预料到的异常也不许把 traceback 甩到用户脸上。
+
+        以前这类异常走 FastAPI 默认的 500，前端只会显示「HTTP 500」。
+        """
+        logger.exception("未处理的异常：%s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "code": "internal",
+                "message": "程序内部出了点问题，已经记进日志了。"
+                "关掉重开一次通常就好；还是不行的话，把「数据目录」里 logs\\boss.log 发给开发者。",
+            },
+        )
 
     static_dir = C.STATIC_DIR
     if static_dir.exists():

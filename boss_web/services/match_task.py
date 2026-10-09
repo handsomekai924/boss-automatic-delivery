@@ -487,7 +487,7 @@ def regenerate_greeting(
             client.chat([*messages[:1], {"role": "user", "content": user + "\n\n请严格只输出私信正文。"}])
         )
     if not greeting:
-        raise UpstreamError("LLM 没回合法的招呼语正文")
+        raise UpstreamError("AI 没返回能用的招呼语，再点一次「重新生成」试试。")
     return greeting
 
 

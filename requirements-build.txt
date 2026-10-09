@@ -1,0 +1,3 @@
+# 构建期依赖：只用来打包成 exe，不属于运行期依赖，所以不放进 requirements.txt。
+# 运行期依赖见 requirements.txt。
+pyinstaller>=6.6

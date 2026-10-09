@@ -55,6 +55,7 @@ DOC_SEARCH_FILTER: Final[str] = "search_filter"
 DOC_STOKEN: Final[str] = "stoken"
 DOC_LLM_CONFIG: Final[str] = "llm_config"
 DOC_DELIVER_CONFIG: Final[str] = "deliver_config"
+DOC_APP_SETTINGS: Final[str] = "app_settings"
 
 #: 迁移闸门字段
 _MIGRATED_FLAG: Final[str] = "legacy_imported"
@@ -616,6 +617,7 @@ __all__ = [
     "DOC_STOKEN",
     "DOC_LLM_CONFIG",
     "DOC_DELIVER_CONFIG",
+    "DOC_APP_SETTINGS",
     "resolve_db_path",
     "db",
     "acquire",

@@ -43,3 +43,14 @@ class UpstreamError(WebError):
 
     status_code = 502
     code = "upstream"
+
+
+class EnvironmentWebError(WebError):
+    """本机环境不满足（没装 Chrome、端口被占、目录不可写），503。
+
+    和 :class:`UpstreamError` 分开是因为**该谁去修不一样**：上游错了等一会儿
+    就好，环境错了得让用户照提示去装/去关。
+    """
+
+    status_code = 503
+    code = "environment"

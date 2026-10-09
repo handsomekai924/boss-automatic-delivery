@@ -1,4 +1,4 @@
-/** 匹配舱：全库/勾选岗位匹配 · 优缺点 · 招呼语手改 · 三种粒度发送（确认门槛） */
+/** 看匹配：全库 / 勾选岗位匹配 · 优缺点 · 招呼语手改 · 三种发送范围（都要先确认） */
 
 import { api } from "../api.js";
 import { toast, modal, escapeHtml, scoreRing, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
@@ -13,8 +13,8 @@ export async function renderMatch(root) {
   root.innerHTML = `
     <div class="page-head">
       <div class="page-head-text">
-        <h1 class="hero-title">岗位 <span class="grad">匹配舱</span></h1>
-        <p class="hero-sub">用 LLM 解析过的简历对库里的岗位做人岗匹配，出匹配度、优缺点与个性化招呼语；可手改招呼语，确认后发送。</p>
+        <h1 class="hero-title">职位 <span class="grad">匹配</span></h1>
+        <p class="hero-sub">拿你的简历和搜到的岗位逐个比对，给出匹配度、好在哪、差在哪，还有一句给 HR 的开场白。开场白可以自己改，确认后才发给对方。</p>
       </div>
     </div>
 
@@ -24,7 +24,7 @@ export async function renderMatch(root) {
           <div class="flex center gap-12 wrap">
             <label class="muted" style="font-size:12.5px">简历</label>
             <select class="select" id="resume-select" style="min-width:220px"></select>
-            <span class="pill" id="llm-badge">LLM —</span>
+            <span class="pill" id="llm-badge">AI —</span>
           </div>
           <div class="btn-row">
             <button class="btn primary" id="btn-match-all">一键匹配全部</button>
@@ -38,7 +38,7 @@ export async function renderMatch(root) {
     <div class="card mb-24">
       <div class="card-head">
         <h3 class="card-title">发送工具条</h3>
-        <span class="card-sub">任何粒度发送前都会弹确认 · 已成功的不会重发 · 发送 = 建会话 + 单独发招呼语正文</span>
+        <span class="card-sub">每次发送前都会弹窗让你确认 · 已经发过的不会重发 · 发出去的就是招呼语正文</span>
       </div>
       <div class="flex between center wrap gap-12 mb-16">
         <div class="btn-row">
@@ -363,7 +363,7 @@ export async function renderMatch(root) {
       matches = [];
       setMatchButtons(true);
       $("an-sub").textContent = "匹配中…";
-      toast(`匹配已启动（共 ${task.total || "?"} 个职位，并行调 LLM）`, "ok");
+      toast(`匹配已开始（共 ${task.total || "?"} 个职位，AI 会逐个比对）`, "ok");
       paintMatch({ ...task, status: "running" });
       startPoll();
     } catch (err) {
@@ -594,7 +594,7 @@ export async function renderMatch(root) {
           encrypt_job_id: jid,
         });
         const text = (r.greeting || "").trim();
-        if (!text) return toast("LLM 没回招呼语，再点一次试试", "bad");
+        if (!text) return toast("AI 没生成出招呼语，再点一次试试", "bad");
         // 只写进草稿，不落库——用户可能反复生成再挑一条
         ta.value = text;
         syncDraft();

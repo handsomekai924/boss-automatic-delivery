@@ -1,4 +1,4 @@
-/** 登录航段：手机号 → 短信码 → （滑块人机协作）→ 会话 */
+/** 登录页：手机号 → 短信码 → （滑块你本人拖）→ 存下登录状态 */
 
 import { api } from "../api.js";
 import { toast, modal, el, escapeHtml } from "../ui.js";
@@ -15,8 +15,8 @@ export async function renderLogin(root) {
   root.innerHTML = `
     <div class="page-head">
       <div class="page-head-text">
-        <h1 class="hero-title">接入 <span class="grad">BOSS 会话</span></h1>
-        <p class="hero-sub">短信验证码 + 极验滑块都在这个页面完成。滑块由<strong>你本人拖动</strong>官方组件，系统只做票据管道，不认缺口、不伪造轨迹。</p>
+        <h1 class="hero-title">登录 <span class="grad">BOSS 直聘</span></h1>
+        <p class="hero-sub">短信验证码和滑块验证都在这个页面完成。
       </div>
     </div>
 
@@ -47,7 +47,6 @@ export async function renderLogin(root) {
           </div>
           <div class="btn-row">
             <button class="btn primary" id="btn-send">发送验证码</button>
-            <span class="muted" style="font-size:12px">点击后若命中人机验证，会自动弹出滑块</span>
           </div>
         </div>
 

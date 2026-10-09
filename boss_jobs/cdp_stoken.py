@@ -154,7 +154,7 @@ CHROME_MODE_ENV: str = "BOSS_CHROME_MODE"
 
 #: 窗口可见性档位：``visible``（照常显示）/ ``offscreen``（挪到屏幕外）/
 #: ``hidden``（Win32 隐藏窗口 + 关掉遮挡节流）/ ``headless``（无头）
-CHROME_MODES: tuple[str, ...] = ("visible", "offscreen", "hidden", "headless")
+CHROME_MODES: tuple[str, ...] = ("visible", "offscreen", "hidden")
 
 #: 默认 ``hidden``：拉 Chrome 是为了让站点自己算令牌，用户没必要被弹一脸窗口。
 #: ⚠️ 要**人工过滑块/人机验证**时得改回 ``visible``——隐藏的窗口连任务栏里

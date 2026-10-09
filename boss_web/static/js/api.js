@@ -16,7 +16,13 @@ async function request(method, url, body, opts = {}) {
   try {
     resp = await fetch(url, init);
   } catch (err) {
-    throw { code: "network", message: "网络不通或服务未启动：" + err };
+    // 原始异常（"Failed to fetch" 之类）对用户毫无意义，留着排查用，别摆到脸上
+    console.error("请求发不出去", method, url, err);
+    throw {
+      code: "network",
+      message:
+        "连不上本地程序。请确认那个黑色窗口还开着（关掉它就等于关掉了程序），然后刷新本页重试。",
+    };
   }
   const text = await resp.text();
   let data = null;

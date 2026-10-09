@@ -14,6 +14,7 @@ from boss_jobs.store import JobStore
 
 from .. import config as C
 from ..errors import ConflictError, NotFoundError, UpstreamError
+from .troubleshoot import humanize
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +191,8 @@ class CrawlTaskManager:
             logger.exception("抓取任务 %s 失败", task.task_id)
             with task.lock:
                 task.status = ST_ERROR
-                task.error = f"{type(exc).__name__}: {exc}"
+                # 线程不走 FastAPI 的异常处理器，人话化得在这儿做
+                task.error = humanize(exc)
                 task.ended_at = time.time()
             task.push({"event": "error", "message": task.error})
 

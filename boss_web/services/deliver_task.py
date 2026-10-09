@@ -52,6 +52,7 @@ from .resume_store import (
     load_analysis,
     update_delivery,
 )
+from .troubleshoot import humanize
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +237,7 @@ class DeliverTaskManager:
             client = self._client_factory()
             store = JobStore()
         except Exception as exc:  # noqa: BLE001 - 客户端/库起不来就整批失败
-            self._fail(task, f"{type(exc).__name__}: {exc}")
+            self._fail(task, humanize(exc))
             return
 
         consecutive_37 = 0
@@ -286,7 +287,7 @@ class DeliverTaskManager:
                     )
                 except ChatSendError as exc:
                     logger.warning("打招呼正文没发出去 %s / %s：%s", jid, name, exc)
-                    self._record(task, item, status=DELIVER_FAILED, error=str(exc))
+                    self._record(task, item, status=DELIVER_FAILED, error=humanize(exc))
                     consecutive_37 = 0
                 except JobApiError as exc:
                     outcome = self._on_api_error(task, item, exc)
@@ -305,7 +306,7 @@ class DeliverTaskManager:
                         self._sleep(BROWSER_CHECK_COOLOFF)
                 except Exception as exc:  # noqa: BLE001 - 单条失败不拖垮整批
                     logger.warning("打招呼失败 %s / %s：%s", jid, name, exc)
-                    self._record(task, item, status=DELIVER_FAILED, error=str(exc))
+                    self._record(task, item, status=DELIVER_FAILED, error=humanize(exc))
                     consecutive_37 = 0
                 else:
                     consecutive_37 = 0

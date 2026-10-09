@@ -8,6 +8,12 @@ from fastapi import APIRouter, File, UploadFile
 from pydantic import BaseModel, Field
 
 from ..errors import NotFoundError, ValidationWebError
+from ..services.document_text import (
+    ALLOWED_EXT,
+    DocumentTextError,
+    ext_of,
+    extract_text,
+)
 from ..services.llm_config_store import load_config
 from ..services.resume_analyzer import analyze_tasks
 from ..services.resume_parser import ResumeParseError, parse_and_stamp
@@ -25,8 +31,11 @@ from ..services.resume_store import (
 
 router = APIRouter()
 
-ALLOWED_EXT = {".md", ".markdown", ".txt"}
 MAX_BYTES = 2 * 1024 * 1024
+#: Word / PDF 本来就比纯文本大（带照片、带排版），限得太死会把正常简历挡在门外
+MAX_BINARY_BYTES = 8 * 1024 * 1024
+
+_EXT_HINT = "只支持 Word（.docx）、PDF（.pdf）、Markdown（.md）或纯文本（.txt）"
 
 
 class AnalyzeBody(BaseModel):
@@ -43,18 +52,30 @@ def resumes() -> dict[str, Any]:
 @router.post("/upload")
 async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
     name = file.filename or "resume.md"
-    if not any(name.lower().endswith(ext) for ext in ALLOWED_EXT):
-        raise ValidationWebError("只支持 Markdown（.md）或纯文本（.txt）")
+    if ext_of(name) not in ALLOWED_EXT:
+        raise ValidationWebError(_EXT_HINT)
     raw = await file.read()
-    if len(raw) > MAX_BYTES:
-        raise ValidationWebError("文件超过 2MB，请精简后再传")
+    limit = MAX_BINARY_BYTES if ext_of(name) in {".docx", ".pdf"} else MAX_BYTES
+    if len(raw) > limit:
+        raise ValidationWebError(f"文件超过 {limit // 1024 // 1024}MB，请精简后再传")
+
+    # Word / PDF 先抽正文；抽不出来要告诉用户怎么绕（大多是扫描件或 .doc 老格式），
+    # 不能只回一句「解析失败」。纯文本走下面的解码分支。
     try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
+        extracted = extract_text(raw, name)
+    except DocumentTextError as exc:
+        raise ValidationWebError(str(exc)) from exc
+
+    if extracted is not None:
+        text = extracted
+    else:
         try:
-            text = raw.decode("gbk")
+            text = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
-            text = raw.decode("utf-8", errors="replace")
+            try:
+                text = raw.decode("gbk")
+            except UnicodeDecodeError:
+                text = raw.decode("utf-8", errors="replace")
 
     # 只存原文；解析由 POST /item/{id}/parse 完成（上传成功后前端自动调）
     draft = save_resume(text, filename=name)

@@ -1,4 +1,4 @@
-/** 职位航段：筛选 · 抓取 · 卡片流 · 删除 */
+/** 找工作：筛选 · 搜索 · 卡片流 · 删除 */
 
 import { api } from "../api.js";
 import { toast, modal, escapeHtml, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
@@ -7,16 +7,16 @@ export async function renderJobs(root) {
   root.innerHTML = `
     <div class="page-head">
       <div class="page-head-text">
-        <h1 class="hero-title">职位 <span class="grad">抓取舱</span></h1>
-        <p class="hero-sub">按条件抓取、卡片化浏览、选中即删。抓取是后台任务，翻页硬间隔 1 秒防风控，随时可停。</p>
+        <h1 class="hero-title">拉取 <span class="grad">职位</span></h1>
+        <p class="hero-sub">按条件搜索职位、一张张看、不要的直接删。搜索在后台跑，每翻一页停 1 秒（避免被网站当成机器人），随时可以停。</p>
       </div>
     </div>
 
     <div class="bento mb-24">
       <div class="card span-12">
         <div class="card-head">
-          <h3 class="card-title">抓取控制台</h3>
-          <span class="card-sub" id="crawl-phase">idle</span>
+          <h3 class="card-title">搜索设置</h3>
+          <span class="card-sub" id="crawl-phase">空闲</span>
         </div>
 
         <div class="row-3">
@@ -85,8 +85,8 @@ export async function renderJobs(root) {
           <button class="btn ghost" id="btn-reset-filter">重置</button>
           <span class="muted" id="filter-summary" style="font-size:12px"></span>
           <span class="flex-shrink-0" style="flex:1"></span>
-          <button class="btn primary" id="btn-crawl">开始抓取</button>
-          <button class="btn danger hidden" id="btn-stop">停止抓取</button>
+          <button class="btn primary" id="btn-crawl">开始搜索</button>
+          <button class="btn danger hidden" id="btn-stop">停止搜索</button>
         </div>
         <div id="crawl-task" class="mt-16"></div>
       </div>
@@ -103,14 +103,14 @@ export async function renderJobs(root) {
         <button class="btn" id="btn-select-all">全选本页</button>
         <button class="btn danger" id="btn-del-selected">删除所选</button>
         <button class="btn danger ghost" id="btn-clear">按条件清空</button>
-        <button class="btn" id="btn-fetch-desc" title="对还没抓到 JD 的职位逐条拉详情">补抓描述</button>
+        <button class="btn" id="btn-fetch-desc" title="对还没取到职位描述的职位，逐条打开详情页取回">补全描述</button>
       </div>
     </div>
 
     <div class="card mb-16 hidden" id="desc-panel">
       <div class="card-head">
-        <h3 class="card-title">补抓职位描述</h3>
-        <span class="card-sub" id="desc-phase">idle</span>
+        <h3 class="card-title">补全职位描述</h3>
+        <span class="card-sub" id="desc-phase">空闲</span>
       </div>
       <div id="desc-task"></div>
       <div class="btn-row mt-12">
@@ -133,8 +133,17 @@ export async function renderJobs(root) {
   let pollTimer = null;
   let crawlTaskId = null;
 
-  // 统一长任务面板：抓取 + 补抓 JD
-  const crawlPanel = taskPanel({ title: "抓取任务", stopLabel: "停止抓取" });
+  // 后端 phase 是英文内部阶段名，页面上得说人话
+  const PHASE_LABELS = {
+    prepare: "准备中",
+    client: "连接中",
+    filter: "按条件筛选",
+    stoken: "验证身份",
+    crawl: "翻页搜索",
+  };
+
+  // 统一长任务面板：搜索 + 补全职位描述
+  const crawlPanel = taskPanel({ title: "职位搜索", stopLabel: "停止搜索" });
   $("crawl-task").appendChild(crawlPanel.el);
   crawlPanel.onStop(async () => {
     if (!crawlTaskId) return;
@@ -147,13 +156,13 @@ export async function renderJobs(root) {
   });
   crawlPanel.update({ status: "idle", percent: 0 });
 
-  const descPanelUi = taskPanel({ title: "补抓 JD", stopLabel: "停止补抓" });
+  const descPanelUi = taskPanel({ title: "补全职位描述", stopLabel: "停止补全" });
   $("desc-task").appendChild(descPanelUi.el);
   descPanelUi.onStop(async () => {
     try {
       const s = await api.post("/api/jobs/fetch-descriptions/cancel");
       renderDesc(s);
-      toast("已请求停止，抓完当前这条就收手", "warn");
+      toast("已请求停止，取完当前这条就收手", "warn");
     } catch (err) {
       toast(err.message, "bad");
     }
@@ -446,7 +455,7 @@ export async function renderJobs(root) {
     }
   });
 
-  // ---------- 抓取 ----------
+  // ---------- 搜索 ----------
   $("use-search").addEventListener("click", (e) => {
     const pill = e.currentTarget;
     const cb = pill.querySelector("input");
@@ -465,7 +474,7 @@ export async function renderJobs(root) {
       crawlTaskId = task.task_id;
       $("btn-crawl").classList.add("hidden");
       $("btn-stop").classList.remove("hidden");
-      toast("抓取任务已启动", "ok");
+      toast("搜索已开始", "ok");
       startPoll();
     } catch (err) {
       toast(err.message, "bad");
@@ -491,15 +500,15 @@ export async function renderJobs(root) {
         const p = s.progress || {};
         const maxPages = s.params?.max_pages || 5;
         const pct = Math.min(100, Math.round(((p.pages || 0) / maxPages) * 100));
-        $("crawl-phase").textContent = s.phase || s.status;
+        $("crawl-phase").textContent = PHASE_LABELS[s.phase] || PHASE_LABELS[s.status] || s.phase || "空闲";
 
         const counts = [
           ["页", `${p.pages || 0} / ${maxPages}`],
-          ["入库", `+${p.inserted || 0}`],
+          ["新职位", `+${p.inserted || 0}`],
           ["更新", `${p.updated || 0}`],
         ];
         if (p.desc_done || p.desc_skipped) {
-          counts.push(["JD", `${p.desc_ok || 0}/${p.desc_done || 0} 成功`]);
+          counts.push(["职位描述", `${p.desc_ok || 0}/${p.desc_done || 0} 成功`]);
           if (p.desc_skipped) counts.push(["跳过", `${p.desc_skipped}`]);
           if (p.desc_failed) counts.push(["失败", `${p.desc_failed}`]);
         }
@@ -507,7 +516,9 @@ export async function renderJobs(root) {
         crawlPanel.update({
           status: s.status,
           percent: s.status === "running" ? pct : 100,
-          current: s.status === "running" ? (s.phase || `第 ${p.pages || 0} 页`) : (s.error || s.stopped_reason || ""),
+          current: s.status === "running"
+            ? (PHASE_LABELS[s.phase] || `第 ${p.pages || 0} 页`)
+            : (s.error || s.stopped_reason || ""),
           counts,
           error: s.status === "error" ? s.error : undefined,
           log: renderEvents(s.events, {
@@ -522,7 +533,7 @@ export async function renderJobs(root) {
           $("btn-crawl").classList.remove("hidden");
           $("btn-stop").classList.add("hidden");
           loadJobs();
-          toast(s.status === "error" ? "抓取出错：" + (s.error || "") : "抓取结束", s.status === "error" ? "bad" : "ok");
+          toast(s.status === "error" ? "搜索出错：" + (s.error || "") : "搜索结束", s.status === "error" ? "bad" : "ok");
         }
       } catch { /* ignore */ }
     }, 1000);
@@ -546,7 +557,7 @@ export async function renderJobs(root) {
   function renderGrid(items) {
     const grid = $("job-grid");
     if (!items.length) {
-      grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="empty-icon">◎</div><p>库还是空的，先去左边抓一批</p></div>`;
+      grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="empty-icon">◎</div><p>库还是空的，先去上面搜一批</p></div>`;
       return;
     }
     grid.innerHTML = items
@@ -610,11 +621,11 @@ export async function renderJobs(root) {
           <div class="pills mb-16">${welfare || "<span class='muted'>—</span>"}</div>
           <div class="flex between center mb-8">
             <div class="card-sub">职位描述</div>
-            <span class="pill ${j.job_desc ? "accent" : "static"}">${j.job_desc ? "已抓描述" : "无描述"}</span>
+            <span class="pill ${j.job_desc ? "accent" : "static"}">${j.job_desc ? "已有描述" : "无描述"}</span>
           </div>
           ${j.job_desc
-            ? `<details class="acc mb-16"><summary>展开 JD（${String(j.job_desc).length} 字）</summary><div class="acc-body" style="white-space:pre-wrap">${escapeHtml(j.job_desc)}</div></details>`
-            : `<div class="muted mb-16" style="font-size:12px">列表接口不带 JD；点右上「补抓描述」或在抓取时顺带补。</div>`}
+            ? `<details class="acc mb-16"><summary>展开职位描述（${String(j.job_desc).length} 字）</summary><div class="acc-body" style="white-space:pre-wrap">${escapeHtml(j.job_desc)}</div></details>`
+            : `<div class="muted mb-16" style="font-size:12px">搜索列表里不带职位描述；点右上「补全描述」，或下次搜索时顺带取回。</div>`}
           <div class="card-sub mb-8">Boss</div>
           <div>${escapeHtml(j.boss_name || "—")} · ${escapeHtml(j.boss_title || "")}</div>
           <div class="btn-row mt-24">
@@ -689,7 +700,7 @@ export async function renderJobs(root) {
     }
   });
 
-  // ---------- 手动补抓 JD ----------
+  // ---------- 手动补全职位描述 ----------
   let descPollTimer = null;
 
   function renderDesc(s) {
@@ -700,9 +711,9 @@ export async function renderJobs(root) {
     const running = s.status === "running";
     const panel = $("desc-panel");
     panel.classList.remove("hidden");
-    $("desc-phase").textContent = s.status;
+    $("desc-phase").textContent = running ? "进行中" : "空闲";
     $("btn-fetch-desc").disabled = running;
-    $("btn-fetch-desc").textContent = running ? `补抓 ${done}/${total}` : "补抓描述";
+    $("btn-fetch-desc").textContent = running ? `补全 ${done}/${total}` : "补全描述";
 
     // 撞安全网关停批时，从事件里捞出原因展示
     const stopEvent = (s.events || []).find((e) => e.event === "stopped");
@@ -730,7 +741,7 @@ export async function renderJobs(root) {
     clearInterval(descPollTimer);
     descPollTimer = null;
     $("btn-fetch-desc").disabled = false;
-    $("btn-fetch-desc").textContent = "补抓描述";
+    $("btn-fetch-desc").textContent = "补全描述";
   }
 
   function startDescPoll() {
@@ -747,10 +758,10 @@ export async function renderJobs(root) {
             s.status === "done"
               ? stopEv
                 ? stopEv.reason || "已停"
-                : `补抓完成：有描述 ${p.ok || 0} / 空 ${p.skipped || 0} / 失败 ${p.failed || 0}`
+                : `补全完成：有描述 ${p.ok || 0} / 空 ${p.skipped || 0} / 失败 ${p.failed || 0}`
               : s.status === "error"
-                ? "补抓出错：" + (s.error || "")
-                : "补抓已取消",
+                ? "补全出错：" + (s.error || "")
+                : "补全已取消",
             s.status === "error" ? "bad" : stopEv ? "warn" : "ok"
           );
           loadJobs();
@@ -760,11 +771,11 @@ export async function renderJobs(root) {
   }
 
   $("btn-fetch-desc").addEventListener("click", async () => {
-    if (descPollTimer) return toast("补抓任务已在跑", "warn");
+    if (descPollTimer) return toast("补全任务已在跑", "warn");
     try {
       // interval 不传 = 服务端默认 1s（防风控）
       const task = await api.post("/api/jobs/fetch-descriptions", { limit: 0 });
-      toast(`补抓已启动（${task.progress?.total ?? "?"} 条）`, "ok");
+      toast(`补全已开始（${task.progress?.total ?? "?"} 条）`, "ok");
       renderDesc(task);
       startDescPoll();
     } catch (err) {
@@ -790,7 +801,7 @@ export async function renderJobs(root) {
   await loadFilter();
   await loadJobs();
 
-  // 恢复进行中的抓取
+  // 恢复进行中的搜索
   try {
     const s = await api.get("/api/crawl/status");
     if (s.task_id && s.status === "running") {
@@ -801,7 +812,7 @@ export async function renderJobs(root) {
     }
   } catch { /* ignore */ }
 
-  // 恢复进行中的补抓
+  // 恢复进行中的补全
   try {
     const s = await api.get("/api/jobs/fetch-descriptions/status");
     if (s.task_id && s.status === "running") {

@@ -414,7 +414,6 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
 .hero-sub {
   margin: 0;
   color: var(--text-2);
-  max-width: 62ch;
   font-size: var(--fs-14);
   text-wrap: pretty;
 }
@@ -1933,4 +1932,60 @@ details.acc .acc-body {
   }
   .progress > i::after { display: none; }
   .dropzone::after { display: none; }
+}
+
+/* ---------- 21. 首次配置引导（AI 设置页） ---------- */
+
+.guide-steps {
+  list-style: none;
+  margin: 0 0 var(--sp-4);
+  padding: 0;
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.guide-steps > li {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  gap: var(--sp-3);
+  align-items: start;
+}
+
+/* 序号做成圆章，让「第几步」一眼能数清楚 */
+.guide-n {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: var(--fs-13);
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--stroke-accent);
+}
+
+.guide-body > b {
+  display: block;
+  font-size: var(--fs-14);
+  color: var(--text-1);
+  margin-bottom: 4px;
+}
+
+.guide-body > p {
+  margin: 0 0 8px;
+  font-size: var(--fs-13);
+  line-height: 1.75;
+  color: var(--text-2);
+}
+
+.guide-body > p:last-child { margin-bottom: 0; }
+
+/* 截图是加分项不是必需品：图挂了 JS 会把元素摘掉，这里只管排版 */
+.guide-shot {
+  display: block;
+  max-width: min(100%, 520px);
+  margin: 4px 0 12px;
+  border-radius: var(--r-m);
+  border: 1px solid var(--stroke);
 }

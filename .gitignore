@@ -5,6 +5,10 @@ node_modules/
 dist/
 dist-firefox/
 release/
+# PyInstaller 的中间目录（packaging/build.bat）。注意 .gitignore 里 # 只在行首
+# 才是注释，写在模式后面会被当成目录名的一部分。
+build/
+*.spec.bak
 
 # Python 缓存
 __pycache__/

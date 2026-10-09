@@ -1,4 +1,4 @@
-/** 简历航段：一份简历两副面孔——原文与结构化解析，共用同一套章节脊柱。 */
+/** 简历页：一份简历两副面孔——原文与结构化解析，共用同一套章节脊柱。 */
 
 import { api } from "../api.js";
 import { toast, escapeHtml, fmtTime, taskPanel } from "../ui.js";
@@ -88,8 +88,8 @@ export async function renderResume(root) {
   root.innerHTML = `
     <div class="page-head">
       <div class="page-head-text">
-        <h1 class="hero-title">简历 <span class="grad">解析舱</span></h1>
-        <p class="hero-sub">上传 Markdown 简历，LLM 按固定模板抠成结构化结果。「匹配」页取的就是这份结果，所以这里先把要交出去的东西看准。</p>
+        <h1 class="hero-title">上传 <span class="grad">简历</span></h1>
+        <p class="hero-sub">上传简历（Word / PDF / 纯文本都行），AI 会把它整理成固定格式。后面「看匹配」用的就是这份结果，所以先在这里确认一下有没有读错。</p>
       </div>
     </div>
 
@@ -101,7 +101,7 @@ export async function renderResume(root) {
         <button class="btn primary" id="btn-parse">重新解析</button>
         <button class="btn danger" id="btn-del">删除</button>
       </div>
-      <input type="file" id="file" accept=".md,.markdown,.txt" hidden>
+      <input type="file" id="file" accept=".docx,.pdf,.md,.markdown,.txt" hidden>
     </section>
 
     <div id="rs-task" class="mb-16"></div>
@@ -165,7 +165,7 @@ export async function renderResume(root) {
     return fmtTime(ts).slice(0, 10);
   }
 
-  /** 这一段的捕获情况：目录上那个点与右侧读数的唯一来源。 */
+  /** 这一段的识别情况：目录上那个点与右侧读数的唯一来源。 */
   function coverage(s) {
     const d = (current && current.llm && current.llm.data) || null;
     if (!d) return { state: "none", note: "未解析" };
@@ -200,7 +200,7 @@ export async function renderResume(root) {
     const d = current && current.llm && current.llm.data;
     const captured = SECTIONS.filter((s) => coverage(s).state === "on").length;
     const head = $("rs-rail-head");
-    head.textContent = !current ? "8 段模板" : !d ? "尚未解析" : `${captured}/8 段已捕获`;
+    head.textContent = !current ? "8 段模板" : !d ? "尚未解析" : `${captured}/8 段已识别`;
     head.classList.toggle("is-ok", !!d && captured === SECTIONS.length);
 
     const rows = SECTIONS.map((s) => {
@@ -411,7 +411,7 @@ export async function renderResume(root) {
         ${
           missing.length
             ? `<div class="rs-gap mono" title="模板里这些段落这次是空的">这次空着：${escapeHtml(missing.join(" / "))}</div>`
-            : `<div class="rs-gap is-ok mono">8/8 段全部捕获</div>`
+            : `<div class="rs-gap is-ok mono">8/8 段全部识别</div>`
         }
       </header>
 
@@ -436,7 +436,7 @@ export async function renderResume(root) {
     `;
   }
 
-  /** 解析结果还没出来时的空骨架：把「会抠出哪八段」先摆给用户看。 */
+  /** 解析结果还没出来时的空骨架：把「会识别出哪八段」先摆给用户看。 */
   function renderSkeleton(note) {
     return `
       <div class="rs-skel">
@@ -456,7 +456,7 @@ export async function renderResume(root) {
           .join("")}
       </div>
       <div class="rs-skel-note" id="rs-cta">
-        <p>${escapeHtml(note || "这份简历还没解析。解析会用你配的模型抠出八段结构化字段：基本信息 / 求职意向 / 工作经历 / 项目经历 / 教育经历 / 技能标签 / 自我评价 / 摘要。")}</p>
+        <p>${escapeHtml(note || "这份简历还没解析。解析会用你配置的 AI 识别出这八项：基本信息 / 求职意向 / 工作经历 / 项目经历 / 教育经历 / 技能标签 / 自我评价 / 摘要。")}</p>
         <button class="btn primary" id="btn-parse-here">开始解析</button>
       </div>`;
   }
@@ -561,11 +561,11 @@ export async function renderResume(root) {
       <div class="rs-empty">
         <div class="rs-drop" id="rs-drop">
           <div class="rs-drop-ico">${ICO_UPLOAD}</div>
-          <div class="rs-drop-t">把 Markdown 简历拖进来，或点击选择</div>
-          <div class="muted" style="font-size:12px">.md / .markdown / .txt · 最大 2MB</div>
+          <div class="rs-drop-t">把简历拖进来，或点击选择</div>
+          <div class="muted" style="font-size:12px">Word（.docx）/ PDF / .md / .txt · 最大 8MB</div>
         </div>
         <div class="rs-empty-note">
-          <div class="rs-toc-sep">解析会抠出这八段</div>
+          <div class="rs-toc-sep">解析会识别出这八项</div>
           <div class="rs-chips">${SECTIONS.map((s) => `<span class="pill static">${escapeHtml(s.label)}</span>`).join("")}</div>
         </div>
       </div>`;

@@ -6,16 +6,18 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from .runtime import app_data_dir, resource_root
 
-#: 项目根目录（``F:\boss``），与 cwd 无关
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+#: 项目根目录（``F:\boss``），与 cwd 无关。
+#: 打包成 exe 后指向 PyInstaller 解包目录，见 :mod:`boss_web.runtime`
+PROJECT_ROOT = resource_root()
 
-#: 运行时数据目录（状态库 ``boss.db`` 所在处）——gitignore 掉
-DATA_DIR = PROJECT_ROOT / "data"
+#: 运行时数据目录（状态库 ``boss.db`` 所在处）——gitignore 掉。
+#: 开发态是仓库 ``data/``；打包态是 exe 同目录的 ``data/``（便携）
+DATA_DIR = app_data_dir()
 
-#: 静态资源
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+#: 静态资源。dev = 仓库 ``boss_web/static``；打包 = 解包目录下的同名路径
+STATIC_DIR = PROJECT_ROOT / "boss_web" / "static"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
