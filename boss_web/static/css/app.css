@@ -1220,6 +1220,7 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
   font-size: var(--fs-13);
   margin-bottom: 10px;
 }
+.job-salary,
 .job-card .job-salary {
   font-family: var(--mono);
   color: var(--accent);
@@ -1326,10 +1327,13 @@ details.acc .acc-body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.match-more {
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--stroke);
+/* 匹配结果整卡可点 → 详情弹窗 */
+.match-card {
+  cursor: pointer;
+}
+.match-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .greeting-box {
   margin-top: 10px;

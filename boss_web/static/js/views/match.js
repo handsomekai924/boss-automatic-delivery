@@ -50,7 +50,7 @@ export async function renderMatch(root) {
           <input type="number" class="input" id="send-min-score" value="70" min="0" max="100" step="1" style="width:76px">
           <span class="muted" style="font-size:11.5px">≥ 该分数才进「一键发送全部」，改完自动保存</span>
         </label>
-        <span class="muted" style="font-size:12px">在下方「匹配结果」里展开单条可单独改招呼语 / 发送</span>
+        <span class="muted" style="font-size:12px">点击下方「匹配结果」条目可看全部信息、改招呼语 / 发送</span>
       </div>
       <div id="deliver-task"></div>
     </div>
@@ -109,8 +109,8 @@ export async function renderMatch(root) {
   let taskId = null;
   let deliverTimer = null;    // 发送任务轮询
   let deliverTaskId = null;
-  const expanded = new Set();      // 展开中的 match（encrypt_job_id）
-  const greetDrafts = new Map();   // 手改中的招呼语草稿，轮询重绘不丢
+  const greetDrafts = new Map();   // 手改中的招呼语草稿，弹窗关掉 / 轮询重绘不丢
+  let detailApi = null;            // 当前打开的详情弹窗 { jid, close, setStatus }
 
   // ---------- 长任务面板（匹配 / 发送） ----------
   const matchPanel = taskPanel({ title: "批量匹配", stopLabel: "停止匹配" });
@@ -440,7 +440,7 @@ export async function renderMatch(root) {
     }, 1200);
   }
 
-  // ---------- 匹配结果（默认收起：评分 / 岗位 / 公司 / 地址 / 薪资 / 建议） ----------
+  // ---------- 匹配结果（列表只留摘要，整卡可点 → 弹窗看全部信息） ----------
   function renderMatches() {
     const box = $("an-results");
     const keepScroll = box.scrollTop;
@@ -451,53 +451,25 @@ export async function renderMatch(root) {
       return;
     }
 
-    // 轮询重绘前把在改的招呼语草稿存下来
-    box.querySelectorAll(".match-card").forEach((card) => {
-      const ta = card.querySelector(".greeting-edit");
-      if (ta) greetDrafts.set(card.dataset.jid, ta.value);
-    });
-
     const ranked = [...matches].sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
     box.innerHTML = ranked
       .map((m) => {
         const jid = m.encrypt_job_id;
         const score = m.match_score || 0;
-        const open = expanded.has(jid);
-        const advice = (m.advice || "").trim();
-        const verdict = (m.verdict || "").trim();
-        const adviceLine = advice || verdict;
-        const matched = (m.matched_skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
-        const missing = (m.missing_skills || []).map((s) => `<span class="pill static bad">${escapeHtml(s)}</span>`).join(" ");
-        const pros = (m.pros || []).map((p) => `<div class="muted" style="font-size:12.5px">✓ ${escapeHtml(p)}</div>`).join("");
-        const cons = (m.cons || []).map((c) => `<div class="muted" style="font-size:12.5px">✗ ${escapeHtml(c)}</div>`).join("");
-        const draft = greetDrafts.has(jid) ? greetDrafts.get(jid) : (m.greeting || "");
+        const adviceLine = (m.advice || "").trim() || (m.verdict || "").trim();
         return `
-          <div class="card lift mb-16 match-card" style="padding:16px" data-jid="${escapeHtml(jid)}">
+          <div class="card lift mb-16 match-card" style="padding:16px" data-jid="${escapeHtml(jid)}"
+               role="button" tabindex="0" title="点击查看全部信息">
             <div class="match-row">
               ${scoreRing(score)}
               <div class="match-main">
-                <div class="flex between center gap-8">
-                  <h4 class="match-title">${escapeHtml(m.job_name)} <span class="muted" style="font-weight:400;font-size:13px">@ ${escapeHtml(m.brand_name)}</span></h4>
-                  <button class="btn sm ghost btn-toggle-more flex-shrink-0">${open ? "▾ 收起" : "▸ 展开"}</button>
-                </div>
+                <h4 class="match-title">${escapeHtml(m.job_name)} <span class="muted" style="font-weight:400;font-size:13px">@ ${escapeHtml(m.brand_name)}</span></h4>
                 <div class="muted" style="font-size:12px">${escapeHtml(m.location || "")} · ${escapeHtml(m.salary_desc || "")}</div>
-                <div class="muted" style="font-size:12.5px;margin-top:6px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(adviceLine)}</div>
-                ${open ? `
-                  <div class="match-more">
-                    ${verdict && verdict !== adviceLine ? `<div class="card-sub mb-8">结论</div><div class="muted" style="font-size:12.5px">${escapeHtml(verdict)}</div>` : ""}
-                    ${matched ? `<div class="card-sub mb-8 mt-12">技能匹配</div><div class="job-meta">${matched}</div>` : ""}
-                    ${missing ? `<div class="card-sub mb-8 mt-12">缺口</div><div class="pills">${missing}</div>` : ""}
-                    ${pros ? `<div class="card-sub mb-8 mt-12">优点</div>${pros}` : ""}
-                    ${cons ? `<div class="card-sub mb-8 mt-12">缺点</div>${cons}` : ""}
-                    <div class="card-sub mb-8 mt-12">招呼语 <span class="muted" style="font-size:11px">可直接改，改完点保存</span></div>
-                    <textarea class="input mono greeting-edit" rows="2" style="width:100%;font-size:12.5px">${escapeHtml(draft)}</textarea>
-                    <div class="btn-row mt-8">
-                      <button class="btn sm ghost btn-save-greet">保存招呼语</button>
-                      <button class="btn sm primary btn-send-one">发送</button>
-                      <span class="muted send-status" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
-                    </div>
-                    ${m.error ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>` : ""}
-                  </div>` : ""}
+                ${adviceLine ? `<div class="muted" style="font-size:12.5px;margin-top:6px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(adviceLine)}</div>` : ""}
+                <div class="flex between center gap-8 mt-8">
+                  <span class="muted" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
+                  <span class="muted" style="font-size:11px;flex-shrink:0">点击查看详情 ›</span>
+                </div>
               </div>
             </div>
           </div>`;
@@ -506,45 +478,186 @@ export async function renderMatch(root) {
 
     box.querySelectorAll(".match-card").forEach((card) => {
       const jid = card.dataset.jid;
-
-      card.querySelector(".btn-toggle-more").addEventListener("click", () => {
-        if (expanded.has(jid)) expanded.delete(jid);
-        else expanded.add(jid);
-        renderMatches();
+      card.addEventListener("click", () => openMatchDetail(jid));
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openMatchDetail(jid);
+        }
       });
-
-      const ta = card.querySelector(".greeting-edit");
-      if (ta) {
-        ta.addEventListener("input", () => greetDrafts.set(jid, ta.value));
-      }
-      const saveBtn = card.querySelector(".btn-save-greet");
-      if (saveBtn) {
-        saveBtn.addEventListener("click", async () => {
-          const text = card.querySelector(".greeting-edit").value;
-          try {
-            await api.patch(`/api/match/${analysisId}/greeting`, {
-              encrypt_job_id: jid,
-              greeting: text,
-            });
-            const m = matches.find((x) => x.encrypt_job_id === jid);
-            if (m) m.greeting = text;
-            greetDrafts.delete(jid);
-            toast("招呼语已保存", "ok");
-          } catch (err) {
-            toast(err.message || "保存失败", "bad");
-          }
-        });
-      }
-      const sendBtn = card.querySelector(".btn-send-one");
-      if (sendBtn) {
-        sendBtn.addEventListener("click", () => {
-          const m = matches.find((x) => x.encrypt_job_id === jid);
-          if (m) confirmAndSend([m]);
-        });
-      }
     });
 
     box.scrollTop = keepScroll;
+  }
+
+  /** 整卡点开的详情弹窗：匹配分析 + 职位全量信息 + 招呼语手改 / 单发。 */
+  function openMatchDetail(jid) {
+    const m = matches.find((x) => x.encrypt_job_id === jid);
+    if (!m) return;
+    if (detailApi) {
+      detailApi.close();
+      detailApi = null;
+    }
+
+    const score = m.match_score || 0;
+    const verdict = (m.verdict || "").trim();
+    const advice = (m.advice || "").trim();
+    const matched = (m.matched_skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
+    const missing = (m.missing_skills || []).map((s) => `<span class="pill static bad">${escapeHtml(s)}</span>`).join(" ");
+    const pros = (m.pros || []).map((p) => `<div class="muted" style="font-size:12.5px">✓ ${escapeHtml(p)}</div>`).join("");
+    const cons = (m.cons || []).map((c) => `<div class="muted" style="font-size:12.5px">✗ ${escapeHtml(c)}</div>`).join("");
+    const draft = greetDrafts.has(jid) ? greetDrafts.get(jid) : (m.greeting || "");
+
+    const dlg = modal({
+      title: escapeHtml(m.job_name),
+      wide: true,
+      body: `
+        <div class="flex between gap-12 mb-16 wrap" style="align-items:flex-start">
+          <div>
+            <div class="flex center gap-12">
+              ${scoreRing(score)}
+              <div>
+                <div style="font-size:17px;font-weight:650">${escapeHtml(m.brand_name)}</div>
+                <div class="muted" style="font-size:12.5px">${escapeHtml(m.location || "")}</div>
+              </div>
+            </div>
+            <div class="md-boss muted mt-12" style="font-size:12.5px"></div>
+          </div>
+          <div class="job-salary">${escapeHtml(m.salary_desc || "面议")}</div>
+        </div>
+
+        <div class="card-sub mb-8">匹配分析</div>
+        ${verdict ? `<div class="muted mb-8" style="font-size:12.5px"><span class="muted" style="font-size:11px">结论</span> ${escapeHtml(verdict)}</div>` : ""}
+        ${advice ? `<div class="muted mb-8" style="font-size:12.5px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(advice)}</div>` : ""}
+        ${matched ? `<div class="card-sub mb-8 mt-12">技能匹配</div><div class="job-meta">${matched}</div>` : ""}
+        ${missing ? `<div class="card-sub mb-8 mt-12">缺口</div><div class="pills">${missing}</div>` : ""}
+        ${pros ? `<div class="card-sub mb-8 mt-12">优点</div>${pros}` : ""}
+        ${cons ? `<div class="card-sub mb-8 mt-12">缺点</div>${cons}` : ""}
+        ${!verdict && !advice && !matched && !missing && !pros && !cons ? `<div class="muted mb-8" style="font-size:12px">这条没有分析内容${m.error ? "（匹配失败）" : ""}</div>` : ""}
+
+        <div class="card-sub mb-8 mt-16">职位信息</div>
+        <div class="md-job-extra"><div class="muted" style="font-size:12px">加载职位详情…</div></div>
+
+        <div class="card-sub mb-8 mt-16">招呼语 <span class="muted" style="font-size:11px">生成后先存草稿，满意再点保存</span></div>
+        <textarea class="input mono greeting-edit" rows="3" style="width:100%;font-size:12.5px">${escapeHtml(draft)}</textarea>
+        <div class="btn-row mt-8">
+          <button class="btn sm btn-regen-greet">重新生成</button>
+          <button class="btn sm ghost btn-save-greet">保存招呼语</button>
+          <button class="btn sm primary btn-send-one">发送</button>
+          <span class="muted send-status" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
+        </div>
+        <div class="muted draft-hint mt-8" style="font-size:11px;display:none">草稿未保存，满意后点「保存招呼语」；可反复点「重新生成」换一版</div>
+        ${m.error ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>` : ""}
+      `,
+      onClose: () => {
+        if (detailApi && detailApi.jid === jid) detailApi = null;
+      },
+    });
+
+    detailApi = {
+      jid,
+      close: dlg.close,
+      setStatus: (text) => {
+        const el = dlg.box.querySelector(".send-status");
+        if (el) el.textContent = text;
+      },
+    };
+
+    const ta = dlg.box.querySelector(".greeting-edit");
+    const draftHint = dlg.box.querySelector(".draft-hint");
+    const syncDraft = () => {
+      greetDrafts.set(jid, ta.value);
+      const cur = matches.find((x) => x.encrypt_job_id === jid);
+      const dirty = ta.value.trim() !== (cur?.greeting || "").trim();
+      if (draftHint) draftHint.style.display = dirty ? "" : "none";
+    };
+    ta.addEventListener("input", syncDraft);
+    syncDraft();
+
+    const regenBtn = dlg.box.querySelector(".btn-regen-greet");
+    regenBtn.addEventListener("click", async () => {
+      if (!analysisId) return toast("先跑一次匹配再生成招呼语", "warn");
+      regenBtn.disabled = true;
+      regenBtn.textContent = "生成中…";
+      try {
+        const r = await api.post(`/api/match/${analysisId}/greeting/regenerate`, {
+          encrypt_job_id: jid,
+        });
+        const text = (r.greeting || "").trim();
+        if (!text) return toast("LLM 没回招呼语，再点一次试试", "bad");
+        // 只写进草稿，不落库——用户可能反复生成再挑一条
+        ta.value = text;
+        syncDraft();
+        toast("已生成新草稿（未保存，可反复生成）", "ok");
+      } catch (err) {
+        toast(err.message || "生成失败", "bad");
+      } finally {
+        regenBtn.disabled = false;
+        regenBtn.textContent = "重新生成";
+      }
+    });
+
+    dlg.box.querySelector(".btn-save-greet").addEventListener("click", async () => {
+      const text = dlg.box.querySelector(".greeting-edit").value;
+      try {
+        await api.patch(`/api/match/${analysisId}/greeting`, {
+          encrypt_job_id: jid,
+          greeting: text,
+        });
+        const cur = matches.find((x) => x.encrypt_job_id === jid);
+        if (cur) cur.greeting = text;
+        greetDrafts.delete(jid);
+        syncDraft();
+        toast("招呼语已保存", "ok");
+      } catch (err) {
+        toast(err.message || "保存失败", "bad");
+      }
+    });
+
+    dlg.box.querySelector(".btn-send-one").addEventListener("click", () => {
+      const cur = matches.find((x) => x.encrypt_job_id === jid);
+      if (cur) confirmAndSend([cur]);
+    });
+
+    // 职位全量信息（经验 / 学历 / 行业 / 规模 / 技能 / 福利 / JD）异步补进来；
+    // 招聘人单独放到顶部工作地点下方
+    api
+      .get("/api/jobs/" + encodeURIComponent(jid))
+      .then((j) => {
+        const boss = dlg.box.querySelector(".md-boss");
+        if (boss) {
+          const who = [j.boss_name, j.boss_title].filter(Boolean).join(" · ");
+          boss.innerHTML = who ? `招聘人 <span style="color:var(--text-1)">${escapeHtml(who)}</span>` : "";
+        }
+        const host = dlg.box.querySelector(".md-job-extra");
+        if (!host) return;
+        const skills = (j.skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
+        const labels = (j.job_labels || []).map((s) => `<span class="pill static">${escapeHtml(s)}</span>`).join(" ");
+        const welfare = (j.welfare_list || []).map((s) => `<span class="pill static">${escapeHtml(s)}</span>`).join(" ");
+        host.innerHTML = `
+          <div class="job-meta">
+            <span class="pill static">${escapeHtml(j.job_experience || "—")}</span>
+            <span class="pill static">${escapeHtml(j.job_degree || "—")}</span>
+            <span class="pill static">${escapeHtml(j.brand_industry || "—")}</span>
+            <span class="pill static">${escapeHtml(j.brand_scale_name || "—")}</span>
+            ${j.brand_stage_name ? `<span class="pill static">${escapeHtml(j.brand_stage_name)}</span>` : ""}
+          </div>
+          ${skills ? `<div class="card-sub mb-8 mt-12">技能</div><div class="job-meta">${skills}</div>` : ""}
+          ${labels ? `<div class="card-sub mb-8 mt-12">标签</div><div class="pills">${labels}</div>` : ""}
+          ${welfare ? `<div class="card-sub mb-8 mt-12">福利</div><div class="pills">${welfare}</div>` : ""}
+          <div class="flex between center mb-8 mt-12">
+            <div class="card-sub">职位描述</div>
+            <span class="pill ${j.job_desc ? "accent" : "static"}">${j.job_desc ? "已抓描述" : "无描述"}</span>
+          </div>
+          ${j.job_desc
+            ? `<details class="acc"><summary>展开 JD（${String(j.job_desc).length} 字）</summary><div class="acc-body" style="white-space:pre-wrap">${escapeHtml(j.job_desc)}</div></details>`
+            : `<div class="muted" style="font-size:12px">列表接口不带 JD；到「职位」页点「补抓描述」。</div>`}
+        `;
+      })
+      .catch(() => {
+        const host = dlg.box.querySelector(".md-job-extra");
+        if (host) host.innerHTML = `<div class="muted" style="font-size:12px">职位详情不可用（可能已从库里删除）</div>`;
+      });
   }
 
   function deliverLabel(m) {
@@ -586,6 +699,11 @@ export async function renderMatch(root) {
       touched = true;
     });
     if (touched) renderMatches();
+    // 详情弹窗若开着，里面的发送状态也跟着走
+    if (detailApi) {
+      const cur = matches.find((x) => x.encrypt_job_id === detailApi.jid);
+      if (cur) detailApi.setStatus(deliverLabel(cur));
+    }
   }
 
   function startDeliverPoll() {
@@ -665,7 +783,7 @@ export async function renderMatch(root) {
         </div>`
       )
       .join("");
-    modal({
+    const dlg = modal({
       title: `确认发送 · 共 ${targets.length} 条`,
       body: `
         <div class="banner warn mb-12">将先<strong>建立会话</strong>，再把下方的招呼语正文作为<strong>聊天消息</strong>单独发给招聘方。</div>
@@ -677,16 +795,15 @@ export async function renderMatch(root) {
         </div>`,
       wide: true,
     });
-    setTimeout(() => {
-      const ok = document.getElementById("m-confirm");
-      const no = document.getElementById("m-cancel");
-      if (!ok || !no) return;
-      no.addEventListener("click", () => document.querySelector(".modal-close")?.click());
-      ok.addEventListener("click", () => {
-        document.querySelector(".modal-close")?.click();
-        startDeliver(targets);
-      });
-    }, 0);
+    // 用自己的 close，别 document.querySelector——详情弹窗可能压在下面
+    const ok = dlg.box.querySelector("#m-confirm");
+    const no = dlg.box.querySelector("#m-cancel");
+    if (!ok || !no) return;
+    no.addEventListener("click", () => dlg.close());
+    ok.addEventListener("click", () => {
+      dlg.close();
+      startDeliver(targets);
+    });
   }
 
   // ---------- 历史 ----------
@@ -717,7 +834,10 @@ export async function renderMatch(root) {
             const data = await api.get("/api/match/analyses/" + b.dataset.load);
             analysisId = data.analysis_id;
             matches = data.matches || [];
-            expanded.clear();
+            if (detailApi) {
+              detailApi.close();
+              detailApi = null;
+            }
             greetDrafts.clear();
             $("an-sub").textContent = `历史 · ${fmtTime(data.created_at)} · ${matches.length} 条`;
             renderMatches();
@@ -737,7 +857,10 @@ export async function renderMatch(root) {
             if (analysisId === b.dataset.del) {
               analysisId = null;
               matches = [];
-              expanded.clear();
+              if (detailApi) {
+                detailApi.close();
+                detailApi = null;
+              }
               greetDrafts.clear();
               renderMatches();
             }

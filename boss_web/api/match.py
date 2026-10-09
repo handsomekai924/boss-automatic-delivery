@@ -8,7 +8,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..errors import NotFoundError, ValidationWebError
-from ..services.match_task import match_tasks
+from ..services.match_task import match_tasks, regenerate_greeting
 from ..services.resume_store import (
     delete_analysis,
     list_analyses,
@@ -28,6 +28,10 @@ class MatchBody(BaseModel):
 class GreetingBody(BaseModel):
     encrypt_job_id: str
     greeting: str = Field("", max_length=500)
+
+
+class RegenGreetingBody(BaseModel):
+    encrypt_job_id: str
 
 
 @router.post("/analyze")
@@ -62,6 +66,20 @@ def patch_greeting(analysis_id: str, body: GreetingBody) -> dict[str, Any]:
     except KeyError as exc:
         raise NotFoundError(f"分析里没有这个职位：{body.encrypt_job_id}") from exc
     return {"ok": True, "item": item}
+
+
+@router.post("/{analysis_id}/greeting/regenerate")
+def regen_greeting(analysis_id: str, body: RegenGreetingBody) -> dict[str, Any]:
+    """重打一条招呼语草稿：**只回新文案，不落库**（用户可能反复生成再挑一条保存）。"""
+    try:
+        greeting = regenerate_greeting(
+            analysis_id=analysis_id, encrypt_job_id=body.encrypt_job_id
+        )
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"分析结果不存在：{analysis_id}") from exc
+    except KeyError as exc:
+        raise NotFoundError(f"分析里没有这个职位：{body.encrypt_job_id}") from exc
+    return {"ok": True, "greeting": greeting}
 
 
 @router.get("/analyses")

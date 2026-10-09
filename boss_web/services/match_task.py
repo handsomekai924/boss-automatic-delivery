@@ -25,10 +25,10 @@ from typing import Any, Sequence
 from boss_jobs.models import Job
 
 from .. import config as C
-from ..errors import ConflictError, NotFoundError
+from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import load_config
-from .resume_store import load_llm_parse, load_resume, save_analysis
+from .resume_store import load_analysis, load_llm_parse, load_resume, save_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,35 @@ STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
+
+#: 只重打招呼语用的短 prompt：不跑整套人岗评估，省 token 也更聚焦
+GREETING_SYSTEM_PROMPT = (
+    "你是资深互联网猎头，擅长写求职打招呼私信。"
+    "只输出私信正文本身，不要任何解释、引号或代码围栏。"
+    "立场：这是求职者本人发给招聘方 HR 的私信，一律用第一人称「我」写，"
+    "绝不能写成招聘方/HR 的口吻。"
+)
+
+GREETING_USER_TEMPLATE = """# 简历（结构化摘要）
+{resume_brief}
+
+# 目标职位
+- 岗位：{job_name}
+- 公司：{brand_name}（{brand_industry} / {brand_scale_name}）
+- 地点：{location}
+- 薪资：{salary_desc}
+- 经验/学历：{job_experience} / {job_degree}
+- 标签：{job_labels}
+- 技能要求：{job_skills}
+
+# 职位描述（JD）
+{job_desc}
+
+请以求职者第一人称「我」的口吻，写一条发给该岗位招聘方 HR 的打招呼私信：
+- 100 到 150 个字，自然具体不吹牛
+- 禁止以招聘方/HR 口吻说话——不要出现『我们公司』『我们团队』『我们正在招』『欢迎投递』『期待你的加入』这类话
+- 不要介绍公司或岗位，只做自我推荐
+- 只输出私信正文，不要引号、不要解释"""
 
 
 class MatchTask:
@@ -394,6 +423,130 @@ def _match_one(llm: LLMClient, resume_brief: str, job: Job) -> dict[str, Any]:
         "advice": str(data.get("advice") or ""),
         "greeting": str(data.get("greeting") or ""),
     }
+
+
+def regenerate_greeting(
+    *,
+    analysis_id: str,
+    encrypt_job_id: str,
+    llm: LLMClient | None = None,
+) -> str:
+    """重打一条招呼语草稿，**只回文案、不落库**——用户可能反复生成再挑一条保存。
+
+    找不到 analysis → ``FileNotFoundError``；分析里没有这条职位 → ``KeyError``。
+    """
+    resume_id, item = _match_context(analysis_id, encrypt_job_id)
+
+    if llm is None:
+        cfg = load_config()
+        if not cfg.configured:
+            raise ValidationWebError(
+                "LLM 还没配置，请先到「模型」页填好 API Key / Base URL / 模型名"
+            )
+        client: LLMClient = LLMClient(cfg)
+    else:
+        client = llm
+
+    try:
+        resume = load_resume(resume_id)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"简历不存在：{resume_id}") from exc
+    try:
+        llm_parse = load_llm_parse(resume_id)
+    except FileNotFoundError:
+        llm_parse = None
+
+    user = GREETING_USER_TEMPLATE.format(
+        resume_brief=_resume_brief(resume, llm_parse),
+        **_greet_fields(item, _load_job(encrypt_job_id)),
+    )
+    messages = [
+        {"role": "system", "content": GREETING_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+    greeting = _clean_greeting(client.chat(messages))
+    if not greeting:
+        # 偶尔模型爱补一句解释 / 包 JSON，再逼一次
+        greeting = _clean_greeting(
+            client.chat([*messages[:1], {"role": "user", "content": user + "\n\n请严格只输出私信正文。"}])
+        )
+    if not greeting:
+        raise UpstreamError("LLM 没回合法的招呼语正文")
+    return greeting
+
+
+def _match_context(analysis_id: str, encrypt_job_id: str) -> tuple[str, dict[str, Any]]:
+    """取 ``(resume_id, 那条 match)``：优先读落库的 analysis，没有就看在跑的匹配任务。"""
+    try:
+        payload = load_analysis(analysis_id)
+    except FileNotFoundError:
+        task = match_tasks.current()
+        if task is None or task.analysis_id != analysis_id:
+            raise FileNotFoundError(analysis_id)
+        resume_id = task.resume_id
+        matches = list(task.matches)
+    else:
+        resume_id = str(payload.get("resume_id") or "")
+        matches = payload.get("matches") or []
+    for item in matches:
+        if isinstance(item, dict) and item.get("encrypt_job_id") == encrypt_job_id:
+            return resume_id, item
+    raise KeyError(encrypt_job_id)
+
+
+def _load_job(encrypt_job_id: str) -> Job | None:
+    from boss_jobs.store import JobStore
+
+    with JobStore() as store:
+        return store.get_job(encrypt_job_id)
+
+
+def _greet_fields(item: dict[str, Any], job: Job | None) -> dict[str, str]:
+    """招呼语 prompt 的职位块：库里有完整 Job 用它（含 JD），没有就退回 match 存的摘要。"""
+    if job is not None:
+        return {
+            "job_name": job.job_name,
+            "brand_name": job.brand_name,
+            "brand_industry": job.brand_industry or "-",
+            "brand_scale_name": job.brand_scale_name or "-",
+            "location": job.location or "-",
+            "salary_desc": job.salary_desc or "-",
+            "job_experience": job.job_experience or "-",
+            "job_degree": job.job_degree or "-",
+            "job_labels": "、".join(job.job_labels[:12]) or "-",
+            "job_skills": "、".join(job.skills[:12]) or "-",
+            "job_desc": _job_desc_block(job),
+        }
+    return {
+        "job_name": str(item.get("job_name") or "-"),
+        "brand_name": str(item.get("brand_name") or "-"),
+        "brand_industry": str(item.get("brand_industry") or "-"),
+        "brand_scale_name": str(item.get("brand_scale_name") or "-"),
+        "location": str(item.get("location") or "-"),
+        "salary_desc": str(item.get("salary_desc") or "-"),
+        "job_experience": str(item.get("job_experience") or "-"),
+        "job_degree": str(item.get("job_degree") or "-"),
+        "job_labels": "-",
+        "job_skills": "-",
+        "job_desc": "（职位已不在库里，按上面的字段写）",
+    }
+
+
+def _clean_greeting(raw: str) -> str:
+    """把 LLM 回话收成一条正文：JSON 里的 greeting 优先，再退回纯文本并去围栏/引号。"""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    data = extract_json(text)
+    if isinstance(data, dict) and data.get("greeting"):
+        text = str(data["greeting"]).strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+    # 成对引号（含「」『』这种开闭不同的）
+    pairs = {'"': '"', "'": "'", "「": "」", "『": "』"}
+    if len(text) >= 2 and text[0] in pairs and text[-1] == pairs[text[0]]:
+        text = text[1:-1].strip()
+    return text[:300]
 
 
 def _finalize(task: MatchTask, resume: Any, cfg: Any, llm_parse: dict[str, Any] | None) -> None:

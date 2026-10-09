@@ -280,3 +280,148 @@ def test_api_greeting_patch_roundtrip():
         json={"encrypt_job_id": "missing", "greeting": "x"},
     )
     assert r.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# 重新生成招呼语（只回草稿，不落库）
+# --------------------------------------------------------------------------- #
+
+
+def _seed_greet_world():
+    """一份简历 + 一个职位 + 一份 analysis，够 regenerate 用。"""
+    from boss_jobs.models import Job, PageResult
+    from boss_jobs.store import JobStore
+    from boss_web.services.resume_store import save_resume
+
+    draft = save_resume("# 张三\nPython 后端", filename="a.md")
+    save_llm_parse(
+        draft.resume_id, {"parsed_at": 1.0, "model": "m", "data": {"summary": "会 Python"}}
+    )
+    job = Job(
+        job_name="Python",
+        brand_name="某公司",
+        location="广州",
+        salary_desc="20-30K",
+        job_experience="3-5年",
+        job_degree="本科",
+        brand_industry="互联网",
+        brand_scale_name="100-499人",
+        encrypt_job_id="j1",
+        job_desc="负责后端开发",
+    )
+    with JobStore() as store:
+        store.save_page(PageResult(page=1, jobs=(job,), has_more=False, raw_count=1, dropped=()))
+    save_analysis(
+        {
+            "analysis_id": "an_re",
+            "resume_id": draft.resume_id,
+            "matches": [{"encrypt_job_id": "j1", "job_name": "Python", "greeting": "旧招呼"}],
+        }
+    )
+
+
+class _ScriptLLM:
+    """按序回脚本化文本；顺手记下每次的 prompt，方便断言注入了 JD。"""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def chat(self, messages, **kw):
+        self.calls.append(messages)
+        return self.replies.pop(0) if self.replies else ""
+
+
+def test_regenerate_returns_draft_without_saving(db):
+    """生成的招呼语只回给前端，库里那条还是旧的——用户可能反复生成再挑一条。"""
+    from boss_web.services.match_task import regenerate_greeting
+    from boss_web.services.resume_store import load_analysis
+
+    _seed_greet_world()
+    llm = _ScriptLLM(["您好，我有 3 年 Python 后端经验，想聊聊这个岗位"])
+    text = regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=llm)
+    assert "Python" in text
+    # prompt 里带上了 JD
+    assert "负责后端开发" in llm.calls[0][1]["content"]
+    assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
+
+    # 再生成一次也是草稿，库里的还是旧的
+    llm2 = _ScriptLLM(["第二版招呼语"])
+    assert regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=llm2) == "第二版招呼语"
+    assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
+
+
+def test_regenerate_cleans_json_and_quotes(db):
+    """模型偶尔包 JSON / 引号，照样收成正文。"""
+    from boss_web.services.match_task import _clean_greeting, regenerate_greeting
+
+    _seed_greet_world()
+    llm = _ScriptLLM([json.dumps({"greeting": "「您好，想聊聊」"}, ensure_ascii=False)])
+    assert regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=llm) == "您好，想聊聊"
+    assert _clean_greeting("```\n纯文本正文\n```") == "纯文本正文"
+
+
+def test_regenerate_missing_analysis_or_job(db):
+    from boss_web.services.match_task import regenerate_greeting
+
+    _seed_greet_world()
+    with pytest.raises(FileNotFoundError):
+        regenerate_greeting(analysis_id="nope", encrypt_job_id="j1", llm=_ScriptLLM([]))
+    with pytest.raises(KeyError):
+        regenerate_greeting(analysis_id="an_re", encrypt_job_id="nope", llm=_ScriptLLM([]))
+
+
+def test_api_greeting_regenerate(db):
+    """POST .../greeting/regenerate：回新文案，PATCH 才落库。"""
+    from fastapi.testclient import TestClient
+
+    from boss_web import create_app
+    from boss_web.services import match_task as mt
+    from boss_web.services.llm_config_store import LLMConfig, save_config
+    from boss_web.services.resume_store import load_analysis
+
+    _seed_greet_world()
+    save_config(LLMConfig(api_key="sk-x", base_url="https://x/v1", model="m"))
+    c = TestClient(create_app())
+
+    fake = _ScriptLLM(["API 生成的草稿"])
+
+    class _FakeClient:
+        def __init__(self, cfg, **kw):
+            pass
+
+        def chat(self, messages, **kw):
+            return fake.chat(messages, **kw)
+
+    orig = mt.LLMClient
+    mt.LLMClient = _FakeClient
+    try:
+        r = c.post("/api/match/an_re/greeting/regenerate", json={"encrypt_job_id": "j1"})
+    finally:
+        mt.LLMClient = orig
+
+    assert r.status_code == 200
+    assert r.json()["greeting"] == "API 生成的草稿"
+    # 生成不落库
+    assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
+
+    # 手动保存才落库
+    r = c.patch(
+        "/api/match/an_re/greeting",
+        json={"encrypt_job_id": "j1", "greeting": "API 生成的草稿"},
+    )
+    assert r.status_code == 200
+    assert load_analysis("an_re")["matches"][0]["greeting"] == "API 生成的草稿"
+
+
+def test_api_greeting_regenerate_requires_llm_config(db):
+    """LLM 没配好 → 422，不给半截草稿。"""
+    from fastapi.testclient import TestClient
+
+    from boss_web import create_app
+
+    _seed_greet_world()
+    c = TestClient(create_app())
+    r = c.post("/api/match/an_re/greeting/regenerate", json={"encrypt_job_id": "j1"})
+    assert r.status_code == 422
+    assert "LLM" in r.json()["message"]
