@@ -8,7 +8,13 @@
 登录 ──► 找职位 ──► 简历匹配 ──► AI 写招呼语 ──► 一键投递
 ```
 
-> **不想碰命令行？** 直接下打包好的 `BossAutoDelivery.exe`，双击就能用，见 [打包成 exe 分发](#打包成-exe-分发)。
+> **不想碰命令行？** 直接下打包好的 `BossAutoDelivery.exe`，双击就能用——到 Releases 页面的
+> **Assets** 里下，无需 Python、无需 venv：
+>
+> - **GitHub**：https://github.com/handsomekai924/boss-automatic-delivery/releases
+> - **Gitee**（国内下载更快）：https://gitee.com/w-kev/boss-automatic-delivery/releases
+>
+> 想自己打包见 [打包成 exe 分发](#打包成-exe-分发)。
 
 ---
 
@@ -108,6 +114,19 @@ pip install -r requirements.txt
 
 给**不用命令行的人**准备的：一个单文件 `BossAutoDelivery.exe`，双击就开浏览器，
 目标机器上不需要 Python、不需要 venv、不需要 pip。
+
+### 直接下载现成的
+
+不用自己打包，去 Releases 页面的 **Assets** 里下 `BossAutoDelivery.exe`：
+
+| 来源 | 下载地址 | 说明 |
+|------|----------|------|
+| **GitHub** | https://github.com/handsomekai924/boss-automatic-delivery/releases | 最新版 |
+| **Gitee** | https://gitee.com/w-kev/boss-automatic-delivery/releases | 国内访问更快，版本与 GitHub 同步 |
+
+下载后先跑 `BossAutoDelivery.exe --self-check` 可核对完整性，确认没问题再双击启动。
+
+### 自己打包
 
 ```bash
 pip install -r requirements.txt -r requirements-build.txt
