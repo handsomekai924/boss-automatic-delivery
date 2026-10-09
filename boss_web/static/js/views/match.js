@@ -500,6 +500,7 @@ export async function renderMatch(root) {
     }
 
     const score = m.match_score || 0;
+    const failed = !!(m.error || "").trim(); // 匹配失败（LLM 调用挂了）→ 提供重新匹配
     const verdict = (m.verdict || "").trim();
     const advice = (m.advice || "").trim();
     const matched = (m.matched_skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
@@ -541,13 +542,22 @@ export async function renderMatch(root) {
         <div class="card-sub mb-8 mt-16">招呼语 <span class="muted" style="font-size:11px">生成后先存草稿，满意再点保存</span></div>
         <textarea class="input mono greeting-edit" rows="3" style="width:100%;font-size:12.5px">${escapeHtml(draft)}</textarea>
         <div class="btn-row mt-8">
+          ${
+            failed
+            ? `<button class="btn sm primary btn-rematch">重新匹配</button>`
+            : ""
+          }
           <button class="btn sm btn-regen-greet">重新生成</button>
           <button class="btn sm ghost btn-save-greet">保存招呼语</button>
           <button class="btn sm primary btn-send-one">发送</button>
           <span class="muted send-status" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
         </div>
         <div class="muted draft-hint mt-8" style="font-size:11px;display:none">草稿未保存，满意后点「保存招呼语」；可反复点「重新生成」换一版</div>
-        ${m.error ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>` : ""}
+        ${
+          failed
+            ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>`
+            : ""
+        }
       `,
       onClose: () => {
         if (detailApi && detailApi.jid === jid) detailApi = null;
@@ -618,6 +628,34 @@ export async function renderMatch(root) {
       const cur = matches.find((x) => x.encrypt_job_id === jid);
       if (cur) confirmAndSend([cur]);
     });
+
+    // 匹配失败才有的补救入口：只重跑这一条，结果原地覆盖（不新增分析记录）
+    const rematchBtn = dlg.box.querySelector(".btn-rematch");
+    if (rematchBtn) {
+      rematchBtn.addEventListener("click", async () => {
+        if (!analysisId) return toast("先跑一次匹配再重新匹配", "warn");
+        rematchBtn.disabled = true;
+        rematchBtn.textContent = "重新匹配中…";
+        try {
+          const r = await api.post(`/api/match/${analysisId}/rematch`, { encrypt_job_id: jid });
+          const item = r.item || {};
+          const idx = matches.findIndex((x) => x.encrypt_job_id === jid);
+          if (idx >= 0) matches[idx] = item;
+          greetDrafts.delete(jid); // 整条结果重来，旧草稿别顶掉新招呼语
+          renderMatches();
+          if (item.error) toast(`重新匹配又失败了：${item.error}`, "bad");
+          else toast("重新匹配完成，结果已原地覆盖", "ok");
+          // 弹窗还开着才就地刷新；用户已关掉就别把弹窗弹回来
+          if (detailApi && detailApi.jid === jid) openMatchDetail(jid);
+        } catch (err) {
+          toast(err.message || "重新匹配失败", "bad");
+          if (rematchBtn.isConnected) {
+            rematchBtn.disabled = false;
+            rematchBtn.textContent = "重新匹配";
+          }
+        }
+      });
+    }
 
     // 职位全量信息（经验 / 学历 / 行业 / 规模 / 技能 / 福利 / JD）异步补进来；
     // 招聘人单独放到顶部工作地点下方

@@ -8,7 +8,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..errors import NotFoundError, ValidationWebError
-from ..services.match_task import match_tasks, regenerate_greeting
+from ..services.match_task import match_tasks, regenerate_greeting, rematch_job
 from ..services.resume_store import (
     delete_analysis,
     list_analyses,
@@ -31,6 +31,10 @@ class GreetingBody(BaseModel):
 
 
 class RegenGreetingBody(BaseModel):
+    encrypt_job_id: str
+
+
+class RematchBody(BaseModel):
     encrypt_job_id: str
 
 
@@ -80,6 +84,18 @@ def regen_greeting(analysis_id: str, body: RegenGreetingBody) -> dict[str, Any]:
     except KeyError as exc:
         raise NotFoundError(f"分析里没有这个职位：{body.encrypt_job_id}") from exc
     return {"ok": True, "greeting": greeting}
+
+
+@router.post("/{analysis_id}/rematch")
+def rematch_one(analysis_id: str, body: RematchBody) -> dict[str, Any]:
+    """对一条 match 重跑人岗匹配：**只改库里那条、不新增 analysis**。"""
+    try:
+        item = rematch_job(analysis_id=analysis_id, encrypt_job_id=body.encrypt_job_id)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"分析结果不存在：{analysis_id}") from exc
+    except KeyError as exc:
+        raise NotFoundError(f"分析里没有这个职位：{body.encrypt_job_id}") from exc
+    return {"ok": True, "item": item}
 
 
 @router.get("/analyses")

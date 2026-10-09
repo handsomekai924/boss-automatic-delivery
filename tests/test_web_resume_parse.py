@@ -425,3 +425,241 @@ def test_api_greeting_regenerate_requires_llm_config(db):
     r = c.post("/api/match/an_re/greeting/regenerate", json={"encrypt_job_id": "j1"})
     assert r.status_code == 422
     assert "LLM" in r.json()["message"]
+
+
+# --------------------------------------------------------------------------- #
+# 重新匹配：只改不增（原地覆盖那条 match，不新插 analysis 行）
+# --------------------------------------------------------------------------- #
+
+
+def _seed_failed_world():
+    """一条匹配失败的 match + 一条正常的 match，够 rematch 用。"""
+    from boss_jobs.models import Job, PageResult
+    from boss_jobs.store import JobStore
+    from boss_web.services.resume_store import save_resume
+
+    draft = save_resume("# 张三\nPython 后端", filename="a.md")
+    save_llm_parse(
+        draft.resume_id, {"parsed_at": 1.0, "model": "m", "data": {"summary": "会 Python"}}
+    )
+    job = Job(
+        job_name="Python",
+        brand_name="某公司",
+        location="广州",
+        salary_desc="20-30K",
+        job_experience="3-5年",
+        job_degree="本科",
+        brand_industry="互联网",
+        brand_scale_name="100-499人",
+        encrypt_job_id="j1",
+        security_id="sid",
+        lid="lid1",
+        job_desc="负责后端开发",
+    )
+    with JobStore() as store:
+        store.save_page(PageResult(page=1, jobs=(job,), has_more=False, raw_count=1, dropped=()))
+    save_analysis(
+        {
+            "analysis_id": "an_fail",
+            "resume_id": draft.resume_id,
+            "job_count": 2,
+            "top_score": 80.0,
+            "matches": [
+                {
+                    "encrypt_job_id": "j1",
+                    "job_name": "Python",
+                    "brand_name": "某公司",
+                    "security_id": "sid",
+                    "lid": "lid1",
+                    "match_score": 0,
+                    "verdict": "匹配失败",
+                    "pros": [],
+                    "cons": [],
+                    "advice": "",
+                    "greeting": "",
+                    "error": "LLM 没回合法 JSON",
+                    "deliver_status": "sending",
+                },
+                {
+                    "encrypt_job_id": "j2",
+                    "job_name": "Java",
+                    "match_score": 80,
+                    "verdict": "合适",
+                    "greeting": "你好",
+                    "error": "",
+                },
+            ],
+        }
+    )
+
+
+def _analysis_row_count() -> int:
+    import boss_db
+
+    conn = boss_db.acquire()
+    return int(conn.execute("SELECT COUNT(*) AS n FROM analysis").fetchone()["n"])
+
+
+def test_rematch_overwrites_failed_item_only(db):
+    """重跑成功：只改那条 match，analysis 行数不变（只改不增），快照/发送状态复用。"""
+    from boss_web.services.match_task import rematch_job
+    from boss_web.services.resume_store import load_analysis
+
+    _seed_failed_world()
+    llm = _ScriptLLM(
+        [
+            json.dumps(
+                {
+                    "match_score": 88,
+                    "matched_skills": ["Python"],
+                    "missing_skills": ["K8s"],
+                    "verdict": "合适",
+                    "pros": ["亮点"],
+                    "cons": ["短板"],
+                    "advice": "补 K8s",
+                    "greeting": "您好，想聊聊",
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    item = rematch_job(analysis_id="an_fail", encrypt_job_id="j1", llm=llm)
+    assert item["match_score"] == 88
+    assert item["error"] == ""
+    assert item["greeting"] == "您好，想聊聊"
+    # 职位数据复用库里的那条（JD 进了 prompt），快照 / 发送状态原样保留
+    assert "负责后端开发" in llm.calls[0][1]["content"]
+    assert item["job_name"] == "Python"
+    assert item["security_id"] == "sid"
+    assert item["lid"] == "lid1"
+    assert item["deliver_status"] == "sending"
+
+    payload = load_analysis("an_fail")
+    assert len(payload["matches"]) == 2  # 只改不增：match 条数不变
+    assert payload["matches"][0]["match_score"] == 88
+    assert payload["matches"][1]["job_name"] == "Java"  # 另一条没动
+    assert payload["matches"][1]["greeting"] == "你好"
+
+    assert _analysis_row_count() == 1  # 只改不增：还是原来那一行
+    import boss_db
+
+    row = boss_db.acquire().execute(
+        "SELECT top_score FROM analysis WHERE analysis_id = 'an_fail'"
+    ).fetchone()
+    assert float(row["top_score"]) == 88.0
+
+
+def test_rematch_failure_keeps_existing_fields(db):
+    """重跑又失败：只换 error，已有内容（含手改招呼语）不掀掉。"""
+    from boss_web.services.match_task import rematch_job
+    from boss_web.services.resume_store import load_analysis, update_greeting
+
+    _seed_failed_world()
+    update_greeting("an_fail", "j1", "用户手改的招呼语")
+
+    class _Boom:
+        def chat(self, messages, **kw):
+            raise RuntimeError("LLM 超时")
+
+    item = rematch_job(analysis_id="an_fail", encrypt_job_id="j1", llm=_Boom())
+    assert "LLM 超时" in item["error"]
+    assert item["greeting"] == "用户手改的招呼语"
+    assert item["match_score"] == 0
+
+    assert load_analysis("an_fail")["matches"][0]["error"] == "LLM 超时"
+    assert _analysis_row_count() == 1
+
+
+def test_rematch_missing_refs(db):
+    from boss_web.services.match_task import rematch_job
+
+    _seed_failed_world()
+    with pytest.raises(FileNotFoundError):
+        rematch_job(analysis_id="nope", encrypt_job_id="j1", llm=_ScriptLLM([]))
+    with pytest.raises(KeyError):
+        rematch_job(analysis_id="an_fail", encrypt_job_id="nope", llm=_ScriptLLM([]))
+
+
+def test_rematch_patches_running_task_without_insert(db):
+    """分析还没落库（在跑的匹配任务）→ 改内存那条，同样一行不新插。"""
+    from boss_web.services import match_task as mt
+    from boss_web.services.resume_store import save_resume
+
+    _seed_failed_world()
+    draft = save_resume("# 张三\nPython 后端", filename="b.md")
+    task = mt.MatchTask(draft.resume_id, [])
+    task.matches.append(
+        {
+            "encrypt_job_id": "j1",
+            "job_name": "Python",
+            "security_id": "sid",
+            "match_score": 0,
+            "verdict": "匹配失败",
+            "greeting": "",
+            "error": "boom",
+        }
+    )
+    # 直接挂上 manager：start() 会开线程跑批，这里只要内存里的那条 match
+    with mt.match_tasks._lock:
+        mt.match_tasks._task = task
+    try:
+        llm = _ScriptLLM(
+            [json.dumps({"match_score": 70, "verdict": "还行", "greeting": "你好"}, ensure_ascii=False)]
+        )
+        item = mt.rematch_job(analysis_id=task.analysis_id, encrypt_job_id="j1", llm=llm)
+    finally:
+        with mt.match_tasks._lock:
+            mt.match_tasks._task = None
+
+    assert item["match_score"] == 70
+    assert item["error"] == ""
+    assert task.matches[0]["match_score"] == 70  # 内存那条被原地改掉
+    assert task.matches[0]["security_id"] == "sid"
+    # 除了 _seed_failed_world 那一行，没有新插
+    assert _analysis_row_count() == 1
+
+
+def test_api_rematch(db):
+    """POST .../rematch：回改后的那条，库里原地覆盖（不新增）。"""
+    from fastapi.testclient import TestClient
+
+    from boss_web import create_app
+    from boss_web.services import match_task as mt
+    from boss_web.services.llm_config_store import LLMConfig, save_config
+    from boss_web.services.resume_store import load_analysis
+
+    _seed_failed_world()
+    save_config(LLMConfig(api_key="sk-x", base_url="https://x/v1", model="m"))
+    fake = _ScriptLLM(
+        [
+            json.dumps(
+                {"match_score": 77, "verdict": "可以", "greeting": "您好", "pros": ["A"]},
+                ensure_ascii=False,
+            )
+        ]
+    )
+
+    class _FakeClient:
+        def __init__(self, cfg, **kw):
+            pass
+
+        def chat(self, messages, **kw):
+            return fake.chat(messages, **kw)
+
+    orig = mt.LLMClient
+    mt.LLMClient = _FakeClient
+    try:
+        c = TestClient(create_app())
+        r = c.post("/api/match/an_fail/rematch", json={"encrypt_job_id": "j1"})
+    finally:
+        mt.LLMClient = orig
+
+    assert r.status_code == 200
+    assert r.json()["item"]["match_score"] == 77
+    assert load_analysis("an_fail")["matches"][0]["match_score"] == 77
+    assert _analysis_row_count() == 1
+
+    r = c.post("/api/match/an_fail/rematch", json={"encrypt_job_id": "missing"})
+    assert r.status_code == 404
+    r = c.post("/api/match/nope/rematch", json={"encrypt_job_id": "j1"})
+    assert r.status_code == 404

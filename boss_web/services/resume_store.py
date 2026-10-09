@@ -322,12 +322,17 @@ def load_llm_parse(resume_id: str) -> dict[str, Any] | None:
     return llm if isinstance(llm, dict) else None
 
 
+def _top_score(matches: Any) -> float:
+    """matches 里的最高分（没有 / 全不是数字 → 0），跟 analysis 行的 ``top_score`` 列同口径。"""
+    scores = [m.get("match_score") or 0 for m in (matches or []) if isinstance(m, dict)]
+    scores = [s for s in scores if isinstance(s, (int, float))]
+    return float(max(scores) if scores else 0.0)
+
+
 def save_analysis(payload: dict[str, Any]) -> str:
     analysis_id = str(payload.get("analysis_id") or ("an_" + uuid.uuid4().hex[:10]))
     payload["analysis_id"] = analysis_id
     matches = payload.get("matches") or []
-    scores = [m.get("match_score") or 0 for m in matches if isinstance(m, dict)]
-    scores = [s for s in scores if isinstance(s, (int, float))]
     llm = payload.get("llm") or {}
     conn = boss_db.acquire()
     with conn:
@@ -344,7 +349,7 @@ def save_analysis(payload: dict[str, Any]) -> str:
                 str(llm.get("model") or ""),
                 str(llm.get("base_url") or ""),
                 len(matches),
-                float(max(scores) if scores else 0.0),
+                _top_score(matches),
                 json.dumps(payload, ensure_ascii=False),
             ),
         )
@@ -365,7 +370,8 @@ def _patch_match(analysis_id: str, encrypt_job_id: str, **fields: Any) -> dict[s
     """改 payload 里某一条 match 的字段，回改后的那条。
 
     找不到 analysis → ``FileNotFoundError``；找不到那条 match → ``KeyError``。
-    招呼语与发送结果都走这里——一次读改写，别开两套。
+    招呼语、发送结果与单条重跑都走这里——一次读改写，别开两套。
+    **只 UPDATE 已有行，不新插**；``top_score`` 列跟着 matches 重新收敛。
     """
     payload = load_analysis(analysis_id)
     matches = payload.get("matches")
@@ -381,12 +387,21 @@ def _patch_match(analysis_id: str, encrypt_job_id: str, **fields: Any) -> dict[s
     conn = boss_db.acquire()
     with conn:
         conn.execute(
-            "UPDATE analysis SET payload = ? WHERE analysis_id = ?",
-            (json.dumps(payload, ensure_ascii=False), analysis_id),
+            "UPDATE analysis SET payload = ?, top_score = ? WHERE analysis_id = ?",
+            (json.dumps(payload, ensure_ascii=False), _top_score(matches), analysis_id),
         )
     return next(
         m for m in matches if isinstance(m, dict) and m.get("encrypt_job_id") == encrypt_job_id
     )
+
+
+def update_match_result(analysis_id: str, encrypt_job_id: str, **fields: Any) -> dict[str, Any]:
+    """单条重跑匹配后回写那条 match——**只改不增**：只 UPDATE 已有 analysis 行。
+
+    只覆盖传进来的分析字段；职位快照（``job_name`` / ``security_id`` / …）与
+    发送状态等原有数据原样复用，既不新插 analysis，也不新插 match 条目。
+    """
+    return _patch_match(analysis_id, encrypt_job_id, **fields)
 
 
 def update_greeting(analysis_id: str, encrypt_job_id: str, greeting: str) -> dict[str, Any]:

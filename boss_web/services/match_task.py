@@ -7,7 +7,8 @@
   work / intent），没解析过才退回规则切章节的摘要；
 - 职位侧注入 **JD 正文**（``job_desc``），没抓到就用标签/技能兜底；
 - 范围是**全库全部岗位**或勾选的 job_id（C4 已拍板，不再 top_k 封顶）；
-- 结果写 ``analysis`` 表，每条 match 带 ``encrypt_job_id``，招呼语可后改。
+- 结果写 ``analysis`` 表，每条 match 带 ``encrypt_job_id``，招呼语可后改；
+- 单条失败可 :func:`rematch_job` 原地重跑——**只改不增**，不新插 analysis 行。
 
 并行（最多 ``MATCH_CONCURRENCY`` 条同时在途），可随时取消；单条失败只记流水，不拖垮整批。
 """
@@ -28,7 +29,13 @@ from .. import config as C
 from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import load_config
-from .resume_store import load_analysis, load_llm_parse, load_resume, save_analysis
+from .resume_store import (
+    load_analysis,
+    load_llm_parse,
+    load_resume,
+    save_analysis,
+    update_match_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -435,7 +442,7 @@ def regenerate_greeting(
 
     找不到 analysis → ``FileNotFoundError``；分析里没有这条职位 → ``KeyError``。
     """
-    resume_id, item = _match_context(analysis_id, encrypt_job_id)
+    resume_id, item, _payload = _match_context(analysis_id, encrypt_job_id)
 
     if llm is None:
         cfg = load_config()
@@ -475,8 +482,98 @@ def regenerate_greeting(
     return greeting
 
 
-def _match_context(analysis_id: str, encrypt_job_id: str) -> tuple[str, dict[str, Any]]:
-    """取 ``(resume_id, 那条 match)``：优先读落库的 analysis，没有就看在跑的匹配任务。"""
+#: 重跑结果要回写的分析字段。职位快照（job_name / security_id / …）与
+#: 发送状态（deliver_*）不在此列——回写时原样复用库里已有的数据。
+RESULT_FIELDS: tuple[str, ...] = (
+    "match_score",
+    "matched_skills",
+    "missing_skills",
+    "verdict",
+    "pros",
+    "cons",
+    "advice",
+    "greeting",
+    "error",
+)
+
+
+def rematch_job(
+    *,
+    analysis_id: str,
+    encrypt_job_id: str,
+    llm: LLMClient | None = None,
+) -> dict[str, Any]:
+    """对一条 match 重跑人岗匹配，结果**原地回写**（只改不增：不新插 analysis 行）。
+
+    职位数据复用库里已有的（``jobs`` 表；职位删了才拿 match 里的快照兜底），
+    回写只覆盖 :data:`RESULT_FIELDS`，职位快照与发送状态保持原样。
+
+    - 重跑成功 → 分析字段整体换成新结果，``error`` 清空；
+    - 重跑又失败 → **只换 ``error``**，其余（含用户手改的招呼语）不动。
+
+    找不到 analysis → ``FileNotFoundError``；没有这条 match → ``KeyError``；
+    LLM 没配好 → ``ValidationWebError``。回改后的那条 match。
+    """
+    resume_id, item, payload = _match_context(analysis_id, encrypt_job_id)
+
+    if llm is None:
+        cfg = load_config()
+        if not cfg.configured:
+            raise ValidationWebError(
+                "LLM 还没配置，请先到「模型」页填好 API Key / Base URL / 模型名"
+            )
+        client: LLMClient = LLMClient(cfg)
+    else:
+        client = llm
+
+    try:
+        resume = load_resume(resume_id)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"简历不存在：{resume_id}") from exc
+    try:
+        llm_parse = load_llm_parse(resume_id)
+    except FileNotFoundError:
+        llm_parse = None
+
+    job = _load_job(encrypt_job_id) or _job_from_snapshot(item)
+    try:
+        result = _match_one(client, _resume_brief(resume, llm_parse), job)
+        result["error"] = ""
+    except Exception as exc:  # noqa: BLE001 - 重跑再失败只换 error，别掀掉已有内容
+        logger.warning("重新匹配职位 %s 失败：%s", item.get("job_name"), exc)
+        return _write_match(
+            analysis_id, encrypt_job_id, {"error": str(exc)}, in_db=payload is not None
+        )
+
+    fields = {k: result[k] for k in RESULT_FIELDS if k in result}
+    return _write_match(analysis_id, encrypt_job_id, fields, in_db=payload is not None)
+
+
+def _write_match(
+    analysis_id: str, encrypt_job_id: str, fields: dict[str, Any], *, in_db: bool
+) -> dict[str, Any]:
+    """回写那条 match：已落库的 UPDATE 那一行，没落库的改在跑任务的内存列表。"""
+    if in_db:
+        return update_match_result(analysis_id, encrypt_job_id, **fields)
+    task = match_tasks.current()
+    if task is None or task.analysis_id != analysis_id:
+        raise FileNotFoundError(analysis_id)
+    with task.lock:
+        for it in task.matches:
+            if it.get("encrypt_job_id") == encrypt_job_id:
+                it.update(fields)
+                return dict(it)
+    raise KeyError(encrypt_job_id)
+
+
+def _match_context(
+    analysis_id: str, encrypt_job_id: str
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    """取 ``(resume_id, 那条 match, 落库的 analysis payload)``。
+
+    payload 为 ``None`` = 这份分析还没落库（还在跑的匹配任务里），
+    回写要改 ``task.matches``；非 ``None`` 则 UPDATE 这一行。
+    """
     try:
         payload = load_analysis(analysis_id)
     except FileNotFoundError:
@@ -485,12 +582,13 @@ def _match_context(analysis_id: str, encrypt_job_id: str) -> tuple[str, dict[str
             raise FileNotFoundError(analysis_id)
         resume_id = task.resume_id
         matches = list(task.matches)
+        payload = None
     else:
         resume_id = str(payload.get("resume_id") or "")
         matches = payload.get("matches") or []
     for item in matches:
         if isinstance(item, dict) and item.get("encrypt_job_id") == encrypt_job_id:
-            return resume_id, item
+            return resume_id, item, payload
     raise KeyError(encrypt_job_id)
 
 
@@ -499,6 +597,23 @@ def _load_job(encrypt_job_id: str) -> Job | None:
 
     with JobStore() as store:
         return store.get_job(encrypt_job_id)
+
+
+def _job_from_snapshot(item: dict[str, Any]) -> Job:
+    """职位已从库里删了 → 用 match 自带的快照拼个 Job（复用已有数据，不重抓）。"""
+    return Job(
+        job_name=str(item.get("job_name") or ""),
+        brand_name=str(item.get("brand_name") or ""),
+        location=str(item.get("location") or ""),
+        salary_desc=str(item.get("salary_desc") or ""),
+        job_experience=str(item.get("job_experience") or ""),
+        job_degree=str(item.get("job_degree") or ""),
+        brand_industry=str(item.get("brand_industry") or ""),
+        brand_scale_name=str(item.get("brand_scale_name") or ""),
+        encrypt_job_id=str(item.get("encrypt_job_id") or ""),
+        security_id=str(item.get("security_id") or ""),
+        lid=str(item.get("lid") or ""),
+    )
 
 
 def _greet_fields(item: dict[str, Any], job: Job | None) -> dict[str, str]:
