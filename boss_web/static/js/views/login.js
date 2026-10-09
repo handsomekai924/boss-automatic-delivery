@@ -13,8 +13,12 @@ export async function renderLogin(root) {
   bootstrapped = true;
 
   root.innerHTML = `
-    <h1 class="hero-title">接入 <span class="grad">BOSS 会话</span></h1>
-    <p class="hero-sub">短信验证码 + 极验滑块都在这个页面完成。滑块由<strong>你本人拖动</strong>官方组件，系统只做票据管道，不认缺口、不伪造轨迹。</p>
+    <div class="page-head">
+      <div class="page-head-text">
+        <h1 class="hero-title">接入 <span class="grad">BOSS 会话</span></h1>
+        <p class="hero-sub">短信验证码 + 极验滑块都在这个页面完成。滑块由<strong>你本人拖动</strong>官方组件，系统只做票据管道，不认缺口、不伪造轨迹。</p>
+      </div>
+    </div>
 
     <div class="bento">
       <div class="card span-7 glow" id="gate">
@@ -111,7 +115,7 @@ export async function renderLogin(root) {
     $("step-done").classList.toggle("hidden", n !== 4);
   }
 
-  function renderEvents(events) {
+  function renderTaskEvents(events) {
     const box = $("events");
     if (!events || !events.length) return;
     box.innerHTML = events
@@ -208,7 +212,7 @@ export async function renderLogin(root) {
     taskId = task.task_id;
     currentTask = task;
     $("gate-state").textContent = task.status;
-    renderEvents(task.events);
+    renderTaskEvents(task.events);
 
     const st = task.status;
     const prev = lastStatus;

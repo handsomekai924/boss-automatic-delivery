@@ -1,15 +1,23 @@
-/** 工作台：便当格总览 */
+/** 工作台：便当格总览 + 实时任务状态 */
 
 import { api } from "../api.js";
-import { fmtTime } from "../ui.js";
+import { fmtTime, taskPanel, taskStateOf, renderEvents } from "../ui.js";
 
 export async function renderHome(root) {
   root.innerHTML = `
-    <h1 class="hero-title">星舰<span class="grad">控制台</span></h1>
-    <p class="hero-sub">登录 · 抓取职位 · 简历匹配 · 模型调用 —— 四条航段，一张面板。</p>
+    <div class="page-head">
+      <div class="page-head-text">
+        <h1 class="hero-title">星舰<span class="grad">控制台</span></h1>
+        <p class="hero-sub">登录 · 抓取职位 · 简历匹配 · 模型调用 —— 四条航段，一张面板。</p>
+      </div>
+      <div class="btn-row">
+        <a class="btn primary" href="#/jobs">开始抓取</a>
+        <a class="btn" href="#/match">去匹配</a>
+      </div>
+    </div>
 
     <div class="bento" id="bento">
-      <div class="card span-5 lift" id="card-session">
+      <div class="card span-4 lift" id="card-session">
         <div class="card-head">
           <h3 class="card-title">会话</h3>
           <span class="card-sub" id="sess-sub">—</span>
@@ -29,19 +37,13 @@ export async function renderHome(root) {
         </div>
         <div class="stat-num" id="jobs-num">…</div>
         <div class="stat-label">已入库职位</div>
-        <div class="mt-16 muted mono" id="jobs-pages">流水 —</div>
+        <div class="mt-12 muted mono" id="jobs-pages">流水 —</div>
         <div class="btn-row mt-16">
           <a class="btn" href="#/jobs">进入职位舱</a>
         </div>
       </div>
 
-      <div class="card span-3 lift" id="card-crawl">
-        <div class="card-head"><h3 class="card-title">抓取</h3></div>
-        <div class="orb-ring" id="crawl-ring" style="--p:0"><div>0<small>PAGES</small></div></div>
-        <div class="mt-16 muted" id="crawl-msg">待命</div>
-      </div>
-
-      <div class="card span-6 lift" id="card-llm">
+      <div class="card span-4 lift" id="card-llm">
         <div class="card-head">
           <h3 class="card-title">模型</h3>
           <span class="card-sub" id="llm-sub">OpenAI 兼容</span>
@@ -58,14 +60,23 @@ export async function renderHome(root) {
         </div>
       </div>
 
-      <div class="card span-6 lift" id="card-resume">
+      <div class="card span-7">
+        <div class="card-head">
+          <h3 class="card-title">抓取任务</h3>
+          <span class="card-sub" id="crawl-phase">idle</span>
+        </div>
+        <div id="home-crawl-task"></div>
+      </div>
+
+      <div class="card span-5 lift" id="card-resume">
         <div class="card-head">
           <h3 class="card-title">简历匹配</h3>
           <span class="card-sub" id="an-sub">—</span>
         </div>
         <div id="an-list" class="muted">还没有分析记录</div>
         <div class="btn-row mt-16">
-          <a class="btn primary" href="#/resume">上传简历开始分析</a>
+          <a class="btn primary" href="#/match">进入匹配舱</a>
+          <a class="btn" href="#/resume">简历库</a>
         </div>
       </div>
 
@@ -149,24 +160,44 @@ export async function renderHome(root) {
       .join("");
   }).catch(() => {});
 
-  // 抓取进度
+  // 抓取任务：统一进度面板
+  const crawl = taskPanel({ title: "职位抓取", stopLabel: "停止抓取" });
+  $("home-crawl-task").appendChild(crawl.el);
+  crawl.onStop(async () => {
+    try {
+      // 取消要带 task_id，没有统一的 /api/crawl/stop
+      const s = await api.get("/api/crawl/status");
+      if (s.task_id) await api.post(`/api/crawl/${s.task_id}/cancel`);
+    } catch { /* ignore */ }
+  });
+  crawl.update({ status: "idle", percent: 0 });
+
   let timer = setInterval(async () => {
     try {
       const s = await api.get("/api/crawl/status");
-      const ring = $("crawl-ring");
+      $("crawl-phase").textContent = s.status && s.task_id ? s.phase || s.status : "idle";
       if (!s.task_id) {
-        ring.innerHTML = `<div>0<small>PAGES</small></div>`;
-        ring.style.setProperty("--p", 0);
-        $("crawl-msg").textContent = "待命";
+        crawl.update({ status: "idle", percent: 0 });
         return;
       }
-      const pages = s.progress?.pages || 0;
-      const maxPages = s.params?.max_pages || 10;
-      const p = Math.min(100, Math.round((pages / maxPages) * 100));
-      ring.style.setProperty("--p", s.status === "running" ? p : 100);
-      ring.innerHTML = `<div>${pages}<small>${s.status.toUpperCase()}</small></div>`;
-      $("crawl-msg").textContent =
-        s.status === "running" ? `抓取中 · ${s.phase}` : s.stopped_reason || s.error || s.status;
+      const p = s.progress || {};
+      const pages = p.pages || 0;
+      const maxPages = s.params?.max_pages || 0;
+      const percent = maxPages > 0 ? Math.min(100, (pages / maxPages) * 100) : (s.status === "done" ? 100 : undefined);
+      crawl.update({
+        status: s.status,
+        percent,
+        current: s.status === "running" ? (s.phase || "抓取中") : (s.stopped_reason || s.error || ""),
+        counts: [
+          ["页", `${pages}${maxPages ? " / " + maxPages : ""}`],
+          ["入库", `+${p.inserted || 0}`],
+          ["更新", `${p.updated || 0}`],
+          ["JD", `${p.desc_ok || 0} 成功 / ${p.desc_failed || 0} 失败`],
+        ],
+        error: s.status === "error" ? s.error : undefined,
+        // crawl 事件的字段名是 event，不是 name
+        log: renderEvents(s.events, { limit: 12, nameKey: "event" }),
+      });
     } catch { /* ignore */ }
   }, 1500);
 

@@ -1,19 +1,24 @@
 /** 职位航段：筛选 · 抓取 · 卡片流 · 删除 */
 
 import { api } from "../api.js";
-import { toast, modal, escapeHtml, fmtTime } from "../ui.js";
+import { toast, modal, escapeHtml, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
 
 export async function renderJobs(root) {
   root.innerHTML = `
-    <h1 class="hero-title">职位 <span class="grad">舱库</span></h1>
-    <p class="hero-sub">按条件抓取、卡片化浏览、选中即删。抓取是后台任务，翻页硬间隔 1 秒防风控，随时可停。</p>
+    <div class="page-head">
+      <div class="page-head-text">
+        <h1 class="hero-title">职位 <span class="grad">舱库</span></h1>
+        <p class="hero-sub">按条件抓取、卡片化浏览、选中即删。抓取是后台任务，翻页硬间隔 1 秒防风控，随时可停。</p>
+      </div>
+    </div>
 
     <div class="bento mb-24">
-      <div class="card span-5">
+      <div class="card span-12">
         <div class="card-head">
           <h3 class="card-title">抓取控制台</h3>
           <span class="card-sub" id="crawl-phase">idle</span>
         </div>
+
         <div class="row-3">
           <div class="field">
             <label>最大页数</label>
@@ -28,27 +33,17 @@ export async function renderJobs(root) {
             <input class="input mono" id="start-page" type="number" value="1" min="1">
           </div>
         </div>
+
         <div class="flex center gap-12 mb-16">
-          <label class="pill ${"on"}" id="use-search">
+          <label class="pill on" id="use-search">
             <input type="checkbox" checked hidden> 使用搜索流（走库里的搜索条件）
           </label>
+          <span class="muted" id="filter-sub" style="font-size:12px">—</span>
         </div>
-        <div class="progress mb-8"><i id="crawl-bar" style="width:0%"></i></div>
-        <div class="flex between center">
-          <span class="muted mono" id="crawl-msg" style="font-size:12px">待命</span>
-          <div class="btn-row">
-            <button class="btn primary" id="btn-crawl">开始抓取</button>
-            <button class="btn danger hidden" id="btn-stop">停止</button>
-          </div>
-        </div>
-        <div class="ticker mt-16" id="crawl-log"><div class="ev muted">—</div></div>
-      </div>
 
-      <div class="card span-7">
-        <div class="card-head">
-          <h3 class="card-title">搜索条件</h3>
-          <span class="card-sub" id="filter-sub">—</span>
-        </div>
+        <div class="divider mb-16"></div>
+        <div class="card-sub mb-8">搜索条件</div>
+
         <div class="row-2">
           <div class="field">
             <label>关键词</label>
@@ -86,10 +81,14 @@ export async function renderJobs(root) {
         </div>
         <div id="filter-pills" class="mb-16"></div>
         <div class="btn-row">
-          <button class="btn primary" id="btn-save-filter">保存条件</button>
+          <button class="btn" id="btn-save-filter">保存条件</button>
           <button class="btn ghost" id="btn-reset-filter">重置</button>
           <span class="muted" id="filter-summary" style="font-size:12px"></span>
+          <span class="flex-shrink-0" style="flex:1"></span>
+          <button class="btn primary" id="btn-crawl">开始抓取</button>
+          <button class="btn danger hidden" id="btn-stop">停止抓取</button>
         </div>
+        <div id="crawl-task" class="mt-16"></div>
       </div>
     </div>
 
@@ -113,15 +112,10 @@ export async function renderJobs(root) {
         <h3 class="card-title">补抓职位描述</h3>
         <span class="card-sub" id="desc-phase">idle</span>
       </div>
-      <div class="progress mb-8"><i id="desc-bar" style="width:0%"></i></div>
-      <div class="flex between center gap-12" style="flex-wrap:wrap">
-        <div class="muted mono" id="desc-msg" style="font-size:12px">待命</div>
-        <div class="btn-row">
-          <button class="btn danger hidden" id="btn-desc-stop">停止</button>
-          <button class="btn ghost" id="btn-desc-hide">收起</button>
-        </div>
+      <div id="desc-task"></div>
+      <div class="btn-row mt-12">
+        <button class="btn ghost" id="btn-desc-hide">收起</button>
       </div>
-      <div class="ticker mt-12" id="desc-log" style="max-height:120px"><div class="ev muted">—</div></div>
     </div>
 
     <div class="job-grid" id="job-grid"></div>
@@ -138,6 +132,32 @@ export async function renderJobs(root) {
   const limit = 24;
   let pollTimer = null;
   let crawlTaskId = null;
+
+  // 统一长任务面板：抓取 + 补抓 JD
+  const crawlPanel = taskPanel({ title: "抓取任务", stopLabel: "停止抓取" });
+  $("crawl-task").appendChild(crawlPanel.el);
+  crawlPanel.onStop(async () => {
+    if (!crawlTaskId) return;
+    try {
+      await api.post(`/api/crawl/${crawlTaskId}/cancel`);
+      toast("已请求停止，翻完当前页就收手", "warn");
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  });
+  crawlPanel.update({ status: "idle", percent: 0 });
+
+  const descPanelUi = taskPanel({ title: "补抓 JD", stopLabel: "停止补抓" });
+  $("desc-task").appendChild(descPanelUi.el);
+  descPanelUi.onStop(async () => {
+    try {
+      const s = await api.post("/api/jobs/fetch-descriptions/cancel");
+      renderDesc(s);
+      toast("已请求停止，抓完当前这条就收手", "warn");
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  });
 
   // ---------- 筛选 ----------
   /** @type {{code:string,name:string,children?:any[]}|null} */
@@ -471,26 +491,31 @@ export async function renderJobs(root) {
         const p = s.progress || {};
         const maxPages = s.params?.max_pages || 5;
         const pct = Math.min(100, Math.round(((p.pages || 0) / maxPages) * 100));
-        $("crawl-bar").style.width = (s.status === "running" ? pct : 100) + "%";
         $("crawl-phase").textContent = s.phase || s.status;
-        $("crawl-msg").textContent =
-          s.status === "running"
-            ? `第 ${p.pages || 0} 页 · 入库 +${p.inserted || 0} / 改 ${p.updated || 0}` +
-              (p.desc_done || p.desc_skipped
-                ? ` · JD ${p.desc_ok || 0}/${p.desc_done || 0}` + (p.desc_skipped ? `（跳过已有 ${p.desc_skipped}）` : "")
-                : "")
-            : s.error || s.stopped_reason || s.status;
-        const log = $("crawl-log");
-        if (s.events && s.events.length) {
-          log.innerHTML = s.events
-            .slice(-20)
-            .map((e) => {
-              const t = e.at ? new Date(e.at * 1000).toLocaleTimeString("zh-CN", { hour12: false }) : "";
-              return `<div class="ev"><time>${t}</time><span class="name">p${e.page ?? e.event ?? ""}</span><span>raw ${e.raw_count ?? "-"} kept ${e.kept_count ?? "-"} +${e.inserted ?? "-"}</span></div>`;
-            })
-            .join("");
-          log.scrollTop = log.scrollHeight;
+
+        const counts = [
+          ["页", `${p.pages || 0} / ${maxPages}`],
+          ["入库", `+${p.inserted || 0}`],
+          ["更新", `${p.updated || 0}`],
+        ];
+        if (p.desc_done || p.desc_skipped) {
+          counts.push(["JD", `${p.desc_ok || 0}/${p.desc_done || 0} 成功`]);
+          if (p.desc_skipped) counts.push(["跳过", `${p.desc_skipped}`]);
+          if (p.desc_failed) counts.push(["失败", `${p.desc_failed}`]);
         }
+
+        crawlPanel.update({
+          status: s.status,
+          percent: s.status === "running" ? pct : 100,
+          current: s.status === "running" ? (s.phase || `第 ${p.pages || 0} 页`) : (s.error || s.stopped_reason || ""),
+          counts,
+          error: s.status === "error" ? s.error : undefined,
+          log: renderEvents(s.events, {
+            limit: 20,
+            nameKey: "event",
+          }),
+        });
+
         if (["done", "error", "cancelled"].includes(s.status)) {
           clearInterval(pollTimer);
           pollTimer = null;
@@ -667,13 +692,6 @@ export async function renderJobs(root) {
   // ---------- 手动补抓 JD ----------
   let descPollTimer = null;
 
-  function fmtEta(sec) {
-    if (!isFinite(sec) || sec <= 0) return "—";
-    const s = Math.round(sec);
-    if (s < 60) return `${s} 秒`;
-    return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
-  }
-
   function renderDesc(s) {
     const p = s.progress || {};
     const total = p.total || 0;
@@ -683,56 +701,51 @@ export async function renderJobs(root) {
     const panel = $("desc-panel");
     panel.classList.remove("hidden");
     $("desc-phase").textContent = s.status;
-    $("desc-bar").style.width = (total ? Math.min(100, Math.round((done / total) * 100)) : running ? 5 : 100) + "%";
-    $("btn-desc-stop").classList.toggle("hidden", !running);
     $("btn-fetch-desc").disabled = running;
     $("btn-fetch-desc").textContent = running ? `补抓 ${done}/${total}` : "补抓描述";
 
-    const counts =
-      `已抓 ${done}/${total} · 有描述 ${p.ok || 0} · 空 ${p.skipped || 0} · 失败 ${p.failed || 0}` +
-      (p.already ? ` · 跳过已有 ${p.already}` : "");
     // 撞安全网关停批时，从事件里捞出原因展示
     const stopEvent = (s.events || []).find((e) => e.event === "stopped");
-    if (running) {
-      // 请求本身也要一点时间，按 interval + 0.6s 估剩余
-      const eta = fmtEta((total - done) * (interval + 0.6));
-      $("desc-msg").textContent =
-        `${counts} · 间隔 ${interval}s · 约剩 ${eta}` + (p.current ? ` · 当前：${p.current}` : "");
-    } else {
-      $("desc-msg").textContent =
-        counts +
-        (stopEvent
-          ? ` · ${stopEvent.reason || "已停"}`
-          : s.error
-            ? ` · ${s.error}`
-            : s.status === "cancelled"
-              ? " · 已取消"
-              : " · 完成");
-    }
+    const eta = running ? fmtEta((total - done) * (interval + 0.6)) : undefined;
 
-    const log = $("desc-log");
-    if (s.events && s.events.length) {
-      log.innerHTML = s.events
-        .slice(-20)
-        .map((e) => {
-          const t = e.at
-            ? new Date(e.at * 1000).toLocaleTimeString("zh-CN", { hour12: false })
-            : "";
-          const label =
-            e.event === "item_error"
-              ? `✗ ${e.job_name || ""} ${e.message || ""}`
-              : e.event === "item_done"
-                ? `${e.has_desc ? "✓" : "○"} ${e.job_name || ""}`
-                : e.event === "item_skipped"
-                  ? `– ${e.job_name || ""} ${e.reason || "跳过"}`
-                  : e.event === "stopped"
-                    ? `⛔ ${e.reason || "已停"}`
-                    : e.event || "";
-          return `<div class="ev"><time>${t}</time><span class="name">${escapeHtml(String(label))}</span></div>`;
-        })
-        .join("");
-      log.scrollTop = log.scrollHeight;
-    }
+    descPanelUi.update({
+      status: s.status,
+      percent: total ? (done / total) * 100 : running ? 5 : 100,
+      current: running ? (p.current || "拉取中") : (stopEvent?.reason || s.error || ""),
+      counts: [
+        ["进度", `${done}/${total}`],
+        ["有描述", `${p.ok || 0}`],
+        ["空", `${p.skipped || 0}`],
+        ["失败", `${p.failed || 0}`],
+        ...(p.already ? [["跳过已有", `${p.already}`]] : []),
+        ["间隔", `${interval}s`],
+      ],
+      eta,
+      error: s.status === "error" ? s.error : undefined,
+      log: renderDescLog(s.events),
+    });
+  }
+
+  function renderDescLog(events) {
+    return (events || [])
+      .slice(-20)
+      .map((e) => {
+        const t = e.at
+          ? new Date(e.at * 1000).toLocaleTimeString("zh-CN", { hour12: false })
+          : "";
+        const label =
+          e.event === "item_error"
+            ? `✗ ${e.job_name || ""} ${e.message || ""}`
+            : e.event === "item_done"
+              ? `${e.has_desc ? "✓" : "○"} ${e.job_name || ""}`
+              : e.event === "item_skipped"
+                ? `– ${e.job_name || ""} ${e.reason || "跳过"}`
+                : e.event === "stopped"
+                  ? `⛔ ${e.reason || "已停"}`
+                  : e.event || "";
+        return `<div class="ev"><time>${t}</time><span class="name">${escapeHtml(String(label))}</span></div>`;
+      })
+      .join("");
   }
 
   function stopDescPoll() {
@@ -778,16 +791,6 @@ export async function renderJobs(root) {
       startDescPoll();
     } catch (err) {
       stopDescPoll();
-      toast(err.message, "bad");
-    }
-  });
-
-  $("btn-desc-stop").addEventListener("click", async () => {
-    try {
-      const s = await api.post("/api/jobs/fetch-descriptions/cancel");
-      renderDesc(s);
-      toast("已请求停止，抓完当前这条就收手", "warn");
-    } catch (err) {
       toast(err.message, "bad");
     }
   });

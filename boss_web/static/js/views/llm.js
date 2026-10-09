@@ -1,12 +1,16 @@
 /** 模型航段：OpenAI 兼容接口配置 · 模型名在线下拉 */
 
 import { api } from "../api.js";
-import { toast, escapeHtml } from "../ui.js";
+import { toast, escapeHtml, taskPanel } from "../ui.js";
 
 export async function renderLLM(root) {
   root.innerHTML = `
-    <h1 class="hero-title">模型 <span class="grad">链路</span></h1>
-    <p class="hero-sub">OpenAI 兼容协议（DeepSeek / Kimi / 本地 vLLM 都行）。Key 只存本地 <span class="mono">data/boss.db</span>，回显时打码。模型名从接口在线拉取。</p>
+    <div class="page-head">
+      <div class="page-head-text">
+        <h1 class="hero-title">模型 <span class="grad">链路</span></h1>
+        <p class="hero-sub">OpenAI 兼容协议（DeepSeek / Kimi / 本地 vLLM 都行）。Key 只存本地 <span class="mono">data/boss.db</span>，回显时打码。模型名从接口在线拉取。</p>
+      </div>
+    </div>
 
     <div class="bento">
       <div class="card span-7 glow">
@@ -43,11 +47,13 @@ export async function renderLLM(root) {
           <span class="muted">（不可改）</span>
         </div>
 
-        <div class="btn-row">
+        <div class="btn-row mb-16">
           <button class="btn primary" id="btn-save">保存配置</button>
           <button class="btn" id="btn-test">测试连接</button>
           <span class="pill" id="test-result">未测试</span>
         </div>
+
+        <div id="llm-task"></div>
       </div>
 
       <div class="card span-5">
@@ -82,6 +88,20 @@ export async function renderLLM(root) {
 
   /** 拉到的模型列表（用于下拉框） */
   let modelList = [];
+
+  // 同步 HTTP 也可能要几十秒（LLM 测试超时 30s），用统一面板给进度
+  const linkPanel = taskPanel({ title: "链路检测", stopLabel: "" });
+  $("llm-task").appendChild(linkPanel.el);
+  linkPanel.update({ status: "idle", percent: 0 });
+
+  function paintLink(state, detail, percent) {
+    linkPanel.update({
+      status: state,
+      percent,
+      current: detail,
+      counts: [],
+    });
+  }
 
   function fillModelSelect(selected = "") {
     const sel = $("model");
@@ -138,6 +158,7 @@ export async function renderLLM(root) {
     btn.disabled = true;
     btn.textContent = "拉取中…";
     $("model-hint").innerHTML = `正在向 <span class="mono">${escapeHtml($("base-url").value.trim() || "…")}/models</span> 请求`;
+    paintLink("running", "正在拉取模型列表…", 30);
     try {
       const payload = {
         base_url: $("base-url").value.trim(),
@@ -149,10 +170,12 @@ export async function renderLLM(root) {
       const current = $("model").value;
       fillModelSelect(current || r.selected || "");
       $("model-hint").innerHTML = `拉到 <span class="mono">${modelList.length}</span> 个模型 · 来自 <span class="mono">${escapeHtml(r.source || "")}</span>`;
+      paintLink("done", `拉到 ${modelList.length} 个模型`, 100);
       if (!opts.silent) toast(`已拉到 ${modelList.length} 个模型`, "ok");
       return true;
     } catch (err) {
       $("model-hint").textContent = "拉取失败：" + err.message;
+      paintLink("error", err.message || "拉取失败", 100);
       if (!opts.silent) toast("拉模型失败：" + err.message, "bad");
       return false;
     } finally {
@@ -201,6 +224,7 @@ export async function renderLLM(root) {
     pill.textContent = "测试中…";
     $("llm-ring").style.setProperty("--p", 40);
     $("llm-ring").innerHTML = `<div>…<small>TEST</small></div>`;
+    paintLink("running", "正在测试连接…", 40);
     try {
       const r = await api.post("/api/llm/test");
       if (r.ok) {
@@ -210,6 +234,7 @@ export async function renderLLM(root) {
         $("llm-ring").innerHTML = `<div>OK<small>${r.latency_ms}MS</small></div>`;
         $("llm-title").textContent = r.model || "连接正常";
         $("llm-desc").textContent = `回显：${escapeHtml(r.message || "")}`;
+        paintLink("done", `连接正常 · ${r.latency_ms}ms`, 100);
         toast("LLM 连接正常", "ok");
       } else {
         pill.className = "pill bad";
@@ -217,11 +242,13 @@ export async function renderLLM(root) {
         $("llm-ring").style.setProperty("--p", 100);
         $("llm-ring").innerHTML = `<div>!<small>FAIL</small></div>`;
         $("llm-desc").textContent = r.message || "";
+        paintLink("error", r.message || "测试失败", 100);
         toast(r.message || "测试失败", "bad");
       }
     } catch (err) {
       pill.className = "pill bad";
       pill.textContent = "失败";
+      paintLink("error", err.message || "测试失败", 100);
       toast(err.message, "bad");
     }
   });

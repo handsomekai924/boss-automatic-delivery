@@ -1,7 +1,7 @@
 /** 星舰控制台入口：hash 路由 + 舰桥状态 */
 
 import { api } from "./api.js";
-import { toast } from "./ui.js";
+import { toast, bindThemeToggle, initTheme } from "./ui.js";
 import { renderHome } from "./views/home.js";
 import { renderLogin } from "./views/login.js";
 import { renderJobs } from "./views/jobs.js";
@@ -86,6 +86,8 @@ export async function refreshBridge() {
 
 window.addEventListener("hashchange", navigate);
 window.addEventListener("load", () => {
+  initTheme();
+  bindThemeToggle(document.getElementById("theme-toggle"));
   navigate();
   refreshBridge();
   setInterval(refreshBridge, 8000);

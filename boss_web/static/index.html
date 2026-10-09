@@ -1,9 +1,23 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BOSS · ORBIT 星舰控制台</title>
+<script>
+  /* 无闪烁主题初始化：先于样式应用 data-theme */
+  (function () {
+    try {
+      var saved = localStorage.getItem("orbit-theme");
+      var theme = saved === "light" || saved === "dark"
+        ? saved
+        : (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+      document.documentElement.setAttribute("data-theme", theme);
+    } catch (e) {
+      document.documentElement.setAttribute("data-theme", "dark");
+    }
+  })();
+</script>
 <link rel="stylesheet" href="/static/css/app.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230B0F1A' stroke='%236EE7FF' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%236EE7FF'/%3E%3C/svg%3E">
 </head>
@@ -13,19 +27,30 @@
 
   <header class="bridge">
     <a class="brand" href="#/">
-      <span class="brand-orb"></span>
+      <span class="brand-orb" aria-hidden="true"></span>
       <span class="brand-text">BOSS<em>ORBIT</em></span>
     </a>
-    <nav class="stages" id="stages">
-      <a href="#/login"  data-stage="login"><i></i><span>登录</span></a>
-      <a href="#/jobs"   data-stage="jobs"><i></i><span>职位</span></a>
-      <a href="#/resume" data-stage="resume"><i></i><span>简历</span></a>
-      <a href="#/match"  data-stage="match"><i></i><span>匹配</span></a>
-      <a href="#/llm"    data-stage="llm"><i></i><span>模型</span></a>
+    <nav class="stages" id="stages" aria-label="主导航">
+      <a href="#/login"  data-stage="login"><i aria-hidden="true"></i><span>登录</span></a>
+      <a href="#/jobs"   data-stage="jobs"><i aria-hidden="true"></i><span>职位</span></a>
+      <a href="#/resume" data-stage="resume"><i aria-hidden="true"></i><span>简历</span></a>
+      <a href="#/match"  data-stage="match"><i aria-hidden="true"></i><span>匹配</span></a>
+      <a href="#/llm"    data-stage="llm"><i aria-hidden="true"></i><span>模型</span></a>
     </nav>
-    <div class="bridge-status" id="bridge-status">
-      <span class="signal" id="signal-session" title="登录状态"></span>
-      <span class="signal-label" id="signal-session-label">会话检测中</span>
+    <div class="bridge-side">
+      <div class="bridge-status" id="bridge-status">
+        <span class="signal" id="signal-session" title="登录状态" aria-hidden="true"></span>
+        <span class="signal-label" id="signal-session-label">会话检测中</span>
+      </div>
+      <button type="button" class="theme-toggle" id="theme-toggle" aria-label="切换光明 / 黑暗模式" title="切换光明 / 黑暗模式">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
+        </svg>
+      </button>
     </div>
   </header>
 

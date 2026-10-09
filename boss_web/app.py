@@ -35,6 +35,14 @@ def create_app() -> FastAPI:
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+        @app.middleware("http")
+        async def _no_cache_static(request: Request, call_next):  # noqa: ANN202
+            response = await call_next(request)
+            # JS/CSS 是 ES module 依赖图的一部分，缓存过期会造成跨文件版本错配
+            if request.url.path.startswith("/static/") or request.url.path == "/":
+                response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return response
+
         @app.get("/", include_in_schema=False)
         async def index() -> FileResponse:  # noqa: ANN202
             return FileResponse(static_dir / "index.html")

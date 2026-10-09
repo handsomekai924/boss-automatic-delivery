@@ -1,7 +1,7 @@
 /** 简历航段：一份简历两副面孔——原文与结构化解析，共用同一套章节脊柱。 */
 
 import { api } from "../api.js";
-import { toast, escapeHtml, fmtTime } from "../ui.js";
+import { toast, escapeHtml, fmtTime, taskPanel } from "../ui.js";
 
 //: 固定模板八段（与 boss_web/services/resume_parser.py 的 TEMPLATE_FIELDS 对齐）
 const SECTIONS = [
@@ -86,8 +86,12 @@ function rawBlocks(raw) {
 
 export async function renderResume(root) {
   root.innerHTML = `
-    <h1 class="hero-title">简历 <span class="grad">解析舱</span></h1>
-    <p class="hero-sub">上传 Markdown 简历，LLM 按固定模板抠成结构化结果。「匹配」页取的就是这份结果，所以这里先把要交出去的东西看准。</p>
+    <div class="page-head">
+      <div class="page-head-text">
+        <h1 class="hero-title">简历 <span class="grad">解析舱</span></h1>
+        <p class="hero-sub">上传 Markdown 简历，LLM 按固定模板抠成结构化结果。「匹配」页取的就是这份结果，所以这里先把要交出去的东西看准。</p>
+      </div>
+    </div>
 
     <section class="card rs-bar" id="rs-bar">
       <div class="rs-lib" id="rs-lib"></div>
@@ -99,6 +103,8 @@ export async function renderResume(root) {
       </div>
       <input type="file" id="file" accept=".md,.markdown,.txt" hidden>
     </section>
+
+    <div id="rs-task" class="mb-16"></div>
 
     <div class="rs-bench" id="rs-bench">
       <aside class="rs-rail" id="rs-rail" aria-label="章节目录">
@@ -133,6 +139,20 @@ export async function renderResume(root) {
   let rawHas = new Set(); // 原文里认得出模板段的那些章节
   const scrollTops = { parsed: 0, source: 0 };
   let spyFrame = 0;
+
+  // LLM 解析是同步 HTTP，一次调用十几秒——用统一进度面板给可视化反馈
+  const parsePanel = taskPanel({ title: "LLM 解析", stopLabel: "" });
+  $("rs-task").appendChild(parsePanel.el);
+  parsePanel.update({ status: "idle", percent: 0 });
+
+  function paintParse(state, detail, percent) {
+    parsePanel.update({
+      status: state,
+      percent,
+      current: detail,
+      counts: [],
+    });
+  }
 
   // ---------- 小工具 ----------
   function relTime(ts) {
@@ -673,17 +693,20 @@ export async function renderResume(root) {
     parsing = true;
     face = "parsed";
     renderBody();
+    paintParse("running", "正在调用 LLM 解析，单次调用，十几秒…", 40);
     try {
       const r = await api.post(`/api/resume/item/${resumeId}/parse`);
       if (current && current.resume_id === resumeId) {
         current.llm = r.llm;
       }
       parsing = false;
+      paintParse("done", "解析完成", 100);
       renderBody(true); // 解析完成：八段依次落位
       toast("解析完成", "ok");
       await loadList();
     } catch (err) {
       parsing = false;
+      paintParse("error", err.message || "解析失败", 100);
       // 后端不会覆盖原有解析结果——失败了也要把它留在屏幕上
       renderBody();
       const banner = `

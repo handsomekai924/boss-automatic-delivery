@@ -1,7 +1,7 @@
 /** 匹配舱：全库/勾选岗位匹配 · 优缺点 · 招呼语手改 · 三种粒度发送（确认门槛） */
 
 import { api } from "../api.js";
-import { toast, modal, escapeHtml, scoreRing, fmtTime } from "../ui.js";
+import { toast, modal, escapeHtml, scoreRing, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
 
 const PAGE_SIZE = 20;
 
@@ -11,12 +11,16 @@ const MIN_SCORE_DEFAULT = 70;
 
 export async function renderMatch(root) {
   root.innerHTML = `
-    <h1 class="hero-title">匹配 <span class="grad">舱</span></h1>
-    <p class="hero-sub">用 LLM 解析过的简历对库里的岗位做人岗匹配，出匹配度、优缺点与个性化招呼语；可手改招呼语，确认后发送。</p>
+    <div class="page-head">
+      <div class="page-head-text">
+        <h1 class="hero-title">匹配 <span class="grad">舱</span></h1>
+        <p class="hero-sub">用 LLM 解析过的简历对库里的岗位做人岗匹配，出匹配度、优缺点与个性化招呼语；可手改招呼语，确认后发送。</p>
+      </div>
+    </div>
 
     <div class="bento mb-24">
       <div class="card span-12">
-        <div class="flex between center gap-12 wrap">
+        <div class="flex between center gap-12 wrap mb-16">
           <div class="flex center gap-12 wrap">
             <label class="muted" style="font-size:12.5px">简历</label>
             <select class="select" id="resume-select" style="min-width:220px"></select>
@@ -25,11 +29,9 @@ export async function renderMatch(root) {
           <div class="btn-row">
             <button class="btn primary" id="btn-match-all">一键匹配全部</button>
             <button class="btn" id="btn-match-sel">匹配选中</button>
-            <button class="btn danger hidden" id="btn-stop">停止</button>
           </div>
         </div>
-        <div class="progress mt-16"><i id="mt-bar" style="width:0%"></i></div>
-        <div class="muted mono mt-8" id="mt-msg" style="font-size:12px">待命</div>
+        <div id="match-task"></div>
       </div>
     </div>
 
@@ -38,7 +40,7 @@ export async function renderMatch(root) {
         <h3 class="card-title">发送工具条</h3>
         <span class="card-sub">任何粒度发送前都会弹确认 · 已成功的不会重发 · 发送 = 建会话 + 单独发招呼语正文</span>
       </div>
-      <div class="flex between center wrap gap-12">
+      <div class="flex between center wrap gap-12 mb-16">
         <div class="btn-row">
           <button class="btn primary" id="btn-send-all">一键发送全部 (<span id="send-all-n">0</span>)</button>
           <button class="btn" id="btn-send-sel">发送选中 (<span id="send-sel-n">0</span>)</button>
@@ -50,6 +52,7 @@ export async function renderMatch(root) {
         </label>
         <span class="muted" style="font-size:12px">在下方「匹配结果」里展开单条可单独改招呼语 / 发送</span>
       </div>
+      <div id="deliver-task"></div>
     </div>
 
     <div class="card mb-24">
@@ -108,6 +111,85 @@ export async function renderMatch(root) {
   let deliverTaskId = null;
   const expanded = new Set();      // 展开中的 match（encrypt_job_id）
   const greetDrafts = new Map();   // 手改中的招呼语草稿，轮询重绘不丢
+
+  // ---------- 长任务面板（匹配 / 发送） ----------
+  const matchPanel = taskPanel({ title: "批量匹配", stopLabel: "停止匹配" });
+  $("match-task").appendChild(matchPanel.el);
+  matchPanel.onStop(async () => {
+    if (!taskId) return;
+    try {
+      await api.post(`/api/match/analyze/${taskId}/cancel`);
+      toast("已请求停止匹配", "warn");
+    } catch (err) {
+      toast(err.message || "停止失败", "bad");
+    }
+  });
+  matchPanel.update({ status: "idle", percent: 0 });
+
+  const deliverPanel = taskPanel({ title: "批量投递", stopLabel: "停止投递" });
+  $("deliver-task").appendChild(deliverPanel.el);
+  deliverPanel.onStop(async () => {
+    if (!deliverTaskId) return;
+    try {
+      await api.post(`/api/deliver/${deliverTaskId}/cancel`);
+      toast("已请求停止投递", "warn");
+    } catch (err) {
+      toast(err.message || "停止失败", "bad");
+    }
+  });
+  deliverPanel.update({ status: "idle", percent: 0 });
+
+  /** 把 match 快照喂给面板（done/total/current_job 在顶层，不在 progress{} 里）。 */
+  function paintMatch(s) {
+    if (!s) {
+      matchPanel.update({ status: "idle", percent: 0 });
+      return;
+    }
+    const done = s.done || 0;
+    const total = s.total || 0;
+    const running = s.status === "running";
+    matchPanel.update({
+      status: s.status,
+      percent: total ? Math.round((done / total) * 100) : (s.status === "done" ? 100 : undefined),
+      current: running ? (s.current_job || "匹配中") : (s.error || ""),
+      counts: [
+        ["完成", `${done}${total ? " / " + total : ""}`],
+        ["结果", `${(s.matches || []).length} 条`],
+      ],
+      error: s.status === "error" ? s.error : undefined,
+      log: renderEvents(s.events, { limit: 20 }),
+    });
+  }
+
+  /** 把投递快照喂给面板（current/total/done/ok/failed/skipped 也在顶层）。 */
+  function paintDeliver(s) {
+    if (!s || !s.task_id) {
+      deliverPanel.update({ status: "idle", percent: 0 });
+      return;
+    }
+    const total = s.total || 0;
+    const done = s.done || 0;
+    const running = s.status === "running";
+    deliverPanel.update({
+      status: s.status,
+      percent: total ? Math.round((done / total) * 100) : (s.status === "done" ? 100 : undefined),
+      current: running ? (s.current || "发送中") : (s.error || ""),
+      counts: [
+        ["进度", `${done}${total ? " / " + total : ""}`],
+        ["成功", String(s.ok || 0)],
+        ["失败", String(s.failed || 0)],
+        ["跳过", String(s.skipped || 0)],
+      ],
+      error: s.status === "error" ? s.error : undefined,
+      log: renderEvents(s.events, { limit: 20 }),
+    });
+  }
+
+  /** 匹配按钮的显隐跟着任务状态走，不再各自 toggle。 */
+  function setMatchButtons(running) {
+    $("btn-match-all").classList.toggle("hidden", running);
+    $("btn-match-sel").classList.toggle("hidden", running);
+  }
 
   // ---------- 简历选择 ----------
   async function loadResumes() {
@@ -268,15 +350,6 @@ export async function renderMatch(root) {
     if (!selected.size) return toast("先在左侧勾选岗位", "warn");
     startMatch([...selected]);
   });
-  $("btn-stop").addEventListener("click", async () => {
-    if (!taskId) return;
-    try {
-      await api.post(`/api/match/analyze/${taskId}/cancel`);
-      toast("已请求停止", "warn");
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-  });
 
   async function startMatch(jobIds) {
     if (!currentResumeId) return toast("先选择一份简历", "warn");
@@ -288,11 +361,10 @@ export async function renderMatch(root) {
       taskId = task.task_id;
       analysisId = task.analysis_id;
       matches = [];
-      $("btn-match-all").classList.add("hidden");
-      $("btn-match-sel").classList.add("hidden");
-      $("btn-stop").classList.remove("hidden");
+      setMatchButtons(true);
       $("an-sub").textContent = "匹配中…";
       toast(`匹配已启动（共 ${task.total || "?"} 个职位，并行调 LLM）`, "ok");
+      paintMatch({ ...task, status: "running" });
       startPoll();
     } catch (err) {
       toast(err.message, "bad");
@@ -317,13 +389,9 @@ export async function renderMatch(root) {
     }
 
     if (s.status === "running") {
-      $("btn-match-all").classList.add("hidden");
-      $("btn-match-sel").classList.add("hidden");
-      $("btn-stop").classList.remove("hidden");
+      setMatchButtons(true);
       $("an-sub").textContent = `匹配中 · ${s.done || 0}/${s.total || "?"}`;
-      $("mt-bar").style.width =
-        (s.total ? Math.round(((s.done || 0) / s.total) * 100) : 0) + "%";
-      $("mt-msg").textContent = `${s.done || 0}/${s.total || "?"} · ${s.current_job || ""}`;
+      paintMatch(s);
       renderMatches();
       renderJobs();
       startPoll();
@@ -333,8 +401,7 @@ export async function renderMatch(root) {
 
     if (matches.length) {
       $("an-sub").textContent = `${s.status === "done" ? "已完成" : s.status === "cancelled" ? "已停止" : "失败"} · ${matches.length} 条`;
-      $("mt-bar").style.width = "100%";
-      $("mt-msg").textContent = s.error || s.status;
+      paintMatch(s);
       renderMatches();
       renderJobs();
     }
@@ -346,11 +413,7 @@ export async function renderMatch(root) {
       if (!taskId) return;
       try {
         const s = await api.get(`/api/match/analyze/${taskId}`);
-        const done = s.done || 0;
-        const total = s.total || 1;
-        $("mt-bar").style.width = (s.status === "running" ? Math.round((done / total) * 100) : 100) + "%";
-        $("mt-msg").textContent =
-          s.status === "running" ? `${done}/${total} · ${s.current_job || ""}` : s.error || s.status;
+        paintMatch(s);
         if (s.matches && s.matches.length) {
           matches = s.matches;
           renderMatches();
@@ -359,9 +422,7 @@ export async function renderMatch(root) {
           clearInterval(pollTimer);
           pollTimer = null;
           taskId = null;
-          $("btn-match-all").classList.remove("hidden");
-          $("btn-match-sel").classList.remove("hidden");
-          $("btn-stop").classList.add("hidden");
+          setMatchButtons(false);
           if (s.status === "done") {
             $("an-sub").textContent = `完成 · ${matches.length} 条`;
             toast("匹配完成", "ok");
@@ -504,6 +565,7 @@ export async function renderMatch(root) {
       deliverTaskId = s.task_id;
       toast(`开始发送 · 待发 ${s.total || 0} 条，跳过 ${s.skipped || 0} 条已发送`, "ok");
       applyDeliverSnapshot(s);
+      paintDeliver(s);
       startDeliverPoll();
     } catch (err) {
       toast(err.message || "发送启动失败", "bad");
@@ -541,6 +603,7 @@ export async function renderMatch(root) {
       }
       deliverTaskId = s.task_id;
       applyDeliverSnapshot(s);
+      paintDeliver(s);
       if (["done", "error", "cancelled"].includes(s.status)) {
         stopDeliverPoll();
         if (s.status === "done") {
@@ -570,6 +633,7 @@ export async function renderMatch(root) {
     }
     if (!s || !s.task_id) return;
     applyDeliverSnapshot(s);
+    paintDeliver(s);
     if (s.status === "running") {
       deliverTaskId = s.task_id;
       startDeliverPoll();
