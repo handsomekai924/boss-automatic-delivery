@@ -166,6 +166,50 @@ def test_update_greeting(db):
 # --------------------------------------------------------------------------- #
 
 
+def test_match_task_start_sets_total_before_worker(monkeypatch):
+    import threading
+
+    from boss_web.services.match_task import MatchTaskManager
+
+    jobs = [object(), object()]
+    picked = []
+    worker_jobs = []
+    worker_started = threading.Event()
+    manager = MatchTaskManager()
+
+    def pick_jobs(task):
+        picked.append(task)
+        return jobs
+
+    def run(task, selected_jobs):
+        worker_jobs.extend(selected_jobs)
+        worker_started.set()
+
+    monkeypatch.setattr("boss_web.services.match_task._pick_jobs", pick_jobs)
+    monkeypatch.setattr(manager, "_run", run)
+
+    task = manager.start(resume_id="resume", job_ids=["j1", "j2"])
+    snapshot = task.snapshot()
+
+    assert snapshot["total"] == 2
+    assert len(picked) == 1
+    assert worker_started.wait(timeout=1)
+    assert worker_jobs == jobs
+
+
+def test_match_task_start_empty_jobs_is_error(monkeypatch):
+    from boss_web.services.match_task import MatchTaskManager
+
+    monkeypatch.setattr("boss_web.services.match_task._pick_jobs", lambda task: [])
+    task = MatchTaskManager().start(resume_id="resume")
+
+    snapshot = task.snapshot()
+    assert snapshot["total"] == 0
+    assert snapshot["status"] == "error"
+    assert "没有可匹配的职位" in snapshot["error"]
+    assert snapshot["ended_at"] is not None
+
+
 def test_match_one_has_pros_and_cons():
     from boss_jobs.models import Job
     from boss_web.services.match_task import _job_desc_block, _match_one

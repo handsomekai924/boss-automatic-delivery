@@ -177,7 +177,24 @@ class MatchTaskManager:
             task = MatchTask(resume_id, job_ids or [])
             self._task = task
 
-        thread = threading.Thread(target=self._run, args=(task,), daemon=True, name=task.task_id)
+        try:
+            jobs = _pick_jobs(task)
+        except Exception as exc:  # noqa: BLE001 - 启动失败也要返回可查询的任务状态
+            with task.lock:
+                task.status = STATUS_ERROR
+                task.error = f"读取职位失败：{exc}"
+                task.ended_at = time.time()
+            return task
+
+        with task.lock:
+            task.total = len(jobs)
+            if not jobs:
+                task.status = STATUS_ERROR
+                task.error = "没有可匹配的职位，请先抓取或指定 job_ids"
+                task.ended_at = time.time()
+                return task
+
+        thread = threading.Thread(target=self._run, args=(task, jobs), daemon=True, name=task.task_id)
         thread.start()
         return task
 
@@ -190,7 +207,7 @@ class MatchTaskManager:
 
     # ------------------------------------------------------------------ #
 
-    def _run(self, task: MatchTask) -> None:
+    def _run(self, task: MatchTask, jobs: list[Job]) -> None:
         try:
             resume = load_resume(task.resume_id)
         except FileNotFoundError:
@@ -212,14 +229,6 @@ class MatchTaskManager:
         except FileNotFoundError:
             llm_parse = None
         resume_brief = _resume_brief(resume, llm_parse)
-
-        jobs = _pick_jobs(task)
-        task.total = len(jobs)
-        if not jobs:
-            task.status = STATUS_ERROR
-            task.error = "没有可匹配的职位，请先抓取或指定 job_ids"
-            task.ended_at = time.time()
-            return
 
         llm = LLMClient(cfg)
         self._run_parallel(task, llm, resume_brief, jobs)
