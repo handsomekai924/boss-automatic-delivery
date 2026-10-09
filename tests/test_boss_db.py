@@ -17,9 +17,6 @@ def _clean_cache():
     boss_db.close_all()
 
 
-# --------------------------------------------------------------------------- #
-# 路径
-# --------------------------------------------------------------------------- #
 
 
 def test_resolve_默认是_data_boss_db():
@@ -45,9 +42,6 @@ def test_resolve_内存库原样透传():
     assert str(boss_db.resolve_db_path(":memory:")) == ":memory:"
 
 
-# --------------------------------------------------------------------------- #
-# 建表 / doc CRUD
-# --------------------------------------------------------------------------- #
 
 
 def test_connect_建出全部表(tmp_path):
@@ -74,10 +68,10 @@ def test_doc_往返(tmp_path):
 
 
 def test_doc_坏payload按没有处理(tmp_path):
+    """坏 payload 当没有；原文仍可读，给要自己报错的调用方用。"""
     p = tmp_path / "boss.db"
     boss_db.doc_set("session", "{不是 json", p)
     assert boss_db.doc_get("session", p) is None
-    # 原文还在，给要自己报错的调用方用
     assert boss_db.doc_get_raw("session", p) == "{不是 json"
 
 
@@ -87,9 +81,6 @@ def test_doc_raw_可以直接塞字符串(tmp_path):
     assert boss_db.doc_get("llm_config", p) == {"model": "m1"}
 
 
-# --------------------------------------------------------------------------- #
-# 连接缓存
-# --------------------------------------------------------------------------- #
 
 
 def test_内存库共享同一个连接():
@@ -109,9 +100,6 @@ def test_close_all_之后重开(tmp_path):
     assert boss_db.doc_get("session", p) == {"a": 1}
 
 
-# --------------------------------------------------------------------------- #
-# 迁移
-# --------------------------------------------------------------------------- #
 
 
 def _write_legacy_tree(root):
@@ -151,7 +139,6 @@ def _write_legacy_tree(root):
         ),
         encoding="utf-8",
     )
-    # 迷你 jobs.db
     src = sqlite3.connect(str(root / "jobs.db"))
     src.executescript(
         """
@@ -181,6 +168,7 @@ def _write_legacy_tree(root):
 
 
 def test_migrate_一次性导入(tmp_path):
+    """一次性搬完旧账本：JSON 账本清掉，``jobs.db`` 改名保留。"""
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     _write_legacy_tree(legacy)
@@ -201,7 +189,6 @@ def test_migrate_一次性导入(tmp_path):
     assert counts["jobs"] == 1
     assert counts["fetch_pages"] == 1
 
-    # 内容对得上
     assert boss_db.doc_get("session", db_path)["phone_masked"] == "138****8000"
     assert boss_db.doc_get("search_filter", db_path)["query"] == "Python"
     assert boss_db.doc_get("llm_config", db_path)["model"] == "m"
@@ -218,7 +205,6 @@ def test_migrate_一次性导入(tmp_path):
     finally:
         conn.close()
 
-    # JSON 账本清掉，jobs.db 改名保留
     assert not (legacy / "session.json").exists()
     assert not (legacy / "search_filter.json").exists()
     assert not (legacy / "stoken.json").exists()
@@ -252,6 +238,7 @@ def test_migrate_幂等(tmp_path):
 
 
 def test_migrate_坏文件跳过不挡别的(tmp_path):
+    """坏文件留着不动，好文件照常搬走。"""
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     (legacy / "session.json").write_text("{不是 json", encoding="utf-8")
@@ -268,7 +255,6 @@ def test_migrate_坏文件跳过不挡别的(tmp_path):
 
     assert counts["session"] == 0
     assert counts["stoken"] == 1
-    # 坏文件留着，好文件搬走
     assert (legacy / "session.json").exists()
     assert not (legacy / "stoken.json").exists()
 

@@ -18,7 +18,8 @@ from tools.mock_server import BURNED_TICKETS, LAST_SMS_REQUEST, STORE, serve
 
 @pytest.fixture(scope="module")
 def server():
-    httpd = serve(port=0)  # 交给系统分配空闲端口
+    """起一台假服务端；``port=0`` 交给系统分配空闲端口，免得测试互相抢。"""
+    httpd = serve(port=0)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -62,5 +63,5 @@ def isolated_db(monkeypatch, tmp_path):
 
 @pytest.fixture
 def client(server):
-    # retries=0：集成测试里不希望被重试掩盖问题
+    """登录客户端；``retries=0`` 避免重试把集成问题掩盖掉。"""
     return ZhipinLoginClient(base_url=server, retries=0, timeout=5.0, sleeper=lambda _s: None)

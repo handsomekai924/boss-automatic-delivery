@@ -34,9 +34,6 @@ from boss_login import client as client_module
 from boss_login.config import ENDPOINTS, SMS_SCENES
 
 
-# --------------------------------------------------------------------------- #
-# 测试替身
-# --------------------------------------------------------------------------- #
 
 
 class FakeCookies:
@@ -101,24 +98,26 @@ class FakeHttp:
             self.cookies.set(name, value)
         return item
 
-    # -- 断言辅助 -------------------------------------------------------- #
 
     @property
     def last_call(self) -> dict:
         return self.calls[-1]
 
     def form_of(self, index: int = -1) -> dict[str, str]:
+        """解析请求表单。
+
+        ``keep_blank_values``：``token=``（拿不到 smsToken 就传空）这类空值
+        不能被 parse_qs 吃掉，否则断言会变成 KeyError 而不是「值不对」。
+        """
         from urllib.parse import parse_qs
 
         body = self.calls[index].get("data") or ""
-        # keep_blank_values：``token=``（拿不到 smsToken 就传空）这类空值
-        # 不能被 parse_qs 吃掉，否则断言会变成 KeyError 而不是「值不对」。
         return {k: v[0] for k, v in parse_qs(body, keep_blank_values=True).items()}
 
 
 def make_client(responses, *, cookies=None, auto_suggest: bool = True, **kwargs):
     http = FakeHttp(responses, cookies=cookies, auto_suggest=auto_suggest)
-    kwargs.setdefault("sleeper", lambda _s: None)      # 测试不真的等
+    kwargs.setdefault("sleeper", lambda _s: None)
     kwargs.setdefault("retries", 0)
     return ZhipinLoginClient(http=http, **kwargs), http
 
@@ -131,9 +130,6 @@ def fail(code: int, message: str = "", data: dict | None = None) -> FakeResponse
     return FakeResponse({"code": code, "message": message, "zpData": data or {}})
 
 
-# --------------------------------------------------------------------------- #
-# 纯函数
-# --------------------------------------------------------------------------- #
 
 
 class TestValidators:
@@ -176,9 +172,6 @@ class TestValidators:
         assert mask_phone("12345678") == "12****78"
 
 
-# --------------------------------------------------------------------------- #
-# 发送验证码
-# --------------------------------------------------------------------------- #
 
 
 class TestSendSmsCode:
@@ -228,12 +221,12 @@ class TestSendSmsCode:
         assert len(http.calls) == 2
 
     def test_server_rate_limit_carries_retry_after(self):
+        """服务端限流后本地也要进入冷却，避免连续重试。"""
         client, _ = make_client([fail(1001, "发送太频繁了", {"retryAfter": 33})])
         with pytest.raises(RateLimited) as info:
             client.send_sms_code("13800138000")
 
         assert info.value.retry_after == 33
-        # 服务端限流后本地也要进入冷却，避免连续重试
         with pytest.raises(RateLimited):
             client.send_sms_code("13800138000")
 
@@ -260,9 +253,6 @@ class TestSendSmsCode:
             client.send_sms_code("13800138000", scene="nope")
 
 
-# --------------------------------------------------------------------------- #
-# 风控
-# --------------------------------------------------------------------------- #
 
 
 class TestRiskControl:
@@ -302,9 +292,6 @@ class TestRiskControl:
             client.send_sms_code("13800138000")
 
 
-# --------------------------------------------------------------------------- #
-# 登录
-# --------------------------------------------------------------------------- #
 
 
 class TestLoginBySms:
@@ -334,10 +321,10 @@ class TestLoginBySms:
         assert result.logged_in is True
 
     def test_success_without_credentials_raises_incomplete(self):
+        """消息里要能看到实到的形状，否则线上没法据此适配字段。"""
         client, _ = make_client([ok({})])
         with pytest.raises(LoginIncomplete) as info:
             client.login_by_sms("13800138000", "123456")
-        # 消息里要能看到实到的形状，否则线上没法据此适配字段
         assert "zpData" in str(info.value)
         assert "probe" in str(info.value)
 
@@ -508,7 +495,6 @@ class TestLoginSlider:
         assert "version" not in form, "Ce() 不传 t，登录表单不该有 version"
         assert "phone" not in form
         assert decrypt_account(form["encryptedAccount"]) == "13800138000"
-        # 极验通道的票据就三个键
         assert form["challenge"] == "c1"
         assert form["validate"] == "v1"
         assert form["seccode"] == "s1"
@@ -602,9 +588,6 @@ class TestLoginSlider:
         assert "已经拖过了" in info.value.message
 
 
-# --------------------------------------------------------------------------- #
-# 网络层
-# --------------------------------------------------------------------------- #
 
 
 class TestTransport:
@@ -651,9 +634,6 @@ class TestTransport:
         assert "zhipin.com" in headers["Referer"]
 
 
-# --------------------------------------------------------------------------- #
-# 完整流程 run_sms_login
-# --------------------------------------------------------------------------- #
 
 
 class TestRunSmsLogin:
@@ -753,7 +733,7 @@ class TestRunSmsLogin:
             client.send_sms_code("13800138000")
 
         assert info.value.code == 400061
-        assert not info.value.is_hard_block  # 是「去验一下」而不是「你被封了」
+        assert not info.value.is_hard_block
 
     def test_unknown_code_with_risk_wording_is_risk_control(self):
         """码表拿不全，同族的近亲码靠话术兜底。"""
@@ -847,9 +827,6 @@ class TestRunSmsLogin:
         assert max(sleeps) < 99999, "不应真的睡 99999 秒"
 
 
-# --------------------------------------------------------------------------- #
-# 登录态
-# --------------------------------------------------------------------------- #
 
 
 class TestSessionPersistence:
@@ -928,9 +905,6 @@ class TestSessionPersistence:
         assert client.is_logged_in() is True
 
 
-# --------------------------------------------------------------------------- #
-# 探测
-# --------------------------------------------------------------------------- #
 
 
 class TestProbe:

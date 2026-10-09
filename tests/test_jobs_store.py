@@ -49,9 +49,6 @@ def store(tmp_path):
         yield s
 
 
-# --------------------------------------------------------------------------- #
-# 写入
-# --------------------------------------------------------------------------- #
 
 
 def test_save_page_inserts_and_counts(store: JobStore):
@@ -108,9 +105,6 @@ def test_save_pages_batch(store: JobStore):
     assert store.count_pages() == 2
 
 
-# --------------------------------------------------------------------------- #
-# 查询
-# --------------------------------------------------------------------------- #
 
 
 def test_roundtrip_preserves_fields(store: JobStore):
@@ -172,9 +166,6 @@ def test_open_store_uses_path(tmp_path):
     assert path.exists()
 
 
-# --------------------------------------------------------------------------- #
-# job_desc / detail_fetched_at（JD 补抓）
-# --------------------------------------------------------------------------- #
 
 
 def test_job_desc_defaults_empty(store: JobStore):
@@ -235,16 +226,16 @@ def test_list_jobs_missing_desc_已有描述不再重复获取(store: JobStore):
         make_page(jobs=[make_job("a"), make_job("b"), make_job("c"), make_job("d")])
     )
     store.update_job_desc("b", "已经有 JD 了", fetched_at="2026-10-08 12:00:00")
-    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")  # 抓过，回空
+    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")
     assert store.count_jobs_missing_desc() == 2
     assert {j.encrypt_job_id for j in store.list_jobs_missing_desc()} == {"a", "d"}
 
 
 def test_fetched_desc_ids(store: JobStore):
-    """批量问「哪些已经抓过详情」——抓取流程顺带补 JD 时跳过已有的。"""
+    """批量问「哪些已经抓过详情」——抓取流程顺带补 JD 时跳过已有的；空 JD 也算抓过。"""
     store.save_page(make_page(jobs=[make_job("a"), make_job("b"), make_job("c")]))
     store.update_job_desc("b", "有描述", fetched_at="2026-10-08 12:00:00")
-    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")  # 空也算抓过
+    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")
 
     assert store.fetched_desc_ids(["a", "b", "c", "不在库里的"]) == {"b", "c"}
     assert store.fetched_desc_ids([]) == set()
@@ -252,7 +243,7 @@ def test_fetched_desc_ids(store: JobStore):
 
 
 def test_column_migration_adds_desc_columns(tmp_path):
-    """老库（建表时还没有 job_desc 列）打开后要能自动补列。"""
+    """老库（建表时还没有 job_desc 列）打开后要能自动补列；再开一次也幂等。"""
     import sqlite3
 
     import boss_db
@@ -306,6 +297,5 @@ def test_column_migration_adds_desc_columns(tmp_path):
         assert job is not None
         assert job.job_desc == "补上的 JD"
 
-    # 再开一次（幂等）不炸
     with JobStore(path) as store:
         assert store.count_jobs() == 1

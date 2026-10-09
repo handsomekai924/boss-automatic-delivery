@@ -24,9 +24,6 @@ from boss_login.verify import (
 )
 
 
-# --------------------------------------------------------------------------- #
-# traceId
-# --------------------------------------------------------------------------- #
 
 
 class TestTraceId:
@@ -63,9 +60,6 @@ class TestTraceId:
         assert a != b
 
 
-# --------------------------------------------------------------------------- #
-# 挑战解析
-# --------------------------------------------------------------------------- #
 
 
 class TestParseChallenge:
@@ -118,9 +112,6 @@ class TestParseChallenge:
             challenge.require_geetest()
 
 
-# --------------------------------------------------------------------------- #
-# 票据解析
-# --------------------------------------------------------------------------- #
 
 
 class TestParseSolution:
@@ -147,14 +138,14 @@ class TestParseSolution:
             parse_solution({"challenge": "c", "validate": "v"})
 
 
-# --------------------------------------------------------------------------- #
-# 请求头
-# --------------------------------------------------------------------------- #
 
 
 class TestHeaders:
     def test_validate_headers_match_captcha_sdk(self):
-        """键名取自 captcha-sdk onSuccess 的 headers 对象，改名就交不上去。"""
+        """键名取自 captcha-sdk onSuccess 的 headers 对象，改名就交不上去。
+
+        verify.html 是 ``c.send("")``，请求体为空，票据全在头上。
+        """
         solution = SliderSolution(challenge="c", validate="v", seccode="s")
         headers = validate_request_headers(solution, trace_id="F-x", zp_token="bst-value")
         assert headers[C.CAPTCHA_HEADER_TYPE] == "1"
@@ -163,7 +154,6 @@ class TestHeaders:
         assert headers[C.CAPTCHA_HEADER_SECCODE] == "s"
         assert headers["traceId"] == "F-x"
         assert headers["zp_token"] == "bst-value"
-        # verify.html 是 c.send("")，请求体为空，票据全在头上
         assert headers["Content-Type"] == "application/x-www-form-urlencoded"
         assert headers["X-Requested-With"] == "XMLHttpRequest"
 
@@ -184,7 +174,6 @@ class TestHeaders:
         )
         form = solution.as_form_fields()
         assert form == {"challenge": "c", "validate": "v", "seccode": "s"}
-        # 极验通道不带 randKey（那是图片通道的），也没有 verifyToken/captchaToken
         assert "randKey" not in form
         assert "verifyToken" not in form
         assert "captchaToken" not in form
@@ -210,9 +199,6 @@ class TestHeaders:
         assert solution.as_headers()[C.CAPTCHA_HEADER_RANDKEY] == "rk"
 
 
-# --------------------------------------------------------------------------- #
-# 帮助页
-# --------------------------------------------------------------------------- #
 
 
 class TestHelperHtml:
@@ -228,11 +214,10 @@ class TestHelperHtml:
         assert '"gt-1"' in html
         assert '"ch-1"' in html
         assert "initGeetest" in html
-        # 票据回传目标
         assert "/solution" in html
 
     def test_post_url_is_customizable(self):
-        """网页控制台把帮助页挂在自己的路由下，回传地址要能改。"""
+        """网页控制台把帮助页挂在自己的路由下，回传地址要能改；默认 ``/solution`` 不受影响。"""
         challenge = parse_challenge(
             {"captchaType": 1, "startCaptcha": json.dumps({"gt": "gt-1", "challenge": "ch-1"})}
         )
@@ -240,7 +225,6 @@ class TestHelperHtml:
             challenge, post_url="/api/auth/slider/abc/solution"
         )
         assert '"/api/auth/slider/abc/solution"' in html
-        # 默认值不受影响
         default_html = build_helper_html(challenge)
         assert '"/solution"' in default_html
 
@@ -248,5 +232,4 @@ class TestHelperHtml:
         """gt/challenge 用 json.dumps 嵌进 JS，带引号时不能把脚本弄断。"""
         challenge = parse_challenge({"gt": 'gt"quote', "challenge": "c"})
         html = build_helper_html(challenge)
-        # 这两个片段若被错误拼接，就会出现裸的 gt"quote 在 JS 里
         assert '"gt\\"quote"' in html

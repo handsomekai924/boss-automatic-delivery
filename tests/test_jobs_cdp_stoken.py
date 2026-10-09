@@ -25,9 +25,6 @@ from boss_jobs.cdp_stoken import (
 from boss_jobs.stoken import STOKEN_MAX_AGE
 from boss_jobs.stoken import StokenError
 
-# --------------------------------------------------------------------------- #
-# 假会话
-# --------------------------------------------------------------------------- #
 
 
 class FakeCookieJar:
@@ -54,9 +51,6 @@ class FakeHttp:
             self.cookies.set(name, value)
 
 
-# --------------------------------------------------------------------------- #
-# StokenRecord：过期账本的那条记录
-# --------------------------------------------------------------------------- #
 
 
 def test_记录_站点给了expires就用它():
@@ -80,13 +74,12 @@ def test_记录_会话Cookie没有expires按max_age推():
 
 
 def test_记录_过期判断留了余量():
+    """离过期只剩 60 秒（余量 300）→ 该换。"""
     now = time.time()
     fresh = StokenRecord(token="t", minted_at=now, expires_at=now + 600)
     assert fresh.is_fresh()
-    # 离过期只剩 60 秒（余量 300）→ 该换了
     almost = StokenRecord(token="t", minted_at=now, expires_at=now + 60)
     assert not almost.is_fresh()
-    # 到期了
     dead = StokenRecord(token="t", minted_at=now - 1000, expires_at=now - 1)
     assert not dead.is_fresh()
 
@@ -105,15 +98,12 @@ def test_记录_字典往返():
     assert StokenRecord.from_dict({"token": ""}) is None
 
 
-# --------------------------------------------------------------------------- #
-# StokenStore：状态库的 doc('stoken')
-# --------------------------------------------------------------------------- #
 
 
 def test_账本_读写往返(tmp_path: Path):
     db = tmp_path / "boss.db"
     store = StokenStore(db)
-    assert store.load() is None  # 还没有
+    assert store.load() is None
     rec = StokenRecord(token="0138S", minted_at=time.time(), expires_at=time.time() + 100)
     store.save(rec)
     again = store.load()
@@ -139,12 +129,9 @@ def test_账本_能清掉(tmp_path: Path):
     store.save(StokenRecord(token="t", minted_at=time.time(), expires_at=time.time() + 10))
     store.clear()
     assert store.load() is None
-    store.clear()  # 幂等
+    store.clear()
 
 
-# --------------------------------------------------------------------------- #
-# CdpStokenProvider.ensure：什么时候去换新
-# --------------------------------------------------------------------------- #
 
 
 def provider(tmp_path: Path, http: FakeHttp | None = None, **kwargs) -> CdpStokenProvider:
@@ -165,11 +152,12 @@ def test_ensure_账本新鲜就直接用(tmp_path: Path):
         acquire=lambda: calls.append("acquired") or "0138NEW",
     )
     assert p.ensure() == "0138OLD"
-    assert calls == []                      # 一次都没拉浏览器
+    assert calls == []
     assert p.http.cookies.get("__zp_stoken__") == "0138OLD"
 
 
 def test_ensure_过期了才换新(tmp_path: Path):
+    """换完要落盘，下次 fetch 不用再拉 Chrome。"""
     store = StokenStore(tmp_path / "boss.db")
     store.save(StokenRecord(token="0138OLD", minted_at=time.time() - 9999, expires_at=time.time() - 1))
     calls: list[str] = []
@@ -181,7 +169,6 @@ def test_ensure_过期了才换新(tmp_path: Path):
     )
     assert p.ensure() == "0138NEW"
     assert calls == ["acquired"]
-    # 换完要落盘，下次 fetch 就不用再拉
     assert store.load().token == "0138NEW"
     assert p.http.cookies.get("__zp_stoken__") == "0138NEW"
 
@@ -220,15 +207,19 @@ def test_ensure_令牌没变就别再写盘(tmp_path: Path):
     p._persist = counting_persist  # type: ignore[method-assign]
 
     assert p.ensure() == "0138OLD"
-    assert writes == ["0138OLD"]          # 第一次：Cookie 还空着，要写
+    assert writes == ["0138OLD"]
     assert p.ensure() == "0138OLD"
-    assert writes == ["0138OLD"]          # 第二次：已经这枚了，不写
+    assert writes == ["0138OLD"]
     assert p.ensure() == "0138OLD"
-    assert writes == ["0138OLD"]          # 同上
+    assert writes == ["0138OLD"]
 
 
 def test_ensure_强制换新有冷却(tmp_path: Path):
-    """刚换过就别连环拉 Chrome——37 有时只是太快，连环换新又慢又更容易撞风控。"""
+    """刚换过就别连环拉 Chrome——37 有时只是太快，连环换新又慢又更容易撞风控。
+
+    冷却期内还同一枚，不再拉 Chrome。
+    冷却期过了才真换。
+"""
     store = StokenStore(tmp_path / "boss.db")
     calls: list[str] = []
     p = CdpStokenProvider(
@@ -239,11 +230,9 @@ def test_ensure_强制换新有冷却(tmp_path: Path):
     assert p.ensure(force=True) == "0138NEW"
     assert calls == ["acquired"]
 
-    # 冷却期内：还给同一枚，不再拉 Chrome
     assert p.ensure(force=True) == "0138NEW"
     assert calls == ["acquired"]
 
-    # 冷却期过了：真换
     p._last_renew_at = time.time() - RENEW_COOLDOWN - 1
     assert p.ensure(force=True) == "0138NEW"
     assert calls == ["acquired", "acquired"]
@@ -337,7 +326,7 @@ def test_ensure_镜像进登录态(tmp_path: Path):
 
     stored = load_session(session_db)
     assert stored.cookies["__zp_stoken__"] == "0138MIRROR"
-    assert stored.cookies["wt2"] == "w"          # 原来的登录态没被冲掉
+    assert stored.cookies["wt2"] == "w"
 
 
 def test_不镜像时不碰登录态(tmp_path: Path):
@@ -352,9 +341,6 @@ def test_不镜像时不碰登录态(tmp_path: Path):
     assert boss_db.doc_get_raw(boss_db.DOC_SESSION, session_db) is None
 
 
-# --------------------------------------------------------------------------- #
-# find_chrome
-# --------------------------------------------------------------------------- #
 
 
 def test_find_chrome_认环境变量(tmp_path: Path, monkeypatch):
@@ -370,9 +356,6 @@ def test_find_chrome_环境变量指空文件就报错(tmp_path: Path, monkeypat
         find_chrome()
 
 
-# --------------------------------------------------------------------------- #
-# 窗口档位（BOSS_CHROME_MODE）
-# --------------------------------------------------------------------------- #
 
 
 def test_档位_默认是hidden():
@@ -382,7 +365,7 @@ def test_档位_默认是hidden():
 
 
 def test_档位_认环境变量(monkeypatch):
-    monkeypatch.setenv("BOSS_CHROME_MODE", "VISIBLE")  # 大小写无所谓
+    monkeypatch.setenv("BOSS_CHROME_MODE", "VISIBLE")
     assert cdp._mode() == "visible"
 
 
@@ -394,7 +377,7 @@ def test_档位_写错了退回默认(monkeypatch):
 def test_档位_offscreen把窗口摆到屏幕外():
     flags = cdp._mode_flags("offscreen")
     assert any(f.startswith("--window-position=-") for f in flags)
-    assert "--disable-backgrounding-occluded-windows" not in flags  # 有头那档不用管节流
+    assert "--disable-backgrounding-occluded-windows" not in flags
 
 
 def test_档位_hidden要关掉遮挡节流():
@@ -449,9 +432,6 @@ def test_档位_复用现成调试口时不管档位(monkeypatch):
     assert cdp.connect_or_launch(mode="headless") is not None
 
 
-# --------------------------------------------------------------------------- #
-# 退出收尾：把自己拉起来的 Chrome 关掉
-# --------------------------------------------------------------------------- #
 
 
 class FakeProc:
@@ -535,13 +515,13 @@ def test_退出_先走CDP关再等它退(launched):
     assert cdp.close_launched_browsers() == 1
     assert FakeCdp.instances[0].calls == ["Browser.close"]
     assert FakeCdp.instances[0].closed is True
-    assert proc.killed is False  # 它自己退了，不用杀
-    assert launched == []  # 册子清空，别再关第二遍
+    assert proc.killed is False
+    assert launched == []
 
 
 def test_退出_CDP关不掉就杀进程(launched):
     FakeCdp.fail_close = True
-    proc = FakeProc(exits=False)  # 让它 wait 超时
+    proc = FakeProc(exits=False)
     launched.append(cdp._Launched(proc=proc, port=9222, ws_url="ws://x/devtools/browser/abc"))
 
     assert cdp.close_launched_browsers(timeout=0.01) == 1
@@ -554,7 +534,7 @@ def test_退出_没连上过就直接杀(launched):
     launched.append(cdp._Launched(proc=proc, port=9222))
     assert cdp.close_launched_browsers() == 1
     assert proc.killed is True
-    assert proc.waits == []  # 没等
+    assert proc.waits == []
 
 
 def test_退出_早就退了的不算(launched):
@@ -582,7 +562,7 @@ def test_退出_连上才把ws地址记下来(monkeypatch, launched):
     """自拉那一支：调试口就绪后才把 ws 地址认到这台上。"""
     monkeypatch.setattr(cdp, "_hide_windows", lambda pid, **k: 1)
     monkeypatch.setattr(cdp.subprocess, "Popen", lambda *a, **k: FakeProc())
-    probe = iter(["", "ws://127.0.0.1:9222/devtools/browser/x"])  # 第一次是「复用」那探
+    probe = iter(["", "ws://127.0.0.1:9222/devtools/browser/x"])
     monkeypatch.setattr(cdp, "probe_debug", lambda *a, **k: next(probe, ""))
 
     cdp.connect_or_launch()
@@ -619,8 +599,8 @@ def test_退出_关终端窗口也要收尾(launched):
     proc = FakeProc()
     launched.append(cdp._Launched(proc=proc, port=9222, ws_url="ws://x/devtools/browser/abc"))
 
-    assert cdp._console_ctrl_handler(cdp._CTRL_CLOSE_EVENT) is False  # 不拦，默认动作照跑
-    assert proc.killed is False and proc.waits  # 走的是体面那条：CDP close + wait
+    assert cdp._console_ctrl_handler(cdp._CTRL_CLOSE_EVENT) is False
+    assert proc.killed is False and proc.waits
     assert launched == []
 
 
@@ -630,7 +610,7 @@ def test_退出_CtrlC不抢答(launched):
     launched.append(cdp._Launched(proc=proc, port=9222, ws_url="ws://x/devtools/browser/abc"))
 
     assert cdp._console_ctrl_handler(cdp._CTRL_C_EVENT) is False
-    assert launched != []  # 册子没动，留给 atexit
+    assert launched != []
 
 
 def test_退出_Break也是硬退所以收掉(launched):
@@ -660,13 +640,13 @@ def test_退出_关掉开关就不挂控制台钩子(monkeypatch, launched):
     assert installed == []
 
 
-# --------------------------------------------------------------------------- #
-# 落盘的形状
-# --------------------------------------------------------------------------- #
 
 
 def test_落盘记录带过期时间(tmp_path: Path):
-    """``doc('stoken')`` 必须有 expires_at，否则下次 fetch 判不了过期。"""
+    """``doc('stoken')`` 必须有 expires_at，否则下次 fetch 判不了过期。
+
+    有效期是前端写死的 3840 分钟。
+"""
     p = provider(tmp_path)
     p.ensure()
     payload = boss_db.doc_get(boss_db.DOC_STOKEN, tmp_path / "boss.db")
@@ -674,5 +654,4 @@ def test_落盘记录带过期时间(tmp_path: Path):
     assert payload["token"] == "0138NEW"
     assert payload["expires_at"] > time.time()
     assert payload["source"] == "cdp"
-    # 有效期是前端写的 3840 分钟
     assert payload["expires_at"] - payload["minted_at"] == pytest.approx(STOKEN_MAX_AGE, abs=2)
