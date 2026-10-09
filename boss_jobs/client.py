@@ -480,6 +480,10 @@ class JobClient:
         except JobApiError as exc:
             if not exc.is_chat_remind:
                 raise
+            if exc.is_chat_limit_exhausted:
+                # 已明确达到今日上限时，首次响应就是终态；不要再模拟确认，
+                # 否则会额外打一发 friend/add 并把原始配额文案覆盖掉。
+                raise
             payload = self._confirm_chat_remind(
                 exc,
                 params=params,

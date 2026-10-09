@@ -1361,6 +1361,19 @@ def test_chat_limit_exhausted_recognizes_tomorrow_message_only():
     assert not unknown.is_chat_limit_exhausted
 
 
+def test_greet_does_not_confirm_when_daily_limit_is_exhausted():
+    message = "您今天已与150位BOSS沟通，休息一下，明天再来吧～"
+    http = FakeHttp([_chat_remind_payload(message)])
+
+    with pytest.raises(JobApiError) as ei:
+        JobClient(http=http, retries=0).greet(
+            security_id="SEC1", encrypt_job_id="J1", encrypt_boss_id="BOSS1"
+        )
+
+    assert ei.value.is_chat_limit_exhausted
+    assert len(http.calls) == 1
+
+
 def test_chat_rate_limit_phrase_recognizes_real_api_error():
     err = JobApiError(1, "您的操作过于频繁，请稍后再试")
 
