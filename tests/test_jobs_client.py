@@ -1365,7 +1365,7 @@ def test_chat_rate_limit_phrase_recognizes_real_api_error():
     err = JobApiError(1, "您的操作过于频繁，请稍后再试")
 
     assert err.is_chat_rate_limited
-    assert err.is_chat_limit_exhausted
+    assert not err.is_chat_limit_exhausted
 
 
 @pytest.mark.parametrize(

@@ -311,6 +311,18 @@ def test_deliver_chat_remind_tomorrow_message_stops_batch():
     assert "deliver_status" not in _match_of(aid, "j3")
 
 
+def test_deliver_rate_limit_stops_batch_with_rate_limit_message():
+    """操作频繁与每日配额耗尽是两类提示，前者不能被说成配额耗尽。"""
+    client = FakeGreetClient([JobApiError(1, "您的操作过于频繁，休息一会再试吧～")])
+    snap, aid = _run_deliver([_match("j1"), _match("j2")], ["j1", "j2"], client)
+
+    assert snap["status"] == "error"
+    assert "操作频率限制" in snap["error"]
+    assert "配额已耗尽" not in snap["error"]
+    assert len(client.calls) == 1
+    assert "操作频率限制" in _match_of(aid, "j1")["deliver_error"]
+
+
 def test_deliver_chat_remind_remaining_zero_stops_batch():
     """话术明说「还剩 0 次」= 今天的量真见底了，停批（但仍不是登录失效）。"""
     exc = _chat_remind_exc("您今天已与150位BOSS沟通，还剩0次沟通机会哦")
@@ -322,7 +334,7 @@ def test_deliver_chat_remind_remaining_zero_stops_batch():
     assert "还剩0次沟通机会" in snap["error"]
     assert "重新登录" not in snap["error"]
     assert len(client.calls) == 1
-    assert "开聊提醒" in _match_of(aid, "j1")["deliver_error"]
+    assert "每日沟通配额已耗尽" in _match_of(aid, "j1")["deliver_error"]
 
 
 def test_deliver_single_failure_does_not_stop_batch():

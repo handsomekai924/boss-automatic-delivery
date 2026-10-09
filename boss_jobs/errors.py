@@ -18,7 +18,7 @@ from . import config as C
 #: 弹窗话术里的剩余次数，如「您今天已与120位BOSS沟通，还剩30次沟通机会哦」
 _CHAT_REMAIN_RE = re.compile(r"还剩\s*(\d+)\s*次")
 _CHAT_RATE_LIMIT_RE = re.compile(
-    r"(?:过于频繁|过于频率|频率过高|操作太快|请求太快|明天再来|休息一下)"
+    r"(?:操作过于频繁|请求过于频繁|发送过于频繁|操作太快|请求太快|稍后再试|休息.{0,8}再试)"
 )
 _CHAT_LIMIT_EXHAUSTED_RE = re.compile(
     r"(?:"
@@ -164,13 +164,11 @@ class JobApiError(JobError):
 
     @property
     def is_chat_limit_exhausted(self) -> bool:
-        """True 表示每日沟通额度明确耗尽，而非普通开聊提醒。"""
+        """True 表示文案明确指向每日沟通次数耗尽，不包含一般操作频率限制。"""
         remaining = self.chat_remind_remaining
         if remaining is not None:
             return remaining == 0
-        if self.is_chat_remind:
-            return bool(_CHAT_LIMIT_EXHAUSTED_RE.search(self.message)) or self.is_chat_rate_limited
-        return bool(_CHAT_LIMIT_EXHAUSTED_RE.search(self.message)) or self.is_chat_rate_limited
+        return bool(_CHAT_LIMIT_EXHAUSTED_RE.search(self.message))
 
     @property
     def is_browser_check(self) -> bool:

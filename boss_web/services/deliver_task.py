@@ -343,22 +343,22 @@ class DeliverTaskManager:
             self._record(task, item, status=DELIVER_FAILED, error=f"账号异常：{exc.message}")
             self._stop(task, f"账号异常（code {exc.code}）：{exc.message}。请人工处理后再发。")
             return "stop"
-        if exc.is_chat_rate_limited and exc.is_chat_remind:
-            error = f"每日沟通配额限制：{exc.message}"
+        if exc.is_chat_rate_limited:
+            error = f"操作频率限制：{exc.message}"
             self._record(task, item, status=DELIVER_FAILED, error=error)
-            self._stop(task, f"{error}。已立即停止后续发送，请明天再试。")
+            self._stop(task, f"{error}。已立即停止后续发送，请稍后再试。")
             return "stop"
-        if exc.is_chat_limit_exhausted and not exc.is_chat_remind:
+        if exc.is_chat_limit_exhausted:
             error = f"每日沟通配额已耗尽：{exc.message}"
             self._record(task, item, status=DELIVER_FAILED, error=error)
             self._stop(task, f"{error}。这是 BOSS 侧的每日沟通配额（不是登录失效），明天再试。")
             return "stop"
         if exc.is_chat_remind:
             # 「开聊提醒」是 **blockLevel 0 的提示弹窗**。确认后仍被拦时，
-            # 明确的每日额度耗尽话术（或还剩 0 次）停批；其余情况仍只记当前条。
+            # 只有明确的每日额度耗尽话术（或还剩 0 次）才停批；频率限制单独处理。
             remaining = exc.chat_remind_remaining
             self._record(task, item, status=DELIVER_FAILED, error=f"开聊提醒：{exc.message}")
-            if exc.is_chat_limit_exhausted:
+            if remaining == 0:
                 self._stop(
                     task,
                     f"今日沟通配额已用完：{exc.message}。"
