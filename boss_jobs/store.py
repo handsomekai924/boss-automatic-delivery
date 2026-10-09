@@ -118,9 +118,6 @@ class JobStore:
             self._conn = boss_db.connect(self.path)
             self._owns_conn = True
 
-    # ------------------------------------------------------------------ #
-    # 写入
-    # ------------------------------------------------------------------ #
 
     def save_page(self, result: PageResult) -> SaveOutcome:
         """把一页的清洗结果立刻入库，同时记一行 ``fetch_pages`` 流水。"""
@@ -187,9 +184,6 @@ class JobStore:
         self._conn.commit()
         return cur.rowcount > 0
 
-    # ------------------------------------------------------------------ #
-    # 查询
-    # ------------------------------------------------------------------ #
 
     def count_jobs(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()
@@ -339,7 +333,6 @@ class JobStore:
             ],
         }
 
-    # ------------------------------------------------------------------ #
 
     def close(self) -> None:
         if self._owns_conn:
@@ -353,9 +346,6 @@ class JobStore:
         self.close()
 
 
-# --------------------------------------------------------------------------- #
-# 行 ↔ 模型
-# --------------------------------------------------------------------------- #
 
 
 def _match_where(

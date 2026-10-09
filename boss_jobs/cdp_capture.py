@@ -1,39 +1,24 @@
 """CDP 网络抓包：附着到带调试口的 Chrome，把整个浏览器实例的请求落盘。
 
-这个模块**不参与**取 ``__zp_stoken__``（那条路在 :mod:`boss_jobs.cdp_stoken`）。
-它的用途是「看清浏览器到底在发什么」：附着到一台已经在跑的 Chrome，订阅
-``Network`` 域，把所有**非 JS/CSS/HTML** 的请求连同请求头、POST 参数、响应头、
-响应体一起写到磁盘，含 WebSocket 的握手与**全部帧**。
+**不参与**取 ``__zp_stoken__``（那条在 :mod:`boss_jobs.cdp_stoken`）。用途是「看清
+浏览器到底在发什么」：订阅 ``Network`` 域，把所有**非 JS/CSS/HTML** 的请求连同
+请求头、POST 参数、响应头、响应体写到磁盘，含 WebSocket 的握手与**全部帧**。
+不能复用 ``cdp_stoken.CdpClient``——它的 ``call`` 一问一答，所有 CDP 事件会被
+静默丢掉。
 
-为什么不能拿 ``cdp_stoken.CdpClient`` 改：那个类的 ``call`` 是严格一问一答，
-非本 id 的帧（也就是**所有 CDP 事件**）会被静默丢掉。要收事件就得有自己的读循环。
+**两条线程是理解本模块的钥匙**：处理 ``loadingFinished`` 时要调
+``getResponseBody``，而回包只能从同一条 ws 的 ``recv()`` 到——读和处理若是同一线程，
+回包永远排在自己后面，死锁。所以**读线程**只 ``recv()``（有 ``id`` 就唤醒等回包的
+人，有 ``method`` 就塞队列），**消费线程**取事件、发命令、落盘；落盘因此是单写者。
 
-## 为什么是两条线程（这条是理解本模块的钥匙）
+输出要点：``index.jsonl`` 的请求头**优先取 ExtraInfo 版本**（``requestWillBeSent``
+的 headers 不含 Cookie、``responseReceived`` 的不含 Set-Cookie，真实头只在
+``*ExtraInfo`` 里，且可能早于主事件到，先到先存）。``requestId`` **只在单个
+session 内唯一**，内部一律用 ``(session_id, requestId)`` 复合键。WS 二进制帧
+（``opcode=2``）按 CDP 约定 ``payloadData`` 已是 base64，原样存 + ``binary=true``，
+**不做二次编码**；``opcode=0`` 是续帧（``continuation=true``），消息重组不在本模块。
 
-处理 ``Network.loadingFinished`` 时要去调 ``Network.getResponseBody`` 取响应体，
-而回包只能从**同一条 ws** 上 ``recv()`` 到。如果「读 ws」和「处理事件」是同一个
-线程，那个等待的回包永远排在它自己后面——线程自己阻塞自己，死锁。所以：
-
-* **读线程**只做一件事：``recv()`` → 有 ``id`` 就唤醒等回包的人，有 ``method``
-  就塞进队列。它**不处理事件、不发命令、不碰磁盘**。
-* **消费线程**从队列取事件，该发命令就发（回包由读线程投递），该落盘就落盘。
-* 落盘因此是**单写者**，文件句柄不用加锁。
-
-## 输出的那点讲究
-
-* ``index.jsonl`` 一行一个请求，请求头**优先取 ExtraInfo 的版本**——因为
-  ``requestWillBeSent.request.headers`` 普遍不含 ``Cookie``，
-  ``responseReceived.response.headers`` 也不含 ``Set-Cookie``，真实头只在
-  ``*ExtraInfo`` 里。ExtraInfo 可能早于主事件到达，所以两边都要能「先到先存」。
-* ``requestId`` **只在单个 session 内唯一**，跨 session 会撞车，所以内部一律用
-  ``(session_id, requestId)`` 复合键。这是最容易写错、后果最隐蔽的地方。
-* WebSocket 的二进制帧（``opcode=2``）按 CDP 约定 ``payloadData`` 已经是 base64，
-  这里原样存 base64 + ``binary=true``，**不做二次编码**，留给后续自己解 MQTT over WS
-  的包结构（WS 帧边界与 MQTT 包边界不对齐，解包要另做重组）。
-* ``websocket.jsonl`` 里 ``opcode=0`` 是分片的续帧，标 ``continuation=true``；
-  **消息重组不在本模块范围内**。
-
-本模块**默认只附着、绝不关 Chrome**——那是用户自己开的那台。
+**默认只附着、绝不关 Chrome**——那是用户自己开的那台。
 """
 
 from __future__ import annotations
@@ -54,9 +39,6 @@ from typing import Any, Callable, Iterator, Mapping
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# 异常
-# --------------------------------------------------------------------------- #
 
 
 class CaptureError(Exception):
@@ -71,9 +53,6 @@ class CdpTimeout(CaptureError):
     """等 CDP 回包超时。"""
 
 
-# --------------------------------------------------------------------------- #
-# 常量：资源类型与过滤档位
-# --------------------------------------------------------------------------- #
 
 #: CDP ``ResourceType`` 的全部取值。写全是为了让 ``--include-types`` 的拼写错误
 #: 能在 CLI 层被指出来，而不是静默抓不到东西。
@@ -175,9 +154,6 @@ _AV_SUBTYPE_EXT: dict[str, str] = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# 纯函数
-# --------------------------------------------------------------------------- #
 
 
 def iso_now() -> str:
@@ -254,9 +230,6 @@ def get_header(headers: Mapping[str, Any], name: str) -> str:
     return ""
 
 
-# --------------------------------------------------------------------------- #
-# 过滤
-# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
@@ -346,9 +319,6 @@ def _split_types(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-# --------------------------------------------------------------------------- #
-# 落盘
-# --------------------------------------------------------------------------- #
 
 
 @dataclass
@@ -393,14 +363,13 @@ class CaptureWriter:
         self.bodies_written = 0
         self.body_bytes = 0
 
-    # ---------------------------------------------------------------- 基础 #
 
     def next_seq(self) -> int:
         self._seq += 1
         return self._seq
 
     def _rel(self, path: Path) -> str:
-        # 行内路径一律用正斜杠，跨平台可读
+        """相对 out_dir 的路径，一律用正斜杠（跨平台可读）。"""
         return path.relative_to(self.out_dir).as_posix()
 
     def _dump(self, row: Mapping[str, Any]) -> str:
@@ -425,7 +394,6 @@ class CaptureWriter:
             self._ws_pending = 0
             self._ws_last_flush = now
 
-    # ---------------------------------------------------------------- 正文 #
 
     def write_body(
         self,
@@ -490,7 +458,6 @@ class CaptureWriter:
             "note": note,
         }
 
-    # ---------------------------------------------------------------- 收尾 #
 
     def write_meta(self, **fields: Any) -> None:
         """写 ``meta.json``。开抓先写一版，收尾再补一版——**后写是并入，不是替换**。"""
@@ -521,9 +488,6 @@ class CaptureWriter:
                 pass
 
 
-# --------------------------------------------------------------------------- #
-# 单条请求的状态
-# --------------------------------------------------------------------------- #
 
 
 @dataclass
@@ -642,13 +606,14 @@ class CaptureSummary:
         }
 
 
-# --------------------------------------------------------------------------- #
-# 事件管线
-# --------------------------------------------------------------------------- #
 
 
 class CaptureSession:
     """把 CDP 事件流变成磁盘上的文件。
+
+    事件管线按到达顺序处理：``requestWillBeSent`` 建记录 → ``*ExtraInfo`` 补真实头
+    → ``responseReceived`` 记响应 → ``loadingFinished``/``failed`` 取正文并落盘；
+    WebSocket 走 ``webSocket*`` 一族，target 生命周期走 ``target*``。
 
     ``call`` 是「发一条 CDP 命令拿回包」的可调用对象——真跑时传
     :meth:`CdpConnection.send_call`，测试时传个按方法名回罐头的假货。
@@ -688,7 +653,6 @@ class CaptureSession:
         #: 兜底：即使收尾那版之前没人写过 meta（直接 new 出来喂事件），也得有时间戳
         self._writer.write_meta(started_at=iso_now())
 
-    # ------------------------------------------------------------ 会话登记 #
 
     def claim_session(self, session_id: str) -> bool:
         """登记一个 session，返回「这次是新登记的吗」。防重复 ``Network.enable``。"""
@@ -718,7 +682,6 @@ class CaptureSession:
     def _target_of(self, session_id: str | None) -> dict[str, Any]:
         return dict(self._targets.get(session_id or "", {}))
 
-    # -------------------------------------------------------------- 找记录 #
 
     def _active(self, key: tuple[str, str]) -> RequestRecord | None:
         hops = self._records.get(key)
@@ -727,7 +690,6 @@ class CaptureSession:
         rec = hops[-1]
         return None if rec.written else rec
 
-    # -------------------------------------------------------------- 总入口 #
 
     def handle_event(
         self, session_id: str | None, method: str, params: Mapping[str, Any]
@@ -737,9 +699,14 @@ class CaptureSession:
             return
         getattr(self, name)(session_id or "", params)
 
-    # ------------------------------------------------------------ 请求事件 #
 
     def _on_request(self, sid: str, params: Mapping[str, Any]) -> None:
+        """``requestWillBeSent``：建（或续）一条 :class:`RequestRecord`。
+
+        两个特例：WebSocket 的握手也走这里，但 ``webSocketCreated`` 已经建过记录，
+        往那条上并、别再开一条；同一个 ``requestId`` 带着 ``redirectResponse``
+        再来 = 上一跳是 3xx，先把上一跳单独收尾落盘，再开这一跳，别把两跳并成一条。
+        """
         rid = str(params.get("requestId") or "")
         key = (sid, rid)
         request = params.get("request") or {}
@@ -749,14 +716,10 @@ class CaptureSession:
         hops = self._records.get(key) or []
         active = hops[-1] if hops and not hops[-1].written else None
 
-        # WebSocket 的握手也会走 requestWillBeSent；webSocketCreated 已经建过记录了，
-        # 往那条上并，别再开一条。
         if active is not None and active.rtype == "WebSocket" and rtype == "WebSocket":
             self._fill_request(active, params, request)
             return
 
-        # 同一个 requestId 又来了且带着 redirectResponse = 上一跳是 3xx。
-        # 先把上一跳单独收尾落盘，再开这一跳，别把两跳并成一条。
         if active is not None and redirect_response:
             self._finish_redirect_hop(active, redirect_response)
 
@@ -791,6 +754,11 @@ class CaptureSession:
     def _fill_request(
         self, rec: RequestRecord, params: Mapping[str, Any], request: Mapping[str, Any]
     ) -> None:
+        """把 ``requestWillBeSent`` 的字段填进记录。
+
+        渲染进程给的头不含 Cookie 之类的凭证，``*ExtraInfo`` 到了会盖掉这份——
+        所以只有在还没拿到 ExtraInfo 时才写。
+        """
         rec.url = str(request.get("url") or rec.url)
         rec.method = str(request.get("method") or rec.method)
         rec.loader_id = str(params.get("loaderId") or rec.loader_id)
@@ -800,7 +768,6 @@ class CaptureSession:
             rec.query = parse_query(rec.url)
         if not rec.initiator and params.get("initiator"):
             rec.initiator = dict(params["initiator"])
-        # 渲染进程给的头不含 Cookie 之类的凭证，ExtraInfo 到了会盖掉这份。
         headers = request.get("headers")
         if isinstance(headers, dict) and rec.request_headers_source == "requestWillBeSent":
             rec.request_headers = {str(k): str(v) for k, v in headers.items()}
@@ -836,6 +803,7 @@ class CaptureSession:
     def _merge_request_extra(
         self, rec: RequestRecord, params: Mapping[str, Any]
     ) -> None:
+        """``requestWillBeSentExtraInfo``：真实请求头（含 Cookie）盖掉渲染进程那份。"""
         headers = params.get("headers")
         if isinstance(headers, dict) and headers:
             rec.request_headers = {str(k): str(v) for k, v in headers.items()}
@@ -852,14 +820,13 @@ class CaptureSession:
             return
         self._merge_request_extra(rec, params)
 
-    # ------------------------------------------------------------ 响应事件 #
 
     def _on_response(self, sid: str, params: Mapping[str, Any]) -> None:
+        """``responseReceived``。ExtraInfo 的头更全（含 Set-Cookie），已拿到就别盖回去。"""
         rec = self._active((sid, str(params.get("requestId") or "")))
         if rec is None:
             return
         response = params.get("response") or {}
-        # ExtraInfo 的头更全（含 Set-Cookie），已经拿到就别被这份盖回去。
         if rec.response.get("headers_source") != "responseReceivedExtraInfo":
             headers = response.get("headers")
             if isinstance(headers, dict):
@@ -894,6 +861,7 @@ class CaptureSession:
     def _merge_response_extra(
         self, rec: RequestRecord, params: Mapping[str, Any]
     ) -> None:
+        """``responseReceivedExtraInfo``：真实响应头（含 ``Set-Cookie``）盖掉简版。"""
         headers = params.get("headers")
         if isinstance(headers, dict) and headers:
             rec.response["headers"] = {str(k): str(v) for k, v in headers.items()}
@@ -903,7 +871,6 @@ class CaptureSession:
         if params.get("headersText"):
             rec.response_headers_text = str(params["headersText"])
 
-    # ------------------------------------------------------------ 结束事件 #
 
     def _on_finished(self, sid: str, params: Mapping[str, Any]) -> None:
         rec = self._active((sid, str(params.get("requestId") or "")))
@@ -930,7 +897,6 @@ class CaptureSession:
         }
         self._finish(rec, status="failed")
 
-    # -------------------------------------------------------- WebSocket 事件 #
 
     def _ws_record(self, sid: str, params: Mapping[str, Any]) -> RequestRecord | None:
         """按 requestId 找 WS 记录；``webSocketCreated`` 先到时负责建它。"""
@@ -1062,6 +1028,7 @@ class CaptureSession:
         )
 
     def _on_ws_closed(self, sid: str, params: Mapping[str, Any]) -> None:
+        """WS 收尾。**不取正文**——WS 没有「响应体」，别去问 ``getResponseBody``。"""
         rec = self._active((sid, str(params.get("requestId") or "")))
         if rec is None or rec.ws is None:
             return
@@ -1069,7 +1036,6 @@ class CaptureSession:
         ts = params.get("timestamp")
         if isinstance(ts, (int, float)):
             rec.timings["finished_ts"] = ts
-        # WS 没有「响应体」，别去问 getResponseBody
         self._finish(rec, status="complete", fetch_body=False)
 
     def _write_ws_row(self, rec: RequestRecord, extra: Mapping[str, Any]) -> None:
@@ -1081,7 +1047,6 @@ class CaptureSession:
         row.update(extra)
         self._writer.write_ws(row)
 
-    # ------------------------------------------------------------ target 事件 #
 
     def _on_attached(self, sid: str, params: Mapping[str, Any]) -> None:
         new_sid = str(params.get("sessionId") or "")
@@ -1100,12 +1065,11 @@ class CaptureSession:
         if target_sid:
             self.note_target(target_sid, info)
 
-    # ---------------------------------------------------------------- 收尾 #
 
     def _finish_redirect_hop(
         self, rec: RequestRecord, redirect_response: Mapping[str, Any]
     ) -> None:
-        """把重定向的上一跳按一条完整请求写出去。"""
+        """把重定向的上一跳按一条完整请求写出去。3xx 没有正文，不取 ``getResponseBody``。"""
         headers = redirect_response.get("headers")
         rec.response["status"] = redirect_response.get("status")
         rec.response["status_text"] = redirect_response.get("statusText")
@@ -1115,7 +1079,6 @@ class CaptureSession:
         ts = redirect_response.get("responseTime")
         if isinstance(ts, (int, float)):
             rec.timings["finished_ts"] = ts
-        # 3xx 没有正文可取，别去问 getResponseBody 讨一个必然失败的答案
         self._finish(rec, status="complete", fetch_body=False)
 
     def _finish(
@@ -1256,9 +1219,6 @@ _EVENT_HANDLERS: dict[str, str] = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# 传输层
-# --------------------------------------------------------------------------- #
 
 
 class _Pending:
@@ -1278,9 +1238,10 @@ class CdpConnection:
 
     读线程**只负责搬运**：有 ``id`` 的回包唤醒等它的人，有 ``method`` 的事件塞进队列。
     事件的真正处理在消费线程那边（:meth:`events` 的调用方），见模块 docstring。
+    队列满时读线程阻塞在 ``put`` 上形成背压（Chrome 发不动就先攒着，不丢）。
+    连接不发 Origin 头（Chrome 111+ 会对陌生 Origin 回 403；调试口是本地闭环）。
     """
 
-    #: 队列满时读线程会阻塞在这一侧，形成背压（Chrome 发不动就先攒着，不丢）。
     def __init__(
         self, ws_url: str, *, recv_timeout: float = 1.0, queue_max: int = 10_000
     ) -> None:
@@ -1303,15 +1264,12 @@ class CdpConnection:
         self._thread: threading.Thread | None = None
         self._close_reason = ""
         try:
-            # suppress_origin：Chrome 111+ 会对陌生 Origin 回 403，
-            # 调试口本来就是本地闭环，不发 Origin 头最干净。
             self._ws = websocket.create_connection(
                 ws_url, timeout=recv_timeout, suppress_origin=True
             )
         except Exception as exc:  # noqa: BLE001
             raise CaptureError(f"连不上 CDP（{ws_url}）：{exc}") from exc
 
-    # ---------------------------------------------------------------- 状态 #
 
     @property
     def closed(self) -> bool:
@@ -1329,7 +1287,6 @@ class CdpConnection:
         )
         self._thread.start()
 
-    # ---------------------------------------------------------------- 读线程 #
 
     def _reader(self) -> None:
         websocket = self._ws_mod
@@ -1360,6 +1317,9 @@ class CdpConnection:
             self._dispatch(message)
 
     def _dispatch(self, message: Mapping[str, Any]) -> None:
+        """回包唤醒等它的人；事件塞队列。队列满就等着——读线程停住 = TCP 窗口收窄
+        = Chrome 那边自然减速。
+        """
         mid = message.get("id")
         if mid is not None:
             with self._pending_lock:
@@ -1381,7 +1341,6 @@ class CdpConnection:
         if not method:
             return
         item = (message.get("sessionId"), str(method), message.get("params") or {})
-        # 队列满就等着——读线程停住 = TCP 窗口收窄 = Chrome 那边自然减速。
         while not self._stop.is_set():
             try:
                 self._events.put(item, timeout=0.2)
@@ -1390,13 +1349,13 @@ class CdpConnection:
                 continue
 
     def _on_closed(self, reason: str) -> None:
+        """连接结束：唤醒所有正在等回包的人（否则消费线程要一直卡到超时），再放哨兵。"""
         with self._state_lock:
             if self._closed:
                 return
             self._closed = True
             self._close_reason = reason
         logger.info("CDP 连接结束：%s", reason)
-        # 唤醒所有正在等回包的人，否则消费线程要一直卡到超时
         with self._pending_lock:
             pending, self._pending = list(self._pending.values()), {}
         for item in pending:
@@ -1408,7 +1367,6 @@ class CdpConnection:
         except queue.Full:
             pass
 
-    # ---------------------------------------------------------------- 命令 #
 
     def send_call(
         self,
@@ -1449,7 +1407,6 @@ class CdpConnection:
             raise pending.error
         return pending.result or {}
 
-    # ---------------------------------------------------------------- 事件 #
 
     def events(self, *, idle_timeout: float = 0.5) -> Iterator[tuple[str | None, str, dict[str, Any]]]:
         """把事件一条条吐出来，直到连接关闭且队列排空。"""
@@ -1474,9 +1431,6 @@ class CdpConnection:
             self._thread.join(timeout=3.0)
 
 
-# --------------------------------------------------------------------------- #
-# 编排
-# --------------------------------------------------------------------------- #
 
 
 def _auto_attach_params(wait_for_debugger: bool) -> dict[str, Any]:
@@ -1502,6 +1456,8 @@ def setup_session(
     这里**还要再发一次** ``Target.setAutoAttach``：那个命令的作用域是「所在 target 的
     直接子 target」，browser 级那次只覆盖顶层标签页，而 OOPIF 和 worker 是页面的
     孙子层，不在那个页面的 session 上再设一次就收不到。
+    ``Runtime.runIfWaitingForDebugger`` 必须排在 ``Network.enable`` 之后放行，
+    否则首屏那批请求照样漏。
     """
     if not session.claim_session(session_id):
         return
@@ -1520,7 +1476,6 @@ def setup_session(
     except CaptureError as exc:
         logger.debug("子 session 的 setAutoAttach 失败（%s）：%s", session_id, exc)
     if wait_for_debugger and waiting:
-        # 必须在 Network.enable 之后放行，否则首屏那批请求照样漏
         try:
             conn.send_call("Runtime.runIfWaitingForDebugger", {}, session_id=session_id)
         except CaptureError as exc:
@@ -1534,13 +1489,16 @@ def _bootstrap(
     wait_for_debugger: bool,
     target_filter: list[dict[str, Any]] | None = None,
 ) -> None:
-    """订阅发现 → 自动附着 → 把已经在的 target 逐个接上。"""
+    """订阅发现 → 自动附着 → 把已经在的 target 逐个接上。
+
+    autoAttach 要**先于**枚举：堵住「枚举 target 到 attach 之间」新开的那些。
+    已被 autoAttach 接上的会走 ``attachedToTarget`` 事件，由 ``claim_session`` 去重。
+    """
     try:
         conn.send_call("Target.setDiscoverTargets", {"discover": True})
     except CaptureError as exc:
         logger.debug("setDiscoverTargets 失败（不影响主体）：%s", exc)
 
-    # 先设 autoAttach，堵住「枚举 target 到 attach 之间」新开的那些。
     auto = _auto_attach_params(wait_for_debugger)
     if target_filter:
         try:
@@ -1575,7 +1533,6 @@ def _bootstrap(
                 info,
                 wait_for_debugger=wait_for_debugger,
             )
-        # 已被 autoAttach 接上的会走 attachedToTarget 事件，claim_session 去重
 
 
 def run_capture(

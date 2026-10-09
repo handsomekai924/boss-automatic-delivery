@@ -1,7 +1,4 @@
-"""LLM 配置 + 在线模型列表 + 连通性测试。
-
-可配置的只有 api_key / base_url / model；温度、max_tokens、超时是系统固定值。
-"""
+"""LLM 配置 + 在线模型列表 + 连通性测试。可配置只有 api_key / base_url / model。"""
 
 from __future__ import annotations
 

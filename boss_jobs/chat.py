@@ -1,71 +1,32 @@
 """聊天通道：MQTT over WebSocket + 手写 protobuf 帧。
 
-**为什么要有这个模块**：``POST /wapi/zpgeek/friend/add.json`` 只**建会话**，
-它不投递任何正文——请求体里带 ``greeting`` 服务端直接忽略（回 code 0，
-聊天框还是空的）。站点自己也不靠它发招呼语：消息走 **MQTT**。
-
-逆向结论（全部来自 chat-new 前端 ``static/js/app.*.js``，2026-10-08 实测通过）：
-
-===========================================  ==========================================
-站点前端                                    本模块对应
-===========================================  ==========================================
-``new Paho.MQTT.Client(server, port, "/chatws", uuid)``  :class:`ChatSocket`（paho-mqtt）
-``connect({userName: token+"|0", password: wt, ...})``    :meth:`ChatSocket.connect`
-``client.send("chat", frame.toArrayBuffer(), 1, true)``   :meth:`ChatSocket.send_text`（**retain 我们传 ``False``**，见 :data:`config.CHAT_RETAIN`）
-``createMessage.text(stanza)``                            :func:`encode_text_message`
-``createMessage.presence(...)``                           :func:`encode_presence`
-===========================================  ==========================================
+**为什么要有这个模块**：``POST /wapi/zpgeek/friend/add.json`` 只**建会话**、不投递
+正文（body 带 ``greeting`` 服务端直接忽略）；站点自己也不靠它发招呼语——消息走
+**MQTT**（Paho，topic ``chat``，路径 ``/chatws``）。站点前端对应
+``createMessage.text/presence`` → :func:`encode_text_message` / :func:`encode_presence`。
 
 五个必须踩对的点：
 
 1. **握手要带登录 Cookie**——不带的 WebSocket 升级请求被网关回 **HTTP 403**。
-2. **MQTT 用户名是 ``<token>|0``、密码是 ``wt``**：``token`` 来自
-   ``GET /wapi/zpuser/wap/getUserInfo.json`` 的 ``zpData.token``，
-   ``wt`` 来自 ``GET /wapi/zppassport/get/wt`` 的 ``zpData.wt2``。
-3. **``to.uid`` 是 boss 的数字 uid**，不是 ``encryptBossId``。``encryptBossId``
-   要先换：``GET /wapi/zpchat/geek/getBossData?bossId={encryptBossId}``
-   （见 :meth:`boss_jobs.client.JobClient.fetch_boss_data`），而且要
-   **先 ``friend/add`` 建了会话**才查得到。
-4. **``from`` 里必须带 ``source``**，**``mid`` 必须落在服务端的消息 id 数轴上**。
-5. **正文帧的 ``retain`` 要 ``false``**（站点前端是 ``true``）——留着 ``true``
-   会让一条消息在对方那里**变成两条**，见 :data:`config.CHAT_RETAIN`。
+2. **MQTT 用户名是 ``<token>|0``、密码是 ``wt``**（token 来自 ``getUserInfo.json``
+   的 ``zpData.token``，wt 来自 ``/wapi/zppassport/get/wt`` 的 ``zpData.wt2``）。
+3. **``to.uid`` 是 boss 的数字 uid**，不是 ``encryptBossId``。后者要先经
+   ``friend/add`` 建会话再 ``getBossData`` 换（:meth:`boss_jobs.client.JobClient.fetch_boss_data`）。
+4. **``from`` 里必须带 ``source``**，**``mid`` 必须落在服务端的消息 id 数轴上**
+   （3.9e14 量级的雪花号，不是毫秒；太小会被网关按「id 太旧」掐线）。基数取连上后
+   服务端推的那帧会话同步里的最大 id（:func:`max_message_id`），等不到就用
+   :data:`config.CHAT_MID_FLOOR`；同一批后续帧带 ``mid_base`` 跨条复用。
+5. **正文帧的 ``retain`` 要 ``false``**（站点前端是 ``true``）——留着会让一条消息
+   在对方那里**变成两条**，见 :data:`config.CHAT_RETAIN`。
 
-第 4 条踩了很久，值得单独说。一开始本模块发的文本帧 ``from`` 只有 ``uid``，
-``mid`` 用的是当前毫秒；结果网关收到**立刻把连接关掉**（网页里
-``close code=1000 reason="Bye"``，paho 这边是 ``DISCONNECT Unspecified error``），
-而且**从不回 PUBACK**。当时试遍了 retain / qos / presence 内容 / MQTT 版本 /
-各种 cookie，全都没用——因为**是这个帧本身被判非法**，网关的反应就是掐线。
+**别拿 PUBACK 当判据**：这条网关对文本帧**根本不回 PUBACK**——PUBLISH 完约 150ms
+直接把 WebSocket 关掉（``close code=1000 reason="Bye"``），**这是常态，不是拒收**。
+成功判据是「帧发出去了」（PUBLISH 无异常、``rc == 0``）；PUBACK 只记日志且默认不等
+（:data:`config.CHAT_PUBACK_WAIT`）。「回读聊天记录」同样当不了判据：``historyMsg``
+对这条账号回 ``code 0`` + 空 ``zpData``。
 
-定论来自两次活体对照（2026-10-08 深夜）：
-
-* 挂上 ``WebSocket.prototype.send``，让站点自己在聊天页里发一条消息，抓到它线上
-  那帧，和我们同参数的帧逐字节比——**唯一的字段差异就是 ``from`` 少了
-  ``source:0``**（站点 ``createMessage.text`` 里 ``from`` 也走
-  ``user(uid, encryptUid, source)``，proto2 显式写这个字段）。
-* 补上 ``from.source`` 后**还是被掐**。再比才发现第二处差异在 **``mid``**：
-  站点发的是 ``ChatWebsocket.getMaxMsgId() + Date.now()`` ≈ **3.96e14**
-  （服务端消息 id 是 3.9e14 量级的雪花号），``time`` 才是纯 ``Date.now()``
-  ≈ 1.79e12。我们的帧把 ``mid`` 也写成了毫秒时间戳——**比对方会话里已有的消息 id
-  小了几个数量级**，网关按「id 太旧」毙掉。按站点算式（基数取服务端量级的 id、
-  再加当前毫秒）发出去，消息就进了会话（站点界面显示「[送达]」）。
-
-所以 ``mid`` 的基数从**连上后服务端推的那帧会话同步**里取：那帧带着每个会话最后
-一条消息的 id（见 :func:`max_message_id`），取其中最大值当基数，等不到就用
-:data:`config.CHAT_MID_FLOOR` 兜底。同一批里后续的帧**把上一条的基数带过来**
-（:class:`ChatSocket` 的 ``mid_base``），不用每条都重新等那帧同步。
-
-**别拿 PUBACK 当判据**（这条踩过，报告里也一度说错过）：这条网关对文本帧
-**根本不回 PUBACK**——PUBLISH 完约 150ms 直接把 WebSocket 关掉，
-``close code=1000 reason="Bye"``，**这是它的常态，不是拒收**。2026-10-08 实测的
-那几发（站点会话列表里都出现了招呼语并标「[送达]」，重载页面、从服务端重拉也还在）
-**一发 PUBACK 都没等到**。所以发送成功的判据是「帧发出去了」（PUBLISH 无异常、
-``rc == 0``），PUBACK 只是顺带看一眼、记进日志，而且默认**整个不等**（回执
-从来不到，等它纯烧时间，见 :data:`config.CHAT_PUBACK_WAIT`）。
-「回读聊天记录」同样当不了判据：``GET /wapi/zpchat/geek/historyMsg`` 对这条账号
-返回 ``code 0`` + 空 ``zpData``，**连着有消息、刚确认送达的会话也读不出来**。
-
-protobuf 那套 ``Techwolf*`` 消息是从前端内嵌的 ``.proto`` 文本拿的；这里只
-手写要发的两种帧（文本消息 / presence），不引 protobuf 依赖、也不用编 .proto。
+protobuf 的 ``Techwolf*`` 帧来自前端内嵌的 ``.proto``；这里只手写要发的两种
+（文本消息 / presence），不引 protobuf 依赖。
 """
 
 from __future__ import annotations
@@ -84,20 +45,13 @@ from .errors import ChatSendError
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# protobuf 线格式（只够本模块要发的帧）
-# --------------------------------------------------------------------------- #
-#
-# protobuf 就两种线型在这儿用得上：
-#
-#   wire 0（varint）：``tag = field << 3 | 0``  后面跟 varint 数值
-#   wire 2（长度前缀）：``tag = field << 3 | 2`` 后面跟长度 varint + 原始字节
-#
-# 字符串和嵌套消息都是 wire 2；嵌套消息就是把子帧的字节当值塞进去。
-
-
 def _varint(value: int) -> bytes:
-    """无符号 varint（protobuf 的整数编码）。"""
+    """无符号 varint（protobuf 的整数编码）。
+
+    这儿只用得上两种线型：wire 0（varint）``tag = field << 3 | 0`` 后跟 varint 数值；
+    wire 2（长度前缀）``tag = field << 3 | 2`` 后跟长度 varint + 原始字节。字符串和
+    嵌套消息都是 wire 2；嵌套消息就是把子帧的字节当值塞进去。
+    """
     out = bytearray()
     while True:
         byte = value & 0x7F
@@ -108,21 +62,21 @@ def _varint(value: int) -> bytes:
 
 
 def _vint(field: int, value: int) -> bytes:
+    """wire 0 字段：``tag = field << 3 | 0`` + varint 值。"""
     return _varint(field << 3) + _varint(int(value))
 
 
 def _sstr(field: int, value: str) -> bytes:
+    """wire 2 字段：UTF-8 字符串（长度前缀 + 原始字节）。"""
     raw = value.encode("utf-8")
     return _varint(field << 3 | 2) + _varint(len(raw)) + raw
 
 
 def _sub(field: int, payload: bytes) -> bytes:
+    """wire 2 字段：嵌套消息（子帧字节当值塞进去）。"""
     return _varint(field << 3 | 2) + _varint(len(payload)) + payload
 
 
-# --------------------------------------------------------------------------- #
-# 读推送：从服务端那帧会话同步里扒消息 id（发消息要用的 ``mid`` 基数）
-# --------------------------------------------------------------------------- #
 
 
 def _iter_fields(buf: bytes):
@@ -169,7 +123,7 @@ def max_message_id(payload: bytes) -> int:
     一个重复的条目列表**，每条目**字段 4 是消息 id**（``mid``）：
 
     * 连上后服务端推的**会话同步**：字段 3 是会话列表，字段 4 是该会话最后
-      一条消息的 id（实测 ``394570988736768`` 这种 3.9e14 量级的号）；
+      一条消息的 id（3.9e14 量级的雪花号）；
     * 收到新消息时的推送：字段 3 是消息列表，字段 4 就是这条消息的 ``mid``。
 
     取最大值当发消息时 ``mid`` 的基数——站点自己也是这么算的
@@ -291,9 +245,6 @@ def encode_presence(*, uid: int, last_message_id: int = 0) -> bytes:
     return _vint(1, C.CHAT_PROTO_PRESENCE) + _sub(4, presence)
 
 
-# --------------------------------------------------------------------------- #
-# MQTT 连接
-# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
@@ -325,7 +276,7 @@ class ChatSocket:
 
     **判据是「帧发出去了」**（PUBLISH 无异常、``rc == 0``），**不是「等到
     PUBACK」**：这条网关对文本帧根本不回 PUBACK，PUBLISH 完约 150ms 直接把连接
-    关掉——**这是它的常态，不是拒收**（实测那几发都真送达了，见模块头）。
+    关掉——**这是它的常态，不是拒收**（那几发都真送达了，见模块头）。
     :meth:`send_text` 仍然会 :attr:`puback_wait` 秒等一下，但只为把「这回倒是有
     回执」这种非常态记进日志，等不到不算失败。
 
@@ -400,7 +351,6 @@ class ChatSocket:
         #: 最近一次建连（握手 → CONNACK）耗时（秒）
         self.connect_seconds: float = 0.0
 
-    # ------------------------------------------------------------------ #
 
     @property
     def connected(self) -> bool:
@@ -428,6 +378,11 @@ class ChatSocket:
         return client
 
     def _make_paho_client(self) -> Any:
+        """拼一个 paho 客户端。握手头里 **Cookie 是硬要求**，少了对端直接 403。
+
+        重连间隔故意拉大：一帧一条连接（见 :meth:`send_text`），重连由
+        :meth:`connect` 显式做，不让 paho 在后台按秒级节奏自己重连。
+        """
         try:
             import paho.mqtt.client as mqtt  # 延迟导入：只有真发消息才要 paho
         except ImportError as exc:  # 缺依赖别抛成 'No module named ...' 就完事
@@ -443,7 +398,6 @@ class ChatSocket:
             protocol=mqtt.MQTTv31,
             transport="websockets",
         )
-        # 握手头：**Cookie 是硬要求**，少了对端直接 403（实测）。
         headers = {
             "Origin": C.BASE_URL,
             "User-Agent": C.DEFAULT_HEADERS["User-Agent"],
@@ -453,8 +407,6 @@ class ChatSocket:
         client.ws_set_options(path=self.path, headers=headers)
         client.tls_set()
         client.username_pw_set(f"{self.credentials.token}|0", self.credentials.wt)
-        # 重连间隔故意拉大：一帧一条连接（见 :meth:`send_text`），重连由
-        # connect() 显式做，不让 paho 在后台按秒级节奏自己重连。
         client.reconnect_delay_set(
             min_delay=C.CHAT_RECONNECT_MIN, max_delay=C.CHAT_RECONNECT_MAX
         )
@@ -518,6 +470,10 @@ class ChatSocket:
         **每次都重建**：一条连接发一帧就够（发完自己断），复用一个半死的
         socket 只会踩到「publish 进黑洞」。旧客户端先 :meth:`close` 掉，
         paho 的后台重连也就跟着停了。
+
+        新连接 = 新一批推送：上一轮**从推送里**抬到的 ``mid`` 基数作废，但
+        :attr:`_seed_mid_base`（上一条带过来的）留着——服务端重新推的会话同步
+        基数一般还更大，真到了会再往上抬；没有它就得每条都重新等那帧推送。
         """
         creds = self.credentials
         if not creds.wt or not creds.token or not creds.user_id:
@@ -530,10 +486,6 @@ class ChatSocket:
             self.close()
             self._connected.clear()
             self.last_connack = None
-            # 新连接 = 新一批推送：上一轮**从推送里**抬到的基数作废，但
-            # :attr:`_seed_mid_base`（上一条带过来的）留着——服务端重新推的
-            # 会话同步基数一般还更大，真到了会再往上抬。没有它就得每条都
-            # 重新等那帧推送，白烧 :data:`config.CHAT_PUSH_WAIT` 秒。
             self.max_msg_id = self._seed_mid_base
             self._seen_push.clear()
             self._client = self._build_client()
@@ -566,9 +518,9 @@ class ChatSocket:
     def _on_connect(
         self, client: Any, userdata: Any, flags: Any, rc: Any, props: Any = None
     ) -> None:
+        """CONNACK 回调。站点连上就报一次在线，照着做（不报也发得出去，保持一致）。"""
         self.last_connack = rc
         if int(getattr(rc, "value", rc if rc is not None else -1)) == 0:
-            # 站点连上就报一次在线，照着做（不报也发得出去，但保持一致）
             try:
                 client.publish(
                     C.CHAT_TOPIC,
@@ -590,12 +542,12 @@ class ChatSocket:
         reason_code: Any = None,
         props: Any = None,
     ) -> None:
-        # paho 的 CallbackAPIVersion.VERSION2 给 on_disconnect 传
-        # (client, userdata, disconnect_flags, reason_code, properties) 五个参。
+        """断开回调。paho 的 ``VERSION2`` 签名是
+        ``(client, userdata, disconnect_flags, reason_code, properties)`` 五参。
+        """
         self._connected.clear()
         logger.debug("聊天通道断开：%s", reason_code)
 
-    # ------------------------------------------------------------------ #
 
     def send_text(
         self,
@@ -610,18 +562,22 @@ class ChatSocket:
 
         没连上会先 :meth:`connect`，然后**手头没基数才等那帧会话同步**（最多
         :attr:`push_wait` 秒）拿 ``mid`` 的基数，PUBLISH，等这帧写出 socket
-        （:meth:`_flush_to_socket`）、主动断开。
+        （:meth:`_flush_to_socket`）、主动断开。手头已有基数（整批从上一条带过来的，
+        见构造参数 ``mid_base``）就整个不等——够新了，等推送只会再抬一点、不值那几秒。
 
         ``mid`` = 基数 + 当前毫秒，``time`` = 当前毫秒（站点就是
         ``getMaxMsgId() + Date.now()`` / ``Date.now()``）。**基数取服务端那个
-        3.9e14 量级的消息 id**，跟站点同源。
+        3.9e14 量级的消息 id**，跟站点同源；等不到就用兜底
+        :data:`config.CHAT_MID_FLOOR`，照样是服务端量级，只是不如真实 id 准。
 
         **判据是「帧发出去了」，不是「等到 PUBACK」**：这条网关对文本帧根本不回
         PUBACK，发完约 150ms 就把 WebSocket 关掉——这是它的常态，不是拒收
-        （2026-10-08 实测：这么发的几发，站点会话列表里都出现了招呼语并标
-        「[送达]」，重载页面还在）。所以 :attr:`puback_wait` 默认 0 = **整个
-        不等**，只把「有回执」这种非常态记进日志（调大它才等），**等不到不算
-        失败**。
+        （这么发的几发，站点会话列表里都出现了招呼语并标「[送达]」）。
+        所以 :attr:`puback_wait` 默认 0 = **整个不等**，只把「有回执」这种非常态
+        记进日志（调大它才等），**等不到不算失败**。
+
+        ``retain`` 走 :data:`config.CHAT_RETAIN`（**必须 False**：站点前端传
+        ``true``，但那样一条消息会在对方那里变成两条）。
 
         分段耗时记进 :attr:`last_send_stats`（``wait_push`` / ``publish`` /
         ``flush``），上层打一条汇总日志用。
@@ -631,10 +587,6 @@ class ChatSocket:
         stats: dict[str, float] = {}
         if not self.connected:
             self.connect()
-        # 等那帧会话同步落地——``mid`` 的基数就在里面。**手头已有基数就整个
-        # 不等**（整批从上一条带过来的，见构造参数 ``mid_base``）：手里的
-        # 基数已经够新，等推送只会再抬一点、不值那几秒。等不到就用兜底基数
-        # （CHAT_MID_FLOOR），照样是服务端量级，只是不如真实 id 准。
         if self.max_msg_id == 0 and not self._seen_push.is_set():
             started = time.monotonic()
             self._seen_push.wait(self.push_wait)
@@ -655,9 +607,6 @@ class ChatSocket:
         )
         started = time.monotonic()
         try:
-            # retain 必须 False：站点前端传 true，但那样一条消息会在对方那里
-            # 变成两条（留存的那份被收件人订阅/同步时再投一遍）。2026-10-09
-            # 实测确认。见 :data:`config.CHAT_RETAIN`。
             info = self._client.publish(
                 C.CHAT_TOPIC, frame, qos=1, retain=C.CHAT_RETAIN
             )
@@ -668,10 +617,6 @@ class ChatSocket:
             self.close()
             raise ChatSendError(f"发聊天消息失败：broker 回 rc={info.rc}")
         stats["publish"] = time.monotonic() - started
-        # 帧已经交给 socket 了（QoS1 的 PUBLISH，本地无异常）。
-        # PUBACK 只是顺带看一眼：这条网关通常不回，还会顺手把连接关掉。
-        # ``puback_wait <= 0``（默认）就整个跳过——实测回执从来不到，
-        # 等它只是每条干烧 :data:`config.CHAT_PUBACK_WAIT` 秒。
         if self.puback_wait > 0:
             if self._wait_puback(info.mid, self.puback_wait):
                 logger.debug("聊天消息 PUBACK 到了（包 id=%s）：%d 字节", info.mid, len(frame))
@@ -687,9 +632,6 @@ class ChatSocket:
                 len(frame),
                 temp_id,
             )
-        # 把这帧真正写到 socket 上再断：``publish()`` 回 ``rc == 0`` 只是入队，
-        # 写出去是 loop 线程干的。没写完就 close 会把这帧连同连接一起丢——
-        # 而这条网关又不回 PUBACK，丢了只会表现成「会话建了、招呼语没了」。
         started = time.monotonic()
         self._flush_to_socket()
         stats["flush"] = time.monotonic() - started
@@ -700,9 +642,11 @@ class ChatSocket:
     def _flush_to_socket(self) -> None:
         """等 PUBLISH 真正写到 socket 上（**不等 PUBACK**），写完就回。
 
-        看 paho 的出站队列 ``_out_packet`` 排空（写完就出队）；拿不到这个
-        属性（换版本 / 测试替身）就退回固定睡 :attr:`flush_wait`。整个等待
-        不超过 :data:`config.CHAT_FLUSH_DEADLINE`。
+        ``publish()`` 回 ``rc == 0`` 只是入队，写出去是 loop 线程干的；没写完就
+        close 会把这帧连同连接一起丢，而这条网关又不回 PUBACK，丢了只会表现成
+        「会话建了、招呼语没了」。看 paho 的出站队列 ``_out_packet`` 排空（写完就
+        出队）；拿不到这个属性（换版本 / 测试替身）就退回固定睡 :attr:`flush_wait`。
+        整个等待不超过 :data:`config.CHAT_FLUSH_DEADLINE`。
         """
         queue = getattr(self._client, "_out_packet", None)
         if queue is None:

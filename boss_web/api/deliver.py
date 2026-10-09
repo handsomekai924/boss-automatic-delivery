@@ -1,10 +1,8 @@
 """投递：一键投递的评分阈值 + 打招呼发送任务。
 
-阈值落状态库 ``doc('deliver_config')``（见 :mod:`boss_web.services.deliver_config_store`），
-刷新页面 / 换机器都跟着走。
-
-发送三种粒度（一键 / 多条 / 单条）**共用一个入口** ``POST /start``，区别只在
-``encrypt_job_ids`` 的长短（见 todo.md C2）；确认弹窗在前端，后端收下已确认的清单。
+阈值落 ``doc('deliver_config')``（见 :mod:`boss_web.services.deliver_config_store`）。
+一键 / 多条 / 单条共用 ``POST /start``，只差 ``encrypt_job_ids`` 长短（todo.md C2）；
+确认弹窗在前端。
 """
 
 from __future__ import annotations
@@ -22,13 +20,13 @@ router = APIRouter()
 
 
 class ConfigBody(BaseModel):
-    #: 0-100 分制；越界由 FastAPI 直接回 422
+    #: 0-100 分制；越界由 FastAPI 直接 422
     min_score: int = Field(..., ge=0, le=100)
 
 
 class DeliverBody(BaseModel):
     analysis_id: str
-    #: 要发送的岗位：单条 = 1 个，多条 = 勾选的 N 个，一键 = 全部目标
+    #: 要发送的岗位：单条 1 个 / 多条勾选 N 个 / 一键全部目标
     encrypt_job_ids: list[str] = Field(default_factory=list)
 
 

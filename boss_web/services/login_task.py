@@ -1,11 +1,8 @@
 """登录任务状态机：把 ``run_sms_login`` 的阻塞回调接到网页表单上。
 
-网页上「发码 → 输码 → （滑块）→ 登录成功」分两步走，每步都在后台线程里跑，
-HTTP 只负责启动和喂料：
-
-* :meth:`LoginTaskManager.start_send` 起线程发短信，命中滑块时把帮助页挂出来；
-* :meth:`LoginTaskManager.submit_code` 把验证码塞给阻塞中的 ``code_provider``；
-* :meth:`LoginTaskManager.solve_slider` 把极验票据塞给阻塞中的 ``slider_solver``。
+「发码 → 输码 → （滑块）→ 登录」在后台线程里跑，HTTP 只负责启动和喂料：
+``start_send`` 发短信，``submit_code`` / ``solve_slider`` 把人工输入塞回阻塞中的
+``code_provider`` / ``slider_solver``。
 
 滑块只是**人机协作管道**：官方组件渲染、人拖、票据回传。不认缺口、不伪造轨迹。
 """
@@ -45,7 +42,6 @@ from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebE
 
 logger = logging.getLogger(__name__)
 
-#: 任务状态
 ST_PENDING = "pending"
 ST_SENDING = "sending_sms"
 ST_NEED_CODE = "need_code"
@@ -73,11 +69,11 @@ class LoginTask:
     retry_after: float = 0.0
     attempts: int = 0
 
-    # 验证码：code_provider 阻塞在这里等网页表单
+    #: code_provider 阻塞在这里等网页表单
     code_event: threading.Event = field(default_factory=threading.Event)
     code_box: dict[str, Any] = field(default_factory=dict)
 
-    # 滑块：slider_solver 阻塞在这里等网页里的极验组件
+    #: slider_solver 阻塞在这里等网页里的极验组件
     slider_event: threading.Event = field(default_factory=threading.Event)
     slider_box: dict[str, Any] = field(default_factory=dict)
     slider_challenge: SliderChallenge | None = None
@@ -142,7 +138,6 @@ class LoginTaskManager:
         self._tasks: dict[str, LoginTask] = {}
         self._current: LoginTask | None = None
 
-    # ------------------------------------------------------------------ #
 
     def current(self) -> LoginTask | None:
         with self._lock:
@@ -178,7 +173,6 @@ class LoginTaskManager:
             "task": task.snapshot() if task else None,
         }
 
-    # ------------------------------------------------------------------ #
 
     def start_send(self, phone: str, *, dial_code: str = "86") -> LoginTask:
         digits = "".join(ch for ch in phone if ch.isdigit())
@@ -233,8 +227,7 @@ class LoginTaskManager:
     def refresh_slider(self, task_id: str) -> LoginTask:
         """帮助页「重新加载」：换一张新的极验挑战，重建帮助页。
 
-        极验的 ``challenge`` 是一次性的——把旧帮助页重新加载会拿同一张已用过的
-        挑战去 initGeetest，组件必然 onError。所以这里重新拉一张，再渲染新页面。
+        极验 ``challenge`` 一次性，旧页重载会拿已用过的挑战去 initGeetest 而 onError。
         """
         task = self.get(task_id)
         if task.finished:
@@ -272,15 +265,11 @@ class LoginTaskManager:
         task.record("cancelled", {})
         return task
 
-    # ------------------------------------------------------------------ #
-    # 后台线程
-    # ------------------------------------------------------------------ #
 
     def _web_slider_solver(self, task: LoginTask, client: Any) -> SliderSolver:
         """``slider_solver`` 回调：挂出帮助页，等人拖完把票据送回来。
 
-        ``client`` 给「重新加载」用：帮助页要换挑战时，得拿它回服务端重新拉一张
-        （极验 challenge 一次性，旧页面重载必然 onError）。
+        ``client`` 供「重新加载」换挑战用（极验 challenge 一次性）。
         """
         def fetch_challenge() -> SliderChallenge:
             return client.fetch_slider_challenge()
@@ -372,8 +361,8 @@ class LoginTaskManager:
             self._finish_err(task, f"登录流程出错：{exc}")
 
     def _finish_ok(self, task: LoginTask, client: Any, result: LoginResult) -> None:
+        """落盘登录态（不给 ``session_path`` = 写默认状态库 ``BOSS_DB`` / ``data/boss.db``）。"""
         try:
-            # 不给 session_path = 写默认状态库（BOSS_DB / data/boss.db）
             persist_login(client, result, session_path=self._session_path)
         except Exception as exc:  # noqa: BLE001 - 落盘失败不该把登录说成失败
             logger.warning("登录成功但写状态库失败：%s", exc)
@@ -394,5 +383,4 @@ class LoginTaskManager:
         task.record("error", {"message": message})
 
 
-# 模块级单例，app 启动时直接用
 login_tasks = LoginTaskManager()

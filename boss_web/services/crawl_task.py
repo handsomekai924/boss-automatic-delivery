@@ -49,15 +49,13 @@ class CrawlTask:
         self.lock = threading.Lock()
 
     def push(self, payload: dict[str, Any]) -> None:
+        """累计进度。只有翻页回调才带 ``page``；stoken / detail_* 等不算页。"""
         with self.lock:
             self.events.append({"at": time.time(), **payload})
-            # 只有翻页回调才带 page（见 JobClient.crawl 的 _push）；
-            # stoken / detail_* / finished / cancel_requested / error 这些不算页
             if payload.get("page") is not None:
                 self.progress["pages"] = self.progress.get("pages", 0) + 1
             for key in ("raw_count", "kept_count", "inserted", "updated"):
                 self.progress[key] = self.progress.get(key, 0) + int(payload.get(key, 0) or 0)
-            # JD 补抓的流水（enrich_details 开着才有）
             event = payload.get("event")
             if event == "detail_done":
                 self.progress["desc_ok"] = self.progress.get("desc_ok", 0) + (
@@ -68,7 +66,7 @@ class CrawlTask:
                 self.progress["desc_failed"] = self.progress.get("desc_failed", 0) + 1
                 self.progress["desc_done"] = self.progress.get("desc_done", 0) + 1
             elif event == "detail_skipped":
-                # 已有描述，根本没打详情接口——不算 desc_done
+                # 已有描述、没打详情接口，不算 desc_done
                 self.progress["desc_skipped"] = self.progress.get("desc_skipped", 0) + 1
 
     def snapshot(self) -> dict[str, Any]:
@@ -143,7 +141,6 @@ class CrawlTaskManager:
         task.push({"event": "cancel_requested"})
         return task
 
-    # ------------------------------------------------------------------ #
 
     def _run(self, task: CrawlTask) -> None:
         params = task.params
@@ -161,7 +158,7 @@ class CrawlTaskManager:
                     search_filter = None
 
             if search_filter is not None:
-                # 搜索流要 __zp_stoken__，可能拉真 Chrome，先把状态亮出来
+                # 搜索流要 __zp_stoken__，可能拉真 Chrome，先亮状态
                 task.phase = "stoken"
                 task.push({"event": "stoken", "message": "正在准备搜索令牌（可能拉起 Chrome）…"})
 
@@ -175,7 +172,7 @@ class CrawlTaskManager:
                     search_filter=search_filter,
                     on_progress=task.push,
                     should_stop=lambda: task.cancel_flag,
-                    # 抓取时顺带补 JD（已拍板）；单条失败不拖垮列表
+                    # 抓取时顺带补 JD；单条失败不拖垮列表
                     enrich_details=bool(params.get("fetch_details", True)),
                 )
             finally:

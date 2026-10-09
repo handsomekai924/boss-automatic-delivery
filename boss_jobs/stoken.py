@@ -1,69 +1,18 @@
 """``__zp_stoken__`` 安全网关令牌：来源、算法、全自动获取。
 
-来源（逆自 ``.saved_web`` 里的 app~2.1a6c0514.js，模块 49657）
---------------------------------------------------------------------------------
-站点前端把 ``__zp_stoken__`` 当成安全网关 Cookie。**它不是服务端发的**，
-是浏览器本地算出来再回传的。整条链路：
+**它不是服务端发的**——浏览器本地算出来再回传（逆自 ``app~2.1a6c0514.js``）。
+缺令牌打搜索类接口回 ``code:37``，``zpData`` 带一次性挑战 ``{seed,name,ts}``；
+前端把三样写进辅助 Cookie，拉 ``/web/common/security-js/{name}.js``（往 ``window``
+挂 ``ABC``），再按 ``new ABC().z(seed, parseInt(ts) + (480 + getTimezoneOffset()) *
+60000)`` 算出 token 写 Cookie（``max-age=3840*60``）；北京时间括号归零，传 ``ts`` 即可。
 
-1. 拿着登录态打搜索类接口（如 ``/wapi/zpgeek/search/joblist.json``），
-   没带 ``__zp_stoken__`` 时服务端回 ``code:37``「您的环境存在异常.」，
-   并在 ``zpData`` 里下发**一次性挑战**::
+``{name}.js`` = 开源 ``js-md5`` + obfuscator.io 控制流扁平化 VM，出口
+``ABC.prototype.z`` 调 VM 入口块 581。输出 ``0138`` 前缀 + 58 字符子集类 base64
+（标准 base64 解后起手四字节恒为 ``d35dfc81``），**同 seed+ts 连算两次结果不同**
+——生成器内部带随机量。``z()`` 还把浏览器环境指纹（canvas/硬件/插件/语言/屏幕/
+持久设备 id/iframe）编进 token，真浏览器和光板 Node 算出来的不一样，服务端按
+指纹校验——要认就得让指纹跟请求头自洽（:data:`config.DEFAULT_HEADERS`）。
 
-       {"code":37,"message":"您的环境存在异常.",
-        "zpData":{"seed":"Em6sUKm1q2j+...=","name":"e948d594","ts":1790759239936}}
-
-2. 前端把这三样写进 Cookie ``__zp_sseed__`` / ``__zp_sname__`` / ``__zp_sts__``
-   （生成完立刻清掉），再去拉 **按次下发的生成脚本**::
-
-       GET /web/common/security-js/{name}.js        ← name 就是挑战里的 name
-
-3. 这个脚本往 ``window`` 上挂构造函数 ``ABC``。生成一行：
-
-       token = new ABC().z(seed, parseInt(ts) + (480 + getTimezoneOffset()) * 60000)
-
-   （北京时间 ``getTimezoneOffset() === -480``，括号归零，所以本地直接传
-   ``ts`` 也一样；本模块按原式算，不依赖时区。）
-
-4. 写 Cookie ``__zp_stoken__=<token>``，``max-age=3840*60``（3840 分钟），
-   ``domain=.zhipin.com`` ``path=/``，然后把三份辅助 Cookie 清掉。
-
-算法（逆自 security-js 静态结构 + 运行时追踪）
---------------------------------------------------------------------------------
-``{name}.js`` 是两段 IIFE：
-
-* **第一段**：开源的 `js-md5`（MD5 / HMAC-MD5，含 ``module.exports`` 出口）。
-* **第二段**：obfuscator.io 风格的控制流扁平化 VM（``p=NNNN`` 计算 goto +
-  ``switch`` 位域状态机），出口就是 ``window.ABC``。
-  ``ABC`` 本身是空构造函数，``ABC.prototype.z`` 只是
-  ``function(){ return l.apply(this, [581].concat(...args)) }``
-  —— 581 是 VM 的入口块号。
-
-输出形态：``0138`` 固定前缀 + 一段 **58 字符子集的类 base64** 编码。
-剥掉末位校验字符后按标准 base64 解，起手四字节恒为 ``d35dfc81``
-（``0138gQ`` / ``0138gR`` 等都落在这个魔数上），长度随 seed/ts 在
-约 130–470 字节之间浮动。**同 seed+ts 连算两次结果不同**——生成器内部带
-随机量，不是纯哈希。
-
-运行时追踪显示 ``z()`` 还会采一遍 **浏览器环境指纹** 并编进 token：
-
-| 采集点 | 用途 |
-|---|---|
-| ``document.createElement('canvas')`` + 2D 上下文 | canvas 指纹 |
-| ``navigator.webkitTemporaryStorage`` / ``deviceMemory`` / ``hardwareConcurrency`` | 硬件特征 |
-| ``navigator.plugins`` / ``mimeTypes`` / ``webdriver`` | 插件与自动化标记 |
-| ``navigator.languages`` / ``language`` | 语言 |
-| ``screen.availWidth/availHeight/width/height`` | 屏幕 |
-| ``localStorage.getItem('c5jbelwo')`` | 持久设备 id |
-| ``document.createElement('iframe')`` | 环境探测 |
-
-所以**同一段 JS 在「真浏览器」和「光板 Node」里算出来的 token 不一样**，
-服务端按指纹校验。本模块默认在 Node 里跑（带浏览器外壳），
-:func:`compute_stoken` 的结果格式正确、可重复调用；
-要让服务端认，指纹得跟请求头自洽（见 :mod:`boss_jobs.config` 的
-``DEFAULT_HEADERS``，UA / 平台要跟外壳对得上）。
-
-全自动获取
---------------------------------------------------------------------------------
 >>> from boss_jobs.stoken import StokenProvider
 >>> p = StokenProvider(http=session)          # 带登录态
 >>> token = p.ensure()                        # 打一次拿挑战 → 算 → 写 Cookie
@@ -322,9 +271,6 @@ class StokenProvider:
         if self._script_cache is None:
             self._script_cache = {}
 
-    # ------------------------------------------------------------------ #
-    # 分步
-    # ------------------------------------------------------------------ #
 
     def fetch_challenge(self) -> StokenChallenge:
         """打一次探针接口，从 code 37 的 ``zpData`` 里取挑战。"""
@@ -392,9 +338,6 @@ class StokenProvider:
         )
         logger.debug("已写入 %s（长度 %d）", C.STOKEN_COOKIE, len(token))
 
-    # ------------------------------------------------------------------ #
-    # 一步到位
-    # ------------------------------------------------------------------ #
 
     def ensure(self, *, force: bool = False) -> str:
         """确保会话里有一个可用的 ``__zp_stoken__``，返回它。

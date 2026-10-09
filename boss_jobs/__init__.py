@@ -87,7 +87,6 @@ from .store import JobStore, SaveOutcome, open_store
 __version__ = "0.1.0"
 
 __all__ = [
-    # 核心
     "JobClient",
     "create_client",
     "http_from_session",
@@ -97,19 +96,16 @@ __all__ = [
     "BossData",
     "GreetingDelivery",
     "JobDetail",
-    # 聊天通道（建会话之后真投递招呼语正文）
     "ChatCredentials",
     "ChatSocket",
     "encode_presence",
     "encode_text_message",
-    # __zp_stoken__（真浏览器 CDP 取法，fetch 默认走这条）
     "CdpClient",
     "CdpStokenProvider",
     "StokenRecord",
     "StokenStore",
     "connect_or_launch",
     "find_chrome",
-    # __zp_stoken__（Node 硬算，算法可验但服务端不认指纹）
     "StokenChallenge",
     "StokenError",
     "StokenProvider",
@@ -117,24 +113,20 @@ __all__ = [
     "load_security_js",
     "mint_offline",
     "parse_challenge",
-    # 模型 / 清洗
     "Job",
     "PageResult",
     "clean_page",
     "clean_pages",
     "clean_salary",
     "clean_text",
-    # 入库
     "JobStore",
     "SaveOutcome",
     "open_store",
-    # 异常
     "ChatSendError",
     "JobApiError",
     "JobDataError",
     "JobError",
     "JobTransportError",
-    # 常量
     "BASE_URL",
     "CHAT_TOPIC",
     "CHAT_WS_HOST",

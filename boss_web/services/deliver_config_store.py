@@ -1,8 +1,7 @@
 """投递配置存取：状态库 ``data/boss.db`` 的 ``doc('deliver_config')``。
 
-目前只有一项——**一键投递的评分阈值** ``min_score``（默认 70）：匹配分 ≥ 它的
-岗位才进「一键发送全部」。做法照搬 :mod:`boss_web.services.llm_config_store`：
-整包存 JSON、读时归一化、坏值不报错只回默认。
+只有一项 ``min_score``（一键投递评分阈值，默认 70）。整包存 JSON、读时归一化、
+坏值不报错只回默认——同 :mod:`boss_web.services.llm_config_store`。
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from .. import config as C
 
 logger = logging.getLogger(__name__)
 
-#: 阈值的合法区间（0-100 分制）
+#: 阈值合法区间（0-100 分制）
 MIN_SCORE_FLOOR = 0
 MIN_SCORE_CEILING = 100
 

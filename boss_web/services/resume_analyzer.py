@@ -138,7 +138,6 @@ class AnalyzeTaskManager:
         task.cancel_flag = True
         return task
 
-    # ------------------------------------------------------------------ #
 
     def _run(self, task: AnalyzeTask) -> None:
         try:

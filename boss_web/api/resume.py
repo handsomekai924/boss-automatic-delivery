@@ -42,6 +42,7 @@ def resumes() -> dict[str, Any]:
 
 @router.post("/upload")
 async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
+    """只存原文；解析由 ``POST /item/{id}/parse`` 完成（上传成功后前端自动调）。"""
     name = file.filename or "resume.md"
     if not any(name.lower().endswith(ext) for ext in ALLOWED_EXT):
         raise ValidationWebError("只支持 Markdown（.md）或纯文本（.txt）")
@@ -56,7 +57,6 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
         except UnicodeDecodeError:
             text = raw.decode("utf-8", errors="replace")
 
-    # 只存原文；解析由 POST /item/{id}/parse 完成（上传成功后前端自动调）
     draft = save_resume(text, filename=name)
     return draft.to_dict(include_raw=True)
 

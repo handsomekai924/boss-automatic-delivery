@@ -42,7 +42,7 @@ class ResumeDraft:
         return data
 
 
-#: 章节标题别名 → 规范名
+#: 章节标题别名 → 规范名（切章节时按别名归一）
 SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "基本信息": ("基本信息", "个人信息", "联系信息", "联系方式"),
     "求职意向": ("求职意向", "求职目标", "期望岗位", "求职期望"),
@@ -59,7 +59,7 @@ def _norm_heading(text: str) -> str:
 
 
 def parse_markdown(text: str) -> tuple[dict[str, str], dict[str, str], list[str]]:
-    """按 Markdown 标题切章节。
+    """按 Markdown 标题切章节。同名章节往后面追加，不覆盖。
 
     :return: ``(sections, other_sections, parse_notes)``
     """
@@ -92,7 +92,6 @@ def parse_markdown(text: str) -> tuple[dict[str, str], dict[str, str], list[str]
             if canonical:
                 break
         if canonical:
-            # 同名章节往后面追加，不覆盖
             if canonical in sections and body:
                 sections[canonical] = sections[canonical] + "\n\n" + body
             else:
@@ -116,7 +115,6 @@ def extract_skills(sections: dict[str, str]) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        # 去掉列表符号
         line = re.sub(r"^[-*+]\s+", "", line)
         line = re.sub(r"^\d+[.、)]\s+", "", line)
         for token in _SKILL_SPLIT.split(line):
@@ -163,9 +161,6 @@ def parse_resume(text: str, *, resume_id: str, title: str, source_path: str, cre
     )
 
 
-# --------------------------------------------------------------------------- #
-# 存储（状态库 data/boss.db）
-# --------------------------------------------------------------------------- #
 
 
 def _source_name(filename: str) -> str:
@@ -237,6 +232,7 @@ def load_resume(resume_id: str) -> ResumeDraft:
 
 
 def list_resumes() -> list[dict[str, Any]]:
+    """列表只报「解析过没有」，不把整包 LLM 结果塞进响应。"""
     conn = boss_db.acquire()
     rows = conn.execute(
         "SELECT * FROM resume ORDER BY created_at DESC"
@@ -250,7 +246,6 @@ def list_resumes() -> list[dict[str, Any]]:
         if not isinstance(meta, dict):
             meta = {}
         meta.pop("raw", None)
-        # 列表只报「解析过没有」，别把整包 LLM 结果塞进列表响应
         llm = meta.get("llm")
         if isinstance(llm, dict):
             meta["llm"] = {
@@ -272,9 +267,6 @@ def delete_resume(resume_id: str) -> bool:
     return cur.rowcount > 0
 
 
-# --------------------------------------------------------------------------- #
-# LLM 固定模板解析结果（meta.llm）
-# --------------------------------------------------------------------------- #
 
 
 def save_llm_parse(resume_id: str, llm_payload: dict[str, Any]) -> dict[str, Any]:
