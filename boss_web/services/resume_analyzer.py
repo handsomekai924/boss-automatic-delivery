@@ -13,6 +13,7 @@ from boss_jobs.models import Job
 
 from .. import config as C
 from ..errors import ConflictError, NotFoundError, ValidationWebError
+from .greeting_prompt import GREETING_REQUIREMENT
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import load_config
 from .resume_store import ResumeDraft, load_resume, save_analysis
@@ -52,9 +53,9 @@ USER_TEMPLATE = """# 简历摘要
   "cons": ["短板1", "短板2"],
   "reasons": ["两三条理由"],
   "advice": "给求职者的改进建议",
-  "greeting": "求职者本人（第一人称『我』）发给招聘方 HR 的打招呼私信，60 字以内，自然具体不吹牛。必须站在求职者立场自我推荐，禁止以招聘方/HR 口吻说话——不要出现『我们公司』『我们团队』『我们正在招』『欢迎投递』『期待你的加入』这类话，也不要介绍公司或岗位"
+  "greeting": "{GREETING_REQUIREMENT}"
 }}
-"""
+""".replace("{GREETING_REQUIREMENT}", GREETING_REQUIREMENT)
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"

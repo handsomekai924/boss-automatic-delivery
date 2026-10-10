@@ -61,10 +61,12 @@ class _FakeLLM:
     def __init__(self, replies):
         self.replies = list(replies)
         self.calls = 0
+        self.messages = []
         self.config = type("C", (), {"model": "fake-model"})()
 
     def chat(self, messages, **kw):
         self.calls += 1
+        self.messages.append(messages)
         return self.replies.pop(0) if self.replies else "{}"
 
 
@@ -250,6 +252,9 @@ def test_match_one_has_pros_and_cons():
     assert result["pros"] == ["亮点A"]
     assert result["cons"] == ["短板B"]
     assert result["greeting"] == "你好"
+    prompt = llm.messages[0][1]["content"]
+    assert "100 到 150 个字" in prompt
+    assert "60 字以内" not in prompt
     assert "负责后端开发" in _job_desc_block(job)
 
 

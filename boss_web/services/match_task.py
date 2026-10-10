@@ -27,6 +27,7 @@ from boss_jobs.models import Job
 
 from .. import config as C
 from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
+from .greeting_prompt import GREETING_REQUIREMENT
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import load_config
 from .resume_store import (
@@ -72,9 +73,9 @@ USER_TEMPLATE = """# 简历（结构化摘要）
   "pros": ["求职者相对这个岗位的亮点，2-4 条"],
   "cons": ["相对这个岗位的短板，2-4 条"],
   "advice": "给求职者的建议",
-  "greeting": "求职者本人（第一人称『我』）发给招聘方 HR 的打招呼私信，60 字以内，自然具体不吹牛。必须站在求职者立场自我推荐，禁止以招聘方/HR 口吻说话——不要出现『我们公司』『我们团队』『我们正在招』『欢迎投递』『期待你的加入』这类话，也不要介绍公司或岗位"
+  "greeting": "{GREETING_REQUIREMENT}"
 }}
-"""
+""".replace("{GREETING_REQUIREMENT}", GREETING_REQUIREMENT)
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -104,11 +105,11 @@ GREETING_USER_TEMPLATE = """# 简历（结构化摘要）
 # 职位描述（JD）
 {job_desc}
 
-请以求职者第一人称「我」的口吻，写一条发给该岗位招聘方 HR 的打招呼私信：
-- 100 到 150 个字，自然具体不吹牛
-- 禁止以招聘方/HR 口吻说话——不要出现『我们公司』『我们团队』『我们正在招』『欢迎投递』『期待你的加入』这类话
-- 不要介绍公司或岗位，只做自我推荐
-- 只输出私信正文，不要引号、不要解释"""
+请按以下要求写一条私信：
+- {GREETING_REQUIREMENT}
+- 只输出私信正文，不要引号、不要解释""".replace(
+    "{GREETING_REQUIREMENT}", GREETING_REQUIREMENT
+)
 
 
 class MatchTask:
