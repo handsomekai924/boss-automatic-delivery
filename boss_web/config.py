@@ -46,6 +46,8 @@ LLM_TEMPERATURE = 0.7
 LLM_MAX_TOKENS = 2048
 #: 简历结构化解析单次回复 token 上限
 LLM_RESUME_PARSE_MAX_TOKENS = 8192
+#: 简历输出被截断时，唯一一次重试的 token 上限
+LLM_RESUME_PARSE_RETRY_MAX_TOKENS = 16384
 #: 人岗匹配单次回复 token 上限
 LLM_MATCH_MAX_TOKENS = 4096
 #: 单次请求超时（秒）

@@ -159,14 +159,33 @@ def parse_resume_llm(
     if not (content or "").strip():
         raise ResumeParseError("简历原文是空的，没法解析")
 
-    raw = llm.chat(build_messages(content), max_tokens=C.LLM_RESUME_PARSE_MAX_TOKENS)
+    def _chat(messages: list[dict[str, str]], max_tokens: int) -> tuple[str, str | None]:
+        chat_with_metadata = getattr(llm, "chat_with_metadata", None)
+        if callable(chat_with_metadata):
+            result = chat_with_metadata(messages, max_tokens=max_tokens)
+            return result.content, result.finish_reason
+        return llm.chat(messages, max_tokens=max_tokens), None
+
+    raw, finish_reason = _chat(
+        build_messages(content), max_tokens=C.LLM_RESUME_PARSE_MAX_TOKENS
+    )
     data = extract_json(raw)
-    if data is None:
-        logger.info("简历解析首选拔回复不是 JSON，重试一次")
-        raw = llm.chat(
-            build_messages(content, retry=True), max_tokens=C.LLM_RESUME_PARSE_MAX_TOKENS
+    truncated = finish_reason == "length"
+    if data is None or truncated:
+        logger.info("简历解析首选拔回复%s，重试一次", "被截断" if truncated else "不是 JSON")
+        retry_limit = (
+            C.LLM_RESUME_PARSE_RETRY_MAX_TOKENS
+            if truncated
+            else C.LLM_RESUME_PARSE_MAX_TOKENS
         )
+        raw, finish_reason = _chat(build_messages(content, retry=True), max_tokens=retry_limit)
         data = extract_json(raw)
+        if finish_reason == "length":
+            truncated = True
+    if truncated and (finish_reason == "length" or data is None):
+        raise ResumeParseError(
+            "模型输出达到长度上限，简历解析结果被截断。请缩短简历，或更换支持更大输出长度的模型后重试。"
+        )
     if data is None:
         raise ResumeParseError("LLM 没回出合法 JSON，解析失败（原有解析结果未被覆盖）")
     return normalize(data)

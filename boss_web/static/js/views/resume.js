@@ -562,7 +562,7 @@ export async function renderResume(root) {
         <div class="rs-drop" id="rs-drop">
           <div class="rs-drop-ico">${ICO_UPLOAD}</div>
           <div class="rs-drop-t">把简历拖进来，或点击选择</div>
-          <div class="muted" style="font-size:12px">Word（.docx）/ PDF / .md / .txt · 最大 8MB</div>
+          <div class="muted" style="font-size:12px">Word（.docx）/ PDF · 最大 8MB；Markdown（.md / .markdown）/ 纯文本（.txt）· 最大 2MB</div>
         </div>
         <div class="rs-empty-note">
           <div class="rs-toc-sep">解析会识别出这八项</div>

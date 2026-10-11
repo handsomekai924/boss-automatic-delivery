@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 import requests
@@ -78,6 +79,12 @@ def _friendly_network_error(exc: BaseException) -> str:
 HttpSender = Callable[..., Any]
 
 
+@dataclass(frozen=True)
+class ChatResult:
+    content: str
+    finish_reason: str | None = None
+
+
 class LLMClient:
     def __init__(self, config: LLMConfig, *, http: HttpSender | None = None) -> None:
         self.config = config
@@ -91,6 +98,21 @@ class LLMClient:
         max_tokens: int | None = None,
         timeout: float | None = None,
     ) -> str:
+        return self.chat_with_metadata(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        ).content
+
+    def chat_with_metadata(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> ChatResult:
         cfg = self.config
         if not cfg.configured:
             raise ValidationWebError("AI 还没配置好——API Key / 接口地址 / 模型，三样都要填。")
@@ -124,13 +146,15 @@ class LLMClient:
             raise UpstreamError(_friendly_http_error(status, snippet))
         try:
             payload = resp.json()
-            content = payload["choices"][0]["message"]["content"]
+            choice = payload["choices"][0]
+            content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason")
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             logger.warning("AI 响应解析失败：%s", exc)
             raise UpstreamError(
                 "AI 返回的内容看不懂——「接口地址」可能不是 OpenAI 兼容协议的，换个地址试试。"
             ) from exc
-        return str(content or "")
+        return ChatResult(content=str(content or ""), finish_reason=finish_reason)
 
     def test(self) -> dict[str, Any]:
         started = time.time()
