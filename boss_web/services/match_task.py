@@ -416,7 +416,8 @@ def _match_one(llm: LLMClient, resume_brief: str, job: Job) -> dict[str, Any]:
         [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user},
-        ]
+        ],
+        max_tokens=C.LLM_MATCH_MAX_TOKENS,
     )
     data = extract_json(raw)
     if data is None:
@@ -424,7 +425,8 @@ def _match_one(llm: LLMClient, resume_brief: str, job: Job) -> dict[str, Any]:
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user + "\n\n请严格只输出 JSON 对象。"},
-            ]
+            ],
+            max_tokens=C.LLM_MATCH_MAX_TOKENS,
         )
         data = extract_json(raw)
     if data is None:

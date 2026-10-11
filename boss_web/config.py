@@ -42,7 +42,11 @@ DEFAULT_DELIVER_MIN_SCORE = 70
 # ---- LLM 系统固定参数（不开放给界面改）----
 #: 采样温度
 LLM_TEMPERATURE = 0.7
-#: 单次回复 token 上限
+#: 通用单次回复 token 上限（招呼语等）
 LLM_MAX_TOKENS = 2048
+#: 简历结构化解析单次回复 token 上限
+LLM_RESUME_PARSE_MAX_TOKENS = 8192
+#: 人岗匹配单次回复 token 上限
+LLM_MATCH_MAX_TOKENS = 4096
 #: 单次请求超时（秒）
 LLM_TIMEOUT = 120.0

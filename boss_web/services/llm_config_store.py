@@ -58,6 +58,8 @@ class LLMConfig:
         data["fixed"] = {
             "temperature": C.LLM_TEMPERATURE,
             "max_tokens": C.LLM_MAX_TOKENS,
+            "resume_parse_max_tokens": C.LLM_RESUME_PARSE_MAX_TOKENS,
+            "match_max_tokens": C.LLM_MATCH_MAX_TOKENS,
             "timeout": C.LLM_TIMEOUT,
         }
         return data

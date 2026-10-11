@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Any
 
+from .. import config as C
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import LLMConfig, load_config
 from ..errors import ValidationWebError
@@ -158,11 +159,13 @@ def parse_resume_llm(
     if not (content or "").strip():
         raise ResumeParseError("简历原文是空的，没法解析")
 
-    raw = llm.chat(build_messages(content))
+    raw = llm.chat(build_messages(content), max_tokens=C.LLM_RESUME_PARSE_MAX_TOKENS)
     data = extract_json(raw)
     if data is None:
         logger.info("简历解析首选拔回复不是 JSON，重试一次")
-        raw = llm.chat(build_messages(content, retry=True))
+        raw = llm.chat(
+            build_messages(content, retry=True), max_tokens=C.LLM_RESUME_PARSE_MAX_TOKENS
+        )
         data = extract_json(raw)
     if data is None:
         raise ResumeParseError("LLM 没回出合法 JSON，解析失败（原有解析结果未被覆盖）")
