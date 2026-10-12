@@ -12,6 +12,20 @@ import socket
 import pytest
 
 from boss_web import cli
+from boss_web.services import update_check
+
+
+@pytest.fixture(autouse=True)
+def _fake_gitee(monkeypatch):
+    """自检会打一次 Gitee；测试里必须换掉，否则跑一次测试就撞一次真网。"""
+    update_check.reset_cache()
+    monkeypatch.setattr(
+        update_check,
+        "fetch_latest_release",
+        lambda: update_check.Release(version="1.1.0", notes="", assets=()),
+    )
+    yield
+    update_check.reset_cache()
 
 
 def _occupy(host: str = "127.0.0.1") -> socket.socket:
@@ -98,6 +112,28 @@ def test_self_check_passes_on_a_good_tree(capsys):
     assert "自检结果" in out
 
 
+def test_self_check_打印当前版本_发行版本_是否需要更新(capsys):
+    """控制台必须能看到「我这是哪一版 / Gitee 发了多少 / 要不要更新」。"""
+    assert cli.main(["--self-check"]) == 0
+    out = capsys.readouterr().out
+    assert "当前版本" in out
+    assert "发行版本" in out
+    assert "是否需要更新" in out
+
+
+def test_self_check_有新版本时给出下载地址(monkeypatch, capsys):
+    monkeypatch.setattr(
+        update_check,
+        "fetch_latest_release",
+        lambda: update_check.Release(version="9.9.9", notes="", assets=()),
+    )
+    assert cli.main(["--self-check"]) == 0
+    out = capsys.readouterr().out
+    assert "有新版本" in out
+    assert "gitee.com" in out
+    assert "github.com" in out
+
+
 def test_self_check_reports_missing_static(monkeypatch, capsys):
     """前端资源没打进去时必须报失败——这正是「浏览器打开是空壳」的病根。"""
     monkeypatch.setattr(cli.C, "STATIC_DIR", cli.C.STATIC_DIR / "不存在的目录")
@@ -111,3 +147,37 @@ def test_self_check_does_not_start_server(monkeypatch):
     monkeypatch.setattr(cli, "pick_port", lambda *_a, **_k: started.append(1) or 9999)
     assert cli.main(["--self-check"]) == 0
     assert started == []
+
+
+def test_横幅先打版本对比占位_测完再补真结果(monkeypatch, capsys):
+    """启动不能卡在网络检测上，所以横幅先占位，后台测完再打一行结果。"""
+    monkeypatch.setattr(cli, "_setup_logging", lambda *_a, **_k: None)
+    monkeypatch.setattr("uvicorn.Server.run", lambda self: None, raising=False)
+    monkeypatch.setattr(cli, "pick_port", lambda *_a, **_k: 8799)
+
+    # 同步跑 on_done，方便断言；真跑是守护线程里跑的
+    monkeypatch.setattr(
+        update_check,
+        "schedule_startup_check",
+        lambda on_done=None: on_done and on_done(update_check.build_status(force=True)),
+    )
+
+    assert cli.main(["--no-browser"]) == 0
+    out = capsys.readouterr().out
+    assert "版本对比" in out
+    assert "正在查 Gitee" in out
+    assert "当前版本" in out
+    assert "发行版本" in out
+    assert "是否需要更新" in out
+
+
+def test_打印行格式固定三行(monkeypatch, capsys):
+    from boss_web.services.update_check import format_console_lines
+
+    lines = format_console_lines(
+        {"current": "1.1.0", "latest": "1.2.0", "has_update": True, "should_prompt": True}
+    )
+    text = "\n".join(lines)
+    assert "当前版本" in text and "v1.1.0" in text
+    assert "发行版本" in text and "v1.2.0" in text
+    assert "是否需要更新" in text and "有新版本" in text

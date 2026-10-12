@@ -1399,6 +1399,25 @@ details.acc .acc-body {
   line-height: 1.7;
 }
 
+/* ---------- 15.5 版本更新提示 ---------- */
+
+.update-versions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.update-arrow {
+  color: var(--accent);
+  font-size: var(--fs-m);
+  font-weight: 700;
+}
+/* 发行说明是整篇 Markdown 原文，限高免得把弹窗撑出屏幕 */
+.update-notes {
+  max-height: 240px;
+  overflow: auto;
+}
+
 .match-row {
   display: flex;
   gap: var(--sp-4);

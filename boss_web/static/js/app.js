@@ -2,6 +2,7 @@
 
 import { api } from "./api.js";
 import { toast, bindThemeToggle, initTheme } from "./ui.js";
+import { maybePromptUpdate } from "./update.js";
 import { renderHome } from "./views/home.js";
 import { renderLogin } from "./views/login.js";
 import { renderJobs } from "./views/jobs.js";
@@ -92,6 +93,8 @@ window.addEventListener("load", () => {
   navigate();
   refreshBridge();
   setInterval(refreshBridge, 8000);
+  // 开页面就比一次版本；只弹一次（本页刷新也不再弹第二回）
+  maybePromptUpdate().catch(() => { /* 检测失败不打扰 */ });
 });
 
 export { toast, api };

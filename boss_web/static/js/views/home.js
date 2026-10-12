@@ -185,7 +185,7 @@ export async function renderHome(root) {
 
   api.get("/api/system/health").then((h) => {
     $("env-sub").textContent = h.frozen ? "打包版" : "源码运行";
-    $("env-data").textContent = `数据目录 ${h.data_dir}`;
+    $("env-data").textContent = `当前版本：v${h.version || "?"} · 数据目录 ${h.data_dir}`;
     if (h.temp_run) {
       addBanner(
         "bad",

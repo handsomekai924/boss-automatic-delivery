@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import logging
 import socket
+import sys
 import threading
 import time
 import webbrowser
@@ -116,16 +117,31 @@ def _setup_logging(level: str) -> None:
 
 
 def _banner(url: str, info: dict[str, str]) -> None:
+    from . import __version__
+
     print("=" * 60)
-    print("  BOSS 自动投递助手已启动")
+    print(f"  BOSS 自动投递助手已启动  v{__version__}")
     print(f"  控制台地址   {url}")
     print(f"  数据目录     {info.get('data_dir', C.DATA_DIR)}")
     if info.get("portable") == "0":
         print("  ⚠ 程序所在目录写不进去，数据已改存到上面这个目录")
     if info.get("warning") == "temp_run":
         print("  ⚠ 程序在临时目录里运行——请先把 exe 解压到桌面再打开，否则数据会丢")
+    print("  版本对比     正在查 Gitee 发行版…")
     print("  关掉这个窗口就是退出程序")
     print("=" * 60)
+
+
+def _print_version_status(status: dict) -> None:
+    """把版本信息**按行**打到控制台（当前版本 / 发行版本 / 是否需要更新）。
+
+    走 update_check.format_console_lines，改文案去那边改，别在这拼字符串。
+    """
+    from .services.update_check import format_console_lines
+
+    for line in format_console_lines(status):
+        print(line)
+    sys.stdout.flush()
 
 
 def _self_check(info: dict[str, str]) -> int:
@@ -135,6 +151,7 @@ def _self_check(info: dict[str, str]) -> int:
     """
     import boss_db
 
+    from . import __version__
     from .runtime import resource_root
 
     static = C.STATIC_DIR
@@ -151,6 +168,16 @@ def _self_check(info: dict[str, str]) -> int:
         print(f"Chrome       {find_chrome()}")
     except Exception as exc:  # noqa: BLE001 - 自检就是要如实报告任何失败
         print(f"Chrome       没找到 —— {exc}")
+
+    # 自检也把版本对比打出来：用户核对打包完整性时顺手看一眼有没有新版
+    try:
+        from .services.update_check import build_status
+
+        _print_version_status(build_status(force=True))
+    except Exception as exc:  # noqa: BLE001 - 自检不该被网络问题判失败
+        print(f"  当前版本     v{__version__}")
+        print("  发行版本     ——")
+        print(f"  是否需要更新 没测到（{exc}）")
 
     ok = (static / "index.html").is_file()
     print("-" * 60)
@@ -223,6 +250,15 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     server = uvicorn.Server(config)
+    # 版本检测后台预热：开页面时就有结果，不用先卡 8 秒等 Gitee；
+    # 测完把「当前 / 发行 / 要不要更新」补打在横幅下面。
+    try:
+        from .services.update_check import schedule_startup_check
+
+        schedule_startup_check(on_done=_print_version_status)
+    except Exception:  # noqa: BLE001 - 预热失败绝不拦住启动
+        logging.getLogger(__name__).warning("版本检测预热失败", exc_info=True)
+
     if not args.no_browser:
         threading.Thread(
             target=_open_browser_when_ready, args=(server, url), daemon=True

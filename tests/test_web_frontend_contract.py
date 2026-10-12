@@ -260,3 +260,58 @@ def test_JS不把Key写进提示框的原值路径(llm_js: str):
     """提示里用的是接口给的掩码字段，不是 input.value。"""
     assert "c.api_key" in llm_js or "saved.api_key" in llm_js
     assert "has_key" in llm_js
+
+
+# --------------------------------------------------------------------------- #
+# 版本更新提示：取消会再弹 / 忽略此版本 / 双下载入口
+# --------------------------------------------------------------------------- #
+
+
+def test_开页面就做版本检测(app_js: str):
+    assert "maybePromptUpdate" in app_js
+
+
+def test_更新弹窗三个出口都要在():
+    update_js = _read("js/update.js")
+    assert "忽略此版本" in update_js
+    assert "取消" in update_js
+    assert "前往 Gitee 下载" in update_js
+    assert "前往 GitHub 下载" in update_js
+
+
+def test_只点取消不落任何记忆():
+    """「取消 / Esc / 点外面」都不能调忽略接口，否则下次就不弹了。"""
+    update_js = _read("js/update.js")
+    assert 'act === "cancel"' in update_js
+    cancel_block = update_js.split('act === "cancel"', 1)[1].split("if (act ===", 1)[0]
+    assert "update/ignore" not in cancel_block
+    assert "onClose" in update_js
+
+
+def test_忽略此版本走后端接口记住():
+    update_js = _read("js/update.js")
+    assert "/api/system/update/ignore" in update_js
+    # 忽略的是「刚弹出来的那一版」，不是硬编码
+    assert "status.latest" in update_js
+
+
+def test_弹窗只在_should_prompt_时出现():
+    update_js = _read("js/update.js")
+    assert "should_prompt" in update_js
+
+
+def test_版本判断只查_gitee():
+    """下载入口可以有 GitHub，但版本比较的数据源不能混进 GitHub。"""
+    update_js = _read("js/update.js")
+    src = (STATIC.parents[1] / "boss_web" / "services" / "update_check.py").read_text(encoding="utf-8")
+    assert "gitee.com/api/v5/repos" in src
+    assert "api.github.com" not in src
+    assert "github.com/repos" not in src
+    # 弹窗上两个下载入口都要在
+    assert "gitee_url" in update_js
+    assert "github_url" in update_js
+
+
+def test_首页环境卡显示当前版本():
+    home = _read("js/views/home.js")
+    assert "h.version" in home

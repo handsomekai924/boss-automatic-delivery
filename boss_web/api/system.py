@@ -12,9 +12,10 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from .. import __version__ as APP_VERSION
 from .. import runtime
 from ..errors import EnvironmentWebError, ValidationWebError
-from ..services import app_settings_store, troubleshoot
+from ..services import app_settings_store, troubleshoot, update_check
 
 router = APIRouter()
 
@@ -22,6 +23,11 @@ router = APIRouter()
 class ChromeModeBody(BaseModel):
     #: ``visible`` / ``offscreen`` / ``hidden`` / ``headless``；空串 = 跟随默认
     mode: str = Field("", description="Chrome 窗口档位")
+
+
+class IgnoreUpdateBody(BaseModel):
+    #: 要忽略的版本号（``v`` 前缀可有可无）；空串 = 撤销忽略
+    version: str = Field("", description="要忽略的版本号，空串表示撤销")
 
 
 @router.get("/health")
@@ -32,6 +38,7 @@ def health() -> dict[str, Any]:
     data_dir = runtime.app_data_dir()
     return {
         "frozen": runtime.is_frozen(),
+        "version": APP_VERSION,
         "data_dir": str(data_dir),
         "db": str(boss_db.resolve_db_path()),
         # exe 在 %TEMP% 下跑 = 用户直接在压缩包预览里双击了，数据会丢
@@ -84,4 +91,32 @@ def open_chrome() -> dict[str, Any]:
     return {
         "ok": True,
         "message": "已用可见窗口打开 Chrome。如果它停在验证页面，把滑块拖完再回到本页继续。",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 版本更新
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/update")
+def update_status(force: bool = False) -> dict[str, Any]:
+    """当前版本 / Gitee 上的最新版 / 要不要弹窗。
+
+    ``should_prompt`` = 有更新**且**没被「忽略此版本」压住。检测失败时 ``latest``
+    为空、``error`` 带人话，**不报 500**——版本检测不该把页面搞挂。
+    """
+    body = update_check.build_status(force=force)
+    body["version"] = APP_VERSION  # 兼容只想要「当前版本号」的调用方
+    return body
+
+
+@router.post("/update/ignore")
+def ignore_update(body: IgnoreUpdateBody) -> dict[str, Any]:
+    """记住「忽略此版本」。只点取消不调这个接口，下次照样弹。"""
+    ignored = update_check.save_ignored_version(body.version)
+    return {
+        "ok": True,
+        "ignored": ignored or None,
+        "message": f"已忽略 {ignored}。" if ignored else "已恢复版本提示。",
     }

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-__version__ = "0.1.0"
+__version__ = "1.1.1"
 
 if TYPE_CHECKING:  # pragma: no cover - 只给类型检查器看
     from .app import create_app
