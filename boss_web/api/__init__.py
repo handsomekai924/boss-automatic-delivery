@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import auth, crawl, deliver, filters, jobs, llm, match, resume, system
+from . import auth, collection, crawl, deliver, filters, jobs, llm, match, resume, system
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(filters.router, prefix="/filters", tags=["filters"])
+api_router.include_router(collection.router, prefix="", tags=["collection"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 api_router.include_router(crawl.router, prefix="/crawl", tags=["crawl"])
 api_router.include_router(llm.router, prefix="/llm", tags=["llm"])

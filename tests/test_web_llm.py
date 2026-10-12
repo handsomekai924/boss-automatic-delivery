@@ -129,7 +129,31 @@ def test_masked_exposes_fixed_params():
     cfg = LLMConfig(api_key="sk-12345678", model="m").masked()
     assert cfg["fixed"]["temperature"] == C.LLM_TEMPERATURE
     assert cfg["fixed"]["max_tokens"] == C.LLM_MAX_TOKENS
+    assert cfg["fixed"]["resume_parse_max_tokens"] == C.LLM_RESUME_PARSE_MAX_TOKENS
+    assert cfg["fixed"]["match_max_tokens"] == C.LLM_MATCH_MAX_TOKENS
     assert cfg["fixed"]["timeout"] == C.LLM_TIMEOUT
+
+
+def test_chat_with_metadata_returns_finish_reason_without_changing_chat_contract():
+    client = LLMClient(
+        LLMConfig(api_key="sk-1", base_url="https://api.x/v1", model="m1"),
+        http=FakeHttp(FakeResp({"choices": [{"message": {"content": "你好"}, "finish_reason": "length"}]})),
+    )
+
+    result = client.chat_with_metadata([{"role": "user", "content": "hi"}])
+    assert result.content == "你好"
+    assert result.finish_reason == "length"
+
+
+def test_chat_with_metadata_accepts_missing_finish_reason():
+    client = LLMClient(
+        LLMConfig(api_key="sk-1", base_url="https://api.x/v1", model="m1"),
+        http=FakeHttp(FakeResp({"choices": [{"message": {"content": "你好"}}]})),
+    )
+
+    result = client.chat_with_metadata([{"role": "user", "content": "hi"}])
+    assert result.content == "你好"
+    assert result.finish_reason is None
 
 
 def test_chat_posts_to_completions():
@@ -148,6 +172,20 @@ def test_chat_posts_to_completions():
     # 采样参数来自系统常量
     assert body["temperature"] == C.LLM_TEMPERATURE
     assert body["max_tokens"] == C.LLM_MAX_TOKENS
+
+
+def test_connection_test_uses_small_token_limit():
+    http = FakeHttp(FakeResp({"choices": [{"message": {"content": "正常"}}]}))
+    client = LLMClient(
+        LLMConfig(api_key="sk-1", base_url="https://api.x/v1", model="m1"),
+        http=http,
+    )
+
+    result = client.test()
+
+    assert result["ok"] is True
+    body = json.loads(http.calls[0][2]["data"].decode("utf-8"))
+    assert body["max_tokens"] == 16
 
 
 def test_chat_requires_config():

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from .client import (
     BossData,
+    CrawlBlacklistContext,
     CrawlReport,
     CrawlStats,
     GreetResult,
@@ -91,6 +92,7 @@ __all__ = [
     "JobClient",
     "create_client",
     "http_from_session",
+    "CrawlBlacklistContext",
     "CrawlReport",
     "CrawlStats",
     "GreetResult",

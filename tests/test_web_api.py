@@ -310,5 +310,8 @@ class _StoreWithMissing:
     def update_job_desc(self, *a, **k):
         return True
 
+    def update_blacklist_state(self, *a, **k):
+        return True
+
     def close(self):
         pass

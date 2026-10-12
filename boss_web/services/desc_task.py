@@ -21,6 +21,7 @@ from boss_jobs.errors import JobApiError
 from boss_jobs.store import JobStore
 
 from ..errors import ConflictError, NotFoundError
+from .blacklist import RuleMatch, evaluate_jd, list_enabled_rules, save_hit
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,8 @@ class DescTaskManager:
         try:
             client = create_client()
             store = JobStore()
+            rules = tuple(list_enabled_rules())
+            has_jd_rules = any(r.get("rule_type") == "jd_keyword" for r in rules)
             try:
                 missing = store.list_jobs_missing_desc(limit=limit or 10_000)
                 with task.lock:
@@ -163,7 +166,57 @@ class DescTaskManager:
                         detail = client.fetch_job_detail(
                             security_id=job.security_id, lid=job.lid
                         )
-                        store.update_job_desc(job.encrypt_job_id, detail.job_desc)
+                        fetched_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                        jd_status = "completed" if detail.has_desc else "empty"
+                        jd_sources = [
+                            rule.get("scope")
+                            for rule in rules
+                            if rule.get("rule_type") == "jd_keyword"
+                        ]
+                        can_check_name = any(scope in {"job_name", "both"} for scope in jd_sources)
+                        requires_desc = any(scope in {"job_desc", "both"} for scope in jd_sources)
+                        can_check_desc = bool(detail.has_desc and requires_desc)
+                        can_check_jd = can_check_name or can_check_desc
+                        hits = evaluate_jd(job.job_name, detail.job_desc, rules) if can_check_jd else []
+                        checked = not has_jd_rules or can_check_jd and (detail.has_desc or not requires_desc)
+                        matched = [hit.to_dict() for hit in hits]
+                        missing_company = not str(job.brand_name or "").strip()
+                        blocked = bool(
+                            job.company_blacklisted
+                            or hits
+                            or missing_company
+                            or (has_jd_rules and not checked)
+                            or (has_jd_rules and jd_status in {"failed", "pending", "collecting", "unchecked"})
+                        )
+                        store.update_job_desc(
+                            job.encrypt_job_id,
+                            detail.job_desc,
+                            fetched_at=fetched_at,
+                            jd_status=jd_status,
+                            jd_error="",
+                            jd_rule_checked=checked,
+                            jd_rule_checked_at=fetched_at if checked else "",
+                        )
+                        store.update_blacklist_state(
+                            job.encrypt_job_id,
+                            company_blacklisted=job.company_blacklisted,
+                            jd_blacklisted=bool(hits),
+                            matched_rules=[rule for rule in job.matched_rule_snapshot if rule.get("rule_type") == "company"] + matched,
+                            jd_rule_checked=checked,
+                            jd_status=jd_status,
+                            auto_delivery_blocked=blocked,
+                            checked_at=fetched_at,
+                        )
+                        for hit in hits:
+                            save_hit(
+                                task_id=task.task_id,
+                                job_id=job.encrypt_job_id,
+                                job_name=job.job_name,
+                                brand_name=job.brand_name,
+                                match=RuleMatch(hit.rule, hit.matched_text, hit.source),
+                                action="stored",
+                                jd_status=jd_status,
+                            )
                         ok = True
                         consecutive_37 = 0
                     except Exception as exc:  # noqa: BLE001 - 单条失败不拖垮整批
@@ -175,6 +228,33 @@ class DescTaskManager:
                         )
                         detail = None
                         ok = False
+                        failed_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                        store.update_job_desc(
+                            job.encrypt_job_id,
+                            "",
+                            fetched_at=failed_at,
+                            jd_status="failed",
+                            jd_error=str(exc),
+                            jd_rule_checked=False,
+                            jd_rule_checked_at="",
+                        )
+                        # 失败也要同步安全快照，避免留下「已检查/可投递」的陈旧状态
+                        missing_company = not str(job.brand_name or "").strip()
+                        store.update_blacklist_state(
+                            job.encrypt_job_id,
+                            company_blacklisted=job.company_blacklisted,
+                            jd_blacklisted=bool(job.jd_blacklisted),
+                            matched_rules=[rule for rule in job.matched_rule_snapshot],
+                            jd_rule_checked=False,
+                            jd_status="failed",
+                            auto_delivery_blocked=bool(
+                                job.company_blacklisted
+                                or job.jd_blacklisted
+                                or missing_company
+                                or has_jd_rules
+                            ),
+                            checked_at=failed_at,
+                        )
                         task.push(
                             {
                                 "event": "item_error",

@@ -8,97 +8,53 @@ export async function renderJobs(root) {
     <div class="page-head">
       <div class="page-head-text">
         <h1 class="hero-title">拉取 <span class="grad">职位</span></h1>
-        <p class="hero-sub">按条件搜索职位、一张张看、不要的直接删。搜索在后台跑，每翻一页停 1 秒（避免被网站当成机器人），随时可以停。</p>
+        <p class="hero-sub">在本地职位库浏览、筛选和补全职位描述。采集条件集中在系统配置中管理。</p>
       </div>
     </div>
 
     <div class="bento mb-24">
       <div class="card span-12">
         <div class="card-head">
-          <h3 class="card-title">搜索设置</h3>
+          <h3 class="card-title">职位采集</h3>
           <span class="card-sub" id="crawl-phase">空闲</span>
         </div>
-
-        <div class="row-3">
-          <div class="field">
-            <label>最大页数</label>
-            <input class="input mono" id="max-pages" type="number" value="5" min="1" max="200">
-          </div>
-          <div class="field">
-            <label>间隔(秒)</label>
-            <input class="input mono" id="interval" type="number" value="1" min="0" step="0.5">
-          </div>
-          <div class="field">
-            <label>起始页</label>
-            <input class="input mono" id="start-page" type="number" value="1" min="1">
-          </div>
+        <div class="flex between center gap-12 wrap mb-12">
+          <div class="muted" id="collection-summary">正在读取当前采集条件…</div>
+          <a class="btn" href="#/settings">前往采集配置</a>
         </div>
-
-        <div class="flex center gap-12 mb-16">
-          <label class="pill on" id="use-search">
-            <input type="checkbox" checked hidden> 使用搜索流（走库里的搜索条件）
-          </label>
-          <span class="muted" id="filter-sub" style="font-size:12px">—</span>
-        </div>
-
-        <div class="divider mb-16"></div>
-        <div class="card-sub mb-8">搜索条件</div>
-
-        <div class="row-2">
-          <div class="field">
-            <label>关键词</label>
-            <input class="input" id="f-query" placeholder="如：前端 / Python / 产品经理">
-          </div>
-          <div class="field">
-            <label>薪资</label>
-            <select class="select" id="f-salary">
-              <option value="">不限</option>
-            </select>
-          </div>
-        </div>
-        <div class="field">
-          <label>城市（省 / 市 / 区 级联）</label>
-          <div class="cascader-field" id="city-field">
-            <button type="button" class="cascader-trigger" id="city-trigger" aria-haspopup="true" aria-expanded="false">
-              <span class="cascader-path" id="city-path">未选择 = 站点当前城市</span>
-              <span class="cascader-caret">▾</span>
-            </button>
-            <div class="cascader-pop hidden" id="city-pop">
-              <div class="hot-row" id="city-hot"></div>
-              <div class="cascader">
-                <div class="cascader-cols">
-                  <div class="cascader-col" id="city-col-0"></div>
-                  <div class="cascader-col" id="city-col-1"></div>
-                  <div class="cascader-col" id="city-col-2"></div>
-                </div>
-              </div>
-              <div class="cascader-foot">
-                <button class="btn sm ghost" id="city-clear" type="button">清除</button>
-                <button class="btn sm primary" id="city-done" type="button">完成</button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div id="filter-pills" class="mb-16"></div>
         <div class="btn-row">
-          <button class="btn" id="btn-save-filter">保存条件</button>
-          <button class="btn ghost" id="btn-reset-filter">重置</button>
-          <span class="muted" id="filter-summary" style="font-size:12px"></span>
-          <span class="flex-shrink-0" style="flex:1"></span>
-          <button class="btn primary" id="btn-crawl">开始搜索</button>
-          <button class="btn danger hidden" id="btn-stop">停止搜索</button>
+          <button class="btn primary" id="btn-crawl">开始采集</button>
+          <button class="btn danger hidden" id="btn-stop">停止采集</button>
         </div>
         <div id="crawl-task" class="mt-16"></div>
       </div>
     </div>
 
-    <div class="flex between center mb-16">
+    <div class="flex column gap-8 mb-16">
       <div class="flex center gap-8">
-        <input class="input" id="q" placeholder="在库中搜索岗位/公司" style="width:240px">
-        <input class="input" id="city-f" placeholder="城市" style="width:120px">
-        <button class="btn" id="btn-filter">筛选</button>
+        <input class="input flex-shrink-0" id="q" placeholder="在库中搜索岗位/公司" style="width:240px">
+        <input class="input flex-shrink-0" id="city-f" placeholder="城市" style="width:120px">
+        <select class="select" id="job-category" aria-label="职位状态筛选">
+          <option value="">全部状态</option>
+          <option value="ordinary">普通职位</option>
+          <option value="company_blacklisted">公司黑名单</option>
+          <option value="jd_blacklisted">JD 黑名单</option>
+          <option value="both">公司与 JD 黑名单</option>
+          <option value="jd_not_collected">JD 未采集</option>
+          <option value="jd_failed">JD 采集失败</option>
+        </select>
+        <select class="select" id="jd-status-filter" aria-label="JD 状态筛选">
+          <option value="">全部 JD 状态</option>
+          <option value="pending">待采集</option>
+          <option value="collecting">采集中</option>
+          <option value="completed">已完成</option>
+          <option value="empty">JD 为空</option>
+          <option value="failed">采集失败</option>
+          <option value="unchecked">规则未检查</option>
+        </select>
       </div>
-      <div class="btn-row">
+      <div class="btn-row ml-12">
+        <button class="btn" id="btn-filter">筛选</button>
         <span class="muted" id="total-label"></span>
         <button class="btn" id="btn-select-all">全选本页</button>
         <button class="btn danger" id="btn-del-selected">删除所选</button>
@@ -132,8 +88,9 @@ export async function renderJobs(root) {
   const limit = 24;
   let pollTimer = null;
   let crawlTaskId = null;
-
-  // 后端 phase 是英文内部阶段名，页面上得说人话
+  let collectionConfig = { collection: {}, search: {} };
+  let category = "";
+  let jdStatus = "";
   const PHASE_LABELS = {
     prepare: "准备中",
     client: "连接中",
@@ -168,308 +125,59 @@ export async function renderJobs(root) {
     }
   });
 
-  // ---------- 筛选 ----------
-  /** @type {{code:string,name:string,children?:any[]}|null} */
-  let cityTree = [];
-  let hotCities = [];
-  /** 级联已选路径：[省, 市, 区?] */
-  let cityPath = [];
-  let salaryOptions = [];
-
-  function findCityPath(nodes, code, path = []) {
-    for (const n of nodes || []) {
-      const next = [...path, n];
-      if (String(n.code) === String(code)) return next;
-      const hit = findCityPath(n.children || [], code, next);
-      if (hit) return hit;
-    }
-    return null;
-  }
-
-  function findCityByName(nodes, name, path = []) {
-    for (const n of nodes || []) {
-      const next = [...path, n];
-      if (n.name === name) return next;
-      const hit = findCityByName(n.children || [], name, next);
-      if (hit) return hit;
-    }
-    return null;
-  }
-
-  function renderCityCascader() {
-    const cols = [$("city-col-0"), $("city-col-1"), $("city-col-2")];
-    const levels = [
-      cityTree,
-      cityPath[0]?.children || [],
-      cityPath[1]?.children || [],
-    ];
-    cols.forEach((col, idx) => {
-      const items = levels[idx] || [];
-      if (!items.length) {
-        const hint =
-          idx === 0
-            ? "选项表为空"
-            : idx === 1
-              ? (cityPath[0] ? "无下级" : "先选省份")
-              : (cityPath[1] ? "无下级" : "先选城市");
-        col.innerHTML = `<div class="cascader-empty">${hint}</div>`;
-        return;
-      }
-      col.innerHTML = items
-        .map((n) => {
-          const picked = cityPath[idx]?.code === n.code;
-          const hasKids = (n.children || []).length > 0;
-          return `<button type="button" class="cascader-item ${picked ? "picked" : ""}" data-level="${idx}" data-code="${escapeHtml(n.code)}">
-            <span>${escapeHtml(n.name)}</span>
-            ${hasKids ? '<span class="caret">▸</span>' : ""}
-          </button>`;
-        })
-        .join("");
-      col.querySelectorAll(".cascader-item").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const level = Number(btn.dataset.level);
-          const code = btn.dataset.code;
-          const pool = levels[level] || [];
-          const node = pool.find((n) => String(n.code) === String(code));
-          if (!node) return;
-          cityPath = [...cityPath.slice(0, level), node];
-          renderCityCascader();
-          updateFilterSummary();
-          // 选到叶子（没有下级）就算选完，自动收起；省/市还得继续往下钻
-          if (!(node.children || []).length) setCityOpen(false);
-        });
-      });
-      // 回填已选项时滚进可视区，别让高亮落在折下
-      const picked = col.querySelector(".cascader-item.picked");
-      if (picked) picked.scrollIntoView({ block: "nearest" });
-    });
-
-    const pathEl = $("city-path");
-    if (!cityPath.length) {
-      pathEl.textContent = "未选择 = 站点当前城市";
-    } else {
-      // 直辖市常见「北京 / 北京」，同名只留一层
-      const names = [];
-      for (const n of cityPath) {
-        if (!names.length || names[names.length - 1] !== n.name) names.push(n.name);
-      }
-      pathEl.textContent = names.join(" / ");
-    }
-  }
-
-  function renderSalarySelect(selectedCode = "") {
-    const sel = $("f-salary");
-    sel.innerHTML =
-      `<option value="">不限</option>` +
-      salaryOptions
-        .map(
-          (o) =>
-            `<option value="${escapeHtml(o.code)}" ${String(o.code) === String(selectedCode) ? "selected" : ""}>${escapeHtml(o.name)}</option>`
-        )
-        .join("");
-  }
-
-  function renderHotCities() {
-    $("city-hot").innerHTML = hotCities
-      .map((c) => `<span class="pill" data-code="${escapeHtml(c.code)}" data-name="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>`)
-      .join("");
-    $("city-hot").querySelectorAll(".pill").forEach((p) => {
-      p.addEventListener("click", () => {
-        const code = p.dataset.code;
-        const byCode = findCityPath(cityTree, code) || findCityByName(cityTree, p.dataset.name);
-        // 热点城市可能不在省→市树里（如直辖市拍平），直接构造单节点路径
-        cityPath = byCode || [{ code, name: p.dataset.name, children: [] }];
-        renderCityCascader();
-        updateFilterSummary();
-        setCityOpen(false);
-      });
-    });
-  }
-
-  function currentCityCode() {
-    return cityPath.length ? String(cityPath[cityPath.length - 1].code) : "";
-  }
-
-  function updateFilterSummary() {
+  // ---------- 当前采集配置 ----------
+  function collectionSummary(data) {
+    const search = data?.search || {};
+    const collection = data?.collection || {};
     const parts = [];
-    const q = $("f-query").value.trim();
-    if (q) parts.push(`关键词「${q}」`);
-    if (cityPath.length) {
-      const names = [];
-      for (const n of cityPath) {
-        if (!names.length || names[names.length - 1] !== n.name) names.push(n.name);
-      }
-      parts.push(`城市 ${names.join("/")}`);
+    if (search.query) parts.push(`关键词「${search.query}」`);
+    if (search.city) parts.push(`城市 ${search.city}`);
+    if (search.jobType) parts.push(`职位类型 ${search.jobType}`);
+    if (search.salary) parts.push(`薪资 ${search.salary}`);
+    if (Array.isArray(search.experience) && search.experience.length) {
+      parts.push(`经验 ${search.experience.join("、")}`);
     }
-    const sal = salaryOptions.find((o) => String(o.code) === String($("f-salary").value));
-    if (sal) parts.push(`薪资 ${sal.name}`);
-    $("filter-pills").querySelectorAll(".pill.on").forEach((p) => {
-      parts.push(p.textContent.trim());
-    });
-    $("filter-summary").textContent = parts.join(" · ") || "不限（推荐流）";
+    if (Array.isArray(search.degree) && search.degree.length) {
+      parts.push(`学历 ${search.degree.join("、")}`);
+    }
+    if (Array.isArray(search.industry) && search.industry.length) {
+      parts.push(`行业 ${search.industry.join("、")}`);
+    }
+    if (Array.isArray(search.scale) && search.scale.length) {
+      parts.push(`规模 ${search.scale.join("、")}`);
+    }
+    if (Array.isArray(search.payType) && search.payType.length) {
+      parts.push(`薪资方式 ${search.payType.join("、")}`);
+    }
+    if (Array.isArray(search.partTime) && search.partTime.length) {
+      parts.push(`兼职 ${search.partTime.join("、")}`);
+    }
+    if (Array.isArray(search.stage) && search.stage.length) {
+      parts.push(`阶段 ${search.stage.join("、")}`);
+    }
+    parts.push(collection.use_search === false ? "不使用搜索条件" : "使用搜索条件");
+    parts.push(`最多 ${collection.max_pages ?? 5} 页`);
+    parts.push(collection.fetch_details === false ? "不抓 JD" : "抓取 JD");
+    parts.push(collection.store_blacklisted === false ? "不保存黑名单职位" : "保存并标记黑名单");
+    return parts.join(" · ") || "不限（推荐流）";
   }
 
-  async function loadFilter() {
-    let cond = null;
+  async function loadCollectionConfig() {
     try {
-      cond = await api.get("/api/filters/conditions");
-      cityTree = cond.city || [];
-      hotCities = cond.hotCity || [];
-      salaryOptions = cond.salary || [];
-      renderHotCities();
-      renderSalarySelect();
-      renderCityCascader();
-      renderPills(cond);
+      collectionConfig = await api.get("/api/collection/config");
+      $("collection-summary").textContent = collectionSummary(collectionConfig);
     } catch (err) {
-      $("filter-pills").innerHTML = `<div class="banner warn">选项表拿不到：${escapeHtml(err.message)}</div>`;
+      $("collection-summary").textContent = "采集条件读取失败";
+      toast("读采集配置失败：" + err.message, "warn");
     }
-    try {
-      const f = await api.get("/api/filters/search");
-      $("f-query").value = f.query || "";
-      renderSalarySelect(f.salary || "");
-      if (f.city) {
-        cityPath = findCityPath(cityTree, f.city) || [{ code: f.city, name: f.city, children: [] }];
-      } else {
-        cityPath = [];
-      }
-      renderCityCascader();
-      applyPillSelection(f);
-      $("filter-sub").textContent = f.is_blank ? "不限" : "搜索流";
-      updateFilterSummary();
-    } catch (err) {
-      toast("读筛选条件失败：" + err.message, "warn");
-    }
+    return collectionConfig;
   }
-
-  function applyPillSelection(f) {
-    const wanted = {
-      experience: new Set((f.experience || []).map(String)),
-      degree: new Set((f.degree || []).map(String)),
-      scale: new Set((f.scale || []).map(String)),
-    };
-    $("filter-pills").querySelectorAll(".pill").forEach((p) => {
-      const set = wanted[p.dataset.key];
-      if (!set) return;
-      p.classList.toggle("on", set.has(String(p.dataset.code)));
-    });
-  }
-
-  $("f-query").addEventListener("input", updateFilterSummary);
-  $("f-salary").addEventListener("change", updateFilterSummary);
-
-  // 城市级联平时只占一行，点击触发按钮才弹出浮层
-  const cityField = $("city-field");
-  const cityTrigger = $("city-trigger");
-  const cityPop = $("city-pop");
-
-  function setCityOpen(open) {
-    cityPop.classList.toggle("hidden", !open);
-    cityTrigger.classList.toggle("open", open);
-    cityTrigger.setAttribute("aria-expanded", open ? "true" : "false");
-  }
-  const isCityOpen = () => !cityPop.classList.contains("hidden");
-
-  cityTrigger.addEventListener("click", () => setCityOpen(!isCityOpen()));
-  cityPop.addEventListener("click", (e) => e.stopPropagation());
-  function onDocClick(e) {
-    if (isCityOpen() && !cityField.contains(e.target)) setCityOpen(false);
-  }
-  function onDocKey(e) {
-    if (e.key === "Escape") setCityOpen(false);
-  }
-  document.addEventListener("click", onDocClick);
-  document.addEventListener("keydown", onDocKey);
-
-  $("city-done").addEventListener("click", () => setCityOpen(false));
-  $("city-clear").addEventListener("click", () => {
-    cityPath = [];
-    renderCityCascader();
-    updateFilterSummary();
-    setCityOpen(false);
-  });
-
-  function renderPills(cond) {
-    const groups = [
-      ["experience", "经验", cond.experience],
-      ["degree", "学历", cond.degree],
-      ["scale", "规模", cond.scale],
-    ];
-    $("filter-pills").innerHTML = groups
-      .map(([key, label, options]) => {
-        if (!options || !options.length) return "";
-        const pills = options
-          .slice(0, 12)
-          .map((o) => `<span class="pill" data-key="${key}" data-code="${escapeHtml(o.code ?? o)}">${escapeHtml(o.name ?? o)}</span>`)
-          .join("");
-        return `<div class="mb-8"><div class="card-sub mb-8">${label}</div><div class="pills">${pills}</div></div>`;
-      })
-      .join("") + (cond.source && cond.source !== "api" ? `<div class="banner warn">当前选项来自离线兜底（source=${escapeHtml(cond.source)}）</div>` : "");
-
-    // 多选暂存在 data，保存时写进 filter
-    $("filter-pills").querySelectorAll(".pill").forEach((p) => {
-      p.addEventListener("click", () => {
-        p.classList.toggle("on");
-        updateFilterSummary();
-      });
-    });
-  }
-
-  function collectFilter() {
-    const extras = { experience: [], degree: [], scale: [] };
-    $("filter-pills").querySelectorAll(".pill.on").forEach((p) => {
-      const k = p.dataset.key;
-      if (extras[k]) extras[k].push(p.dataset.code);
-    });
-    return {
-      query: $("f-query").value.trim(),
-      city: currentCityCode(),
-      jobType: "",
-      salary: $("f-salary").value,
-      experience: extras.experience,
-      degree: extras.degree,
-      industry: [],
-      scale: extras.scale,
-      payType: [],
-      partTime: [],
-      stage: [],
-    };
-  }
-
-  $("btn-save-filter").addEventListener("click", async () => {
-    try {
-      const saved = await api.put("/api/filters/search", collectFilter());
-      $("filter-summary").textContent = saved.summary || "";
-      toast("筛选条件已保存", "ok");
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-  });
-
-  $("btn-reset-filter").addEventListener("click", async () => {
-    try {
-      await api.post("/api/filters/search/reset");
-      await loadFilter();
-      toast("已重置", "ok");
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-  });
 
   // ---------- 搜索 ----------
-  $("use-search").addEventListener("click", (e) => {
-    const pill = e.currentTarget;
-    const cb = pill.querySelector("input");
-    cb.checked = !cb.checked;
-    pill.classList.toggle("on", cb.checked);
-  });
-
   $("btn-crawl").addEventListener("click", async () => {
     try {
       const task = await api.post("/api/crawl/start", {
-        max_pages: Number($("max-pages").value) || 5,
-        interval: Number($("interval").value) || 1,
-        start_page: Number($("start-page").value) || 1,
-        use_search: $("use-search").querySelector("input").checked,
+        // 采集条件已集中保存到系统配置；空 body 让后端使用同一份配置快照。
       });
       crawlTaskId = task.task_id;
       $("btn-crawl").classList.add("hidden");
@@ -543,7 +251,14 @@ export async function renderJobs(root) {
   async function loadJobs() {
     const keyword = $("q").value.trim();
     const city = $("city-f").value.trim();
-    const qs = new URLSearchParams({ limit, offset, ...(keyword ? { keyword } : {}), ...(city ? { city } : {}) });
+    const qs = new URLSearchParams({
+      limit,
+      offset,
+      ...(keyword ? { keyword } : {}),
+      ...(city ? { city } : {}),
+      ...(category ? { category } : {}),
+      ...(jdStatus ? { jd_status: jdStatus } : {}),
+    });
     try {
       const data = await api.get("/api/jobs?" + qs.toString());
       $("total-label").textContent = `共 ${data.total} 条`;
@@ -564,6 +279,19 @@ export async function renderJobs(root) {
       .map((j) => {
         const sel = selected.has(j.encrypt_job_id) ? "selected" : "";
         const labels = (j.job_labels || []).slice(0, 3).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("");
+        const statusLabels = [
+          j.company_blacklisted ? "公司黑名单" : "",
+          j.jd_blacklisted ? "JD 关键词黑名单" : "",
+          // 规则没查完就打「未检查」：covers empty/pending/failed/unchecked + completed 但没查规则
+          j.jd_rule_checked ? "" : "JD 规则未检查",
+          j.jd_status && j.jd_status !== "completed" && j.jd_status !== "unchecked" ? ({
+            pending: "JD 待采集",
+            collecting: "JD 采集中",
+            empty: "JD 为空",
+            failed: "JD 采集失败",
+          }[j.jd_status] || `JD ${j.jd_status}`) : "",
+        ].filter(Boolean);
+        const statusHtml = statusLabels.map((label) => `<span class="pill ${label.includes("黑名单") || label.includes("失败") ? "warn" : "static"}">${escapeHtml(label)}</span>`).join("");
         return `
         <div class="card job-card lift ${sel}" data-id="${escapeHtml(j.encrypt_job_id)}">
           <div class="job-check"></div>
@@ -576,6 +304,7 @@ export async function renderJobs(root) {
             <span class="pill static">${escapeHtml(j.job_degree || "—")}</span>
           </div>
           <div class="job-meta">${labels}</div>
+          <div class="job-meta">${statusHtml}</div>
           <div class="muted" style="font-size:11px">${escapeHtml(j.brand_industry || "")} ${escapeHtml(j.brand_scale_name || "")}</div>
         </div>`;
       })
@@ -600,6 +329,17 @@ export async function renderJobs(root) {
       const j = await api.get("/api/jobs/" + encodeURIComponent(id));
       const skills = (j.skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
       const welfare = (j.welfare_list || []).map((s) => `<span class="pill static">${escapeHtml(s)}</span>`).join(" ");
+      const matchedRules = (j.matched_rule_snapshot || []).map((rule) => `
+        <div class="settings-rule">
+          <strong>${escapeHtml(rule.rule_type === "company" ? "公司规则" : "JD 关键词")}</strong>
+          <span class="pill static">${escapeHtml(rule.match_mode || "")}</span>
+          <div>${escapeHtml(rule.pattern || "")}</div>
+          <div class="muted">命中内容：${escapeHtml(rule.matched_text || "—")}${rule.source ? ` · 范围 ${escapeHtml(rule.source)}` : ""}</div>
+        </div>`).join("");
+      const jdStatusLabel = ({
+        pending: "待采集", collecting: "采集中", completed: "已完成", empty: "JD 为空",
+        failed: "采集失败", unchecked: "规则未检查",
+      }[j.jd_status] || j.jd_status || "未知");
       modal({
         title: escapeHtml(j.job_name),
         body: `
@@ -614,7 +354,12 @@ export async function renderJobs(root) {
             <span class="pill static">${escapeHtml(j.job_experience || "—")}</span>
             <span class="pill static">${escapeHtml(j.job_degree || "—")}</span>
             <span class="pill static">${escapeHtml(j.brand_scale_name || "—")}</span>
+            ${j.company_blacklisted ? '<span class="pill warn">公司黑名单</span>' : ""}
+            ${j.jd_blacklisted ? '<span class="pill warn">JD 关键词黑名单</span>' : ""}
+            <span class="pill ${j.jd_status === "failed" ? "warn" : "static"}">JD：${escapeHtml(jdStatusLabel)}</span>
+            ${j.jd_rule_checked ? "" : '<span class="pill warn">JD 规则未检查</span>'}
           </div>
+          ${matchedRules ? `<details class="acc mb-16"><summary>查看命中规则（${(j.matched_rule_snapshot || []).length} 条）</summary><div class="acc-body">${matchedRules}</div></details>` : ""}
           <div class="card-sub mb-8">技能 / 标签</div>
           <div class="pills mb-16">${skills || "<span class='muted'>—</span>"}</div>
           <div class="card-sub mb-8">福利</div>
@@ -655,6 +400,16 @@ export async function renderJobs(root) {
   }
 
   $("btn-filter").addEventListener("click", () => {
+    offset = 0;
+    loadJobs();
+  });
+  $("job-category").addEventListener("change", (e) => {
+    category = e.target.value;
+    offset = 0;
+    loadJobs();
+  });
+  $("jd-status-filter").addEventListener("change", (e) => {
+    jdStatus = e.target.value;
     offset = 0;
     loadJobs();
   });
@@ -798,7 +553,7 @@ export async function renderJobs(root) {
     loadJobs();
   });
 
-  await loadFilter();
+  await loadCollectionConfig();
   await loadJobs();
 
   // 恢复进行中的搜索
@@ -826,7 +581,5 @@ export async function renderJobs(root) {
   return () => {
     clearInterval(pollTimer);
     clearInterval(descPollTimer);
-    document.removeEventListener("click", onDocClick);
-    document.removeEventListener("keydown", onDocKey);
   };
 }

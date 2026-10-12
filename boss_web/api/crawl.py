@@ -13,12 +13,13 @@ router = APIRouter()
 
 
 class CrawlBody(BaseModel):
-    max_pages: int = Field(5, ge=1, le=200)
-    interval: float = Field(1.0, ge=0.0, le=30.0)
-    start_page: int = Field(1, ge=1)
-    use_search: bool = True
-    #: 每页入库后顺带补 JD（默认开；每页约 +4.5s）
-    fetch_details: bool = True
+    max_pages: int | None = Field(None, ge=1, le=200)
+    interval: float | None = Field(None, ge=0.0, le=30.0)
+    start_page: int | None = Field(None, ge=1)
+    use_search: bool | None = None
+    fetch_details: bool | None = None
+    detail_interval: float | None = Field(None, ge=0.0, le=30.0)
+    store_blacklisted: bool | None = None
 
 
 @router.get("/status")
@@ -34,6 +35,8 @@ def start(body: CrawlBody) -> dict[str, Any]:
         start_page=body.start_page,
         use_search=body.use_search,
         fetch_details=body.fetch_details,
+        detail_interval=body.detail_interval,
+        store_blacklisted=body.store_blacklisted,
     )
     return task.snapshot()
 

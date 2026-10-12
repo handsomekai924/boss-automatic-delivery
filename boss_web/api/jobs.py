@@ -38,10 +38,17 @@ def list_jobs(
     offset: int = Query(0, ge=0),
     city: str | None = None,
     keyword: str | None = None,
+    category: str | None = None,
+    jd_status: str | None = None,
 ) -> dict[str, Any]:
     with JobStore() as store:
-        items = store.list_jobs(limit=limit, offset=offset, city=city, keyword=keyword)
-        total = store.count_jobs_matching(city=city, keyword=keyword)
+        items = store.list_jobs(
+            limit=limit, offset=offset, city=city, keyword=keyword,
+            category=category, jd_status=jd_status,
+        )
+        total = store.count_jobs_matching(
+            city=city, keyword=keyword, category=category, jd_status=jd_status
+        )
     return {
         "items": [j.to_dict() for j in items],
         "total": total,

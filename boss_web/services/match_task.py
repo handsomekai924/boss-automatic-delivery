@@ -301,6 +301,9 @@ class MatchTaskManager:
             # 发送要用的（C6），顺手带上，免得到时候再翻 raw_json
             "security_id": job.security_id,
             "lid": job.lid,
+            # Match-time blacklist/JD state is an immutable decision snapshot.
+            # Delivery must use these fields rather than rereading mutable rules.
+            **_blacklist_snapshot(job),
             **result,
         }
         with task.lock:
@@ -338,6 +341,38 @@ def _pick_jobs(task: MatchTask) -> list[Job]:
             return jobs
         # 一键匹配：全库全部岗位（C4 已拍板，不再 top_k 封顶）
         return store.list_jobs(limit=100000, offset=0)
+
+
+def _blacklist_snapshot(job: Job) -> dict[str, Any]:
+    """Copy current job safety state into the match payload once."""
+    return {
+        "is_blacklisted": bool(job.is_blacklisted),
+        "company_blacklisted": bool(job.company_blacklisted),
+        "jd_blacklisted": bool(job.jd_blacklisted),
+        "blacklist_types": list(job.blacklist_types),
+        "matched_rule_ids": list(job.matched_rule_ids),
+        "matched_rule_snapshot": [dict(rule) for rule in job.matched_rule_snapshot],
+        "blacklist_checked_at": job.blacklist_checked_at,
+        "jd_status": job.jd_status or "pending",
+        "jd_rule_checked": bool(job.jd_rule_checked),
+        "jd_rule_checked_at": job.jd_rule_checked_at,
+        "auto_delivery_blocked": bool(job.auto_delivery_blocked),
+    }
+
+
+def _auto_delivery_blocked(item: dict[str, Any]) -> bool:
+    """保守口径：命中黑名单或安全状态不完整，都不算「可自动投递」。
+
+    与投递侧 :func:`boss_web.services.deliver_task._delivery_restriction`
+    保持同一套判断，仅用于分析汇总计数，不替代投递侧的最终裁决。
+    """
+    return bool(
+        item.get("company_blacklisted")
+        or item.get("jd_blacklisted")
+        or not item.get("jd_rule_checked", False)
+        or item.get("auto_delivery_blocked")
+        or str(item.get("jd_status") or "") in {"failed", "pending", "collecting", "unchecked"}
+    )
 
 
 def _resume_brief(resume: Any, llm_parse: dict[str, Any] | None) -> str:
@@ -683,6 +718,27 @@ def _finalize(task: MatchTask, resume: Any, cfg: Any, llm_parse: dict[str, Any] 
             gaps[str(skill)] += 1
     ranked = sorted(task.matches, key=lambda m: m.get("match_score") or 0, reverse=True)
 
+    safety_counts = Counter()
+    for item in ranked:
+        if item.get("company_blacklisted"):
+            safety_counts["company_blacklisted"] += 1
+        if item.get("jd_blacklisted"):
+            safety_counts["jd_blacklisted"] += 1
+        if not item.get("jd_rule_checked", False):
+            safety_counts["jd_rule_unchecked"] += 1
+        if item.get("auto_delivery_blocked"):
+            safety_counts["auto_delivery_blocked"] += 1
+    blacklist_summary = {
+        "total": len(ranked),
+        "company_blacklisted": safety_counts["company_blacklisted"],
+        "jd_blacklisted": safety_counts["jd_blacklisted"],
+        "jd_rule_unchecked": safety_counts["jd_rule_unchecked"],
+        "auto_delivery_blocked": safety_counts["auto_delivery_blocked"],
+        "safe_for_auto_delivery": sum(
+            1 for item in ranked if not _auto_delivery_blocked(item)
+        ),
+    }
+
     payload = {
         "analysis_id": task.analysis_id,
         "kind": "match",
@@ -698,6 +754,7 @@ def _finalize(task: MatchTask, resume: Any, cfg: Any, llm_parse: dict[str, Any] 
             "llm": (llm_parse or {}).get("data") if llm_parse else None,
         },
         "matches": ranked,
+        "blacklist_summary": blacklist_summary,
         "skill_gaps": [{"skill": k, "count": v} for k, v in gaps.most_common(15)],
         "top_recommendations": [
             m["encrypt_job_id"] for m in ranked if (m.get("match_score") or 0) >= 70

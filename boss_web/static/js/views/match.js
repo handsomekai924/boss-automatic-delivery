@@ -50,6 +50,7 @@ export async function renderMatch(root) {
           <input type="number" class="input" id="send-min-score" value="70" min="0" max="100" step="1" style="width:76px">
           <span class="muted" style="font-size:11.5px">≥ 该分数才进「一键发送全部」，改完自动保存</span>
         </label>
+        <span class="muted" id="send-excluded" style="font-size:12px"></span>
         <span class="muted" style="font-size:12px">点击下方「匹配结果」条目可看全部信息、改招呼语 / 发送</span>
       </div>
       <div id="deliver-task"></div>
@@ -286,16 +287,33 @@ export async function renderMatch(root) {
     return Math.min(100, Math.max(0, v));
   }
 
-  /** 「一键发送全部」的目标：评分 ≥ 阈值 + 有招呼语 + 未发送。 */
+  function sendRestriction(m) {
+    if (!["is_blacklisted", "company_blacklisted", "jd_blacklisted", "jd_rule_checked", "jd_status", "auto_delivery_blocked"].some((key) => key in m)) {
+      return "缺少匹配时安全快照";
+    }
+    if (m.company_blacklisted) return "公司黑名单";
+    if (m.jd_blacklisted) return "JD 黑名单";
+    if (!m.jd_rule_checked) return "JD 规则未检查";
+    if (["failed", "pending", "collecting", "unchecked"].includes(m.jd_status || "")) return "JD 状态不完整";
+    if (m.auto_delivery_blocked) return "职位状态不完整";
+    return "";
+  }
+
+  /** 一键发送只展示明确安全且具有招呼语的目标。 */
   function sendAllTargets() {
     const min = minScore();
     return matches.filter(
-      (m) => (m.match_score || 0) >= min && !m.delivered_at && (m.greeting || "").trim()
+      (m) => (m.match_score || 0) >= min && !m.delivered_at && (m.greeting || "").trim() && !sendRestriction(m)
     );
   }
 
   function updateSendCounts() {
-    $("send-all-n").textContent = String(sendAllTargets().length);
+    const eligible = sendAllTargets();
+    const ranked = matches.filter((m) => (m.match_score || 0) >= minScore() && !m.delivered_at && (m.greeting || "").trim());
+    const excluded = ranked.length - eligible.length;
+    $("send-all-n").textContent = String(eligible.length);
+    $("send-excluded").textContent = excluded ? `一键发送将排除 ${excluded} 条受限 / 状态不完整职位` : "";
+    $("send-sel-n").textContent = String(matches.filter((m) => selected.has(m.encrypt_job_id) && !m.delivered_at && (m.greeting || "").trim()).length);
   }
 
   $("send-min-score").addEventListener("input", updateSendCounts);
@@ -457,6 +475,15 @@ export async function renderMatch(root) {
         const jid = m.encrypt_job_id;
         const score = m.match_score || 0;
         const adviceLine = (m.advice || "").trim() || (m.verdict || "").trim();
+        const tags = [
+          m.company_blacklisted ? "公司黑名单" : "",
+          m.jd_blacklisted ? "JD 关键词黑名单" : "",
+          !m.jd_rule_checked ? "JD 规则未检查" : "",
+          ["failed", "empty", "pending", "collecting", "unchecked"].includes(m.jd_status) ? `JD ${m.jd_status}` : "",
+        ].filter(Boolean);
+        const safety = tags.length
+          ? `<div class="pills mt-8">${tags.map((tag) => `<span class="pill static bad">${escapeHtml(tag)}</span>`).join(" ")}</div>`
+          : `<div class="pills mt-8"><span class="pill static accent">安全状态已检查</span></div>`;
         return `
           <div class="card lift mb-16 match-card" style="padding:16px" data-jid="${escapeHtml(jid)}"
                role="button" tabindex="0" title="点击查看全部信息">
@@ -465,6 +492,7 @@ export async function renderMatch(root) {
               <div class="match-main">
                 <h4 class="match-title">${escapeHtml(m.job_name)} <span class="muted" style="font-weight:400;font-size:13px">@ ${escapeHtml(m.brand_name)}</span></h4>
                 <div class="muted" style="font-size:12px">${escapeHtml(m.location || "")} · ${escapeHtml(m.salary_desc || "")}</div>
+                ${safety}
                 ${adviceLine ? `<div class="muted" style="font-size:12.5px;margin-top:6px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(adviceLine)}</div>` : ""}
                 <div class="flex between center gap-8 mt-8">
                   <span class="muted" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
@@ -508,9 +536,18 @@ export async function renderMatch(root) {
     const pros = (m.pros || []).map((p) => `<div class="muted" style="font-size:12.5px">✓ ${escapeHtml(p)}</div>`).join("");
     const cons = (m.cons || []).map((c) => `<div class="muted" style="font-size:12.5px">✗ ${escapeHtml(c)}</div>`).join("");
     const draft = greetDrafts.has(jid) ? greetDrafts.get(jid) : (m.greeting || "");
+    const safetyLabels = [
+      m.company_blacklisted ? "公司黑名单" : "",
+      m.jd_blacklisted ? "JD 关键词黑名单" : "",
+      !m.jd_rule_checked ? "JD 规则未检查" : "",
+      m.jd_status ? `JD 状态：${m.jd_status}` : "",
+      m.auto_delivery_blocked ? "自动投递已阻断" : "",
+    ].filter(Boolean);
+    const snapshotRules = (m.matched_rule_snapshot || []).map((rule) =>
+      `<li>${escapeHtml(rule.rule_type || "规则")} · ${escapeHtml(rule.pattern || "")} · ${escapeHtml(rule.matched_text || "")}</li>`
+    ).join("");
 
     const dlg = modal({
-      title: escapeHtml(m.job_name),
       wide: true,
       body: `
         <div class="flex between gap-12 mb-16 wrap" style="align-items:flex-start">
@@ -528,6 +565,8 @@ export async function renderMatch(root) {
         </div>
 
         <div class="card-sub mb-8">匹配分析</div>
+        ${safetyLabels.length ? `<div class="pills mb-8">${safetyLabels.map((label) => `<span class="pill static bad">${escapeHtml(label)}</span>`).join(" ")}</div>` : `<div class="pill static accent mb-8">安全状态已检查</div>`}
+        ${snapshotRules ? `<details class="acc mb-8"><summary>匹配时命中规则快照</summary><ul class="acc-body">${snapshotRules}</ul></details>` : ""}
         ${verdict ? `<div class="muted mb-8" style="font-size:12.5px"><span class="muted" style="font-size:11px">结论</span> ${escapeHtml(verdict)}</div>` : ""}
         ${advice ? `<div class="muted mb-8" style="font-size:12.5px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(advice)}</div>` : ""}
         ${matched ? `<div class="card-sub mb-8 mt-12">技能匹配</div><div class="job-meta">${matched}</div>` : ""}
@@ -626,7 +665,7 @@ export async function renderMatch(root) {
 
     dlg.box.querySelector(".btn-send-one").addEventListener("click", () => {
       const cur = matches.find((x) => x.encrypt_job_id === jid);
-      if (cur) confirmAndSend([cur]);
+      if (cur) confirmAndSend([cur], "单条手动发送需要单独确认；后端仍会按匹配时快照校验", { mode: "manual" });
     });
 
     // 匹配失败才有的补救入口：只重跑这一条，结果原地覆盖（不新增分析记录）
@@ -705,13 +744,16 @@ export async function renderMatch(root) {
   }
 
   // ---------- 发送：三种粒度共用一个任务（C6） ----------
-  async function startDeliver(targets) {
+  async function startDeliver(targets, { mode = "selected", confirmed = false, confirmationToken = "" } = {}) {
     if (!analysisId) return toast("先跑一次匹配再发送", "warn");
     if (deliverTaskId) return toast("已有发送任务在跑，等它结束", "warn");
     try {
       const s = await api.post("/api/deliver/start", {
         analysis_id: analysisId,
         encrypt_job_ids: targets.map((m) => m.encrypt_job_id),
+        mode,
+        confirmed,
+        confirmation_token: confirmationToken,
       });
       deliverTaskId = s.task_id;
       toast(`开始发送 · 待发 ${s.total || 0} 条，跳过 ${s.skipped || 0} 条已发送`, "ok");
@@ -727,7 +769,7 @@ export async function renderMatch(root) {
   function applyDeliverSnapshot(s) {
     let touched = false;
     (s.items || []).forEach((it) => {
-      if (it.status === "skipped") return;  // 已发送过，保持原样
+      if (it.status === "skipped" && it.error === "已发送") return;
       const m = matches.find((x) => x.encrypt_job_id === it.encrypt_job_id);
       if (!m) return;
       m.deliver_status = it.status;
@@ -801,22 +843,28 @@ export async function renderMatch(root) {
   $("btn-send-all").addEventListener("click", () => {
     const min = minScore();
     const targets = sendAllTargets();
-    if (!targets.length) return toast(`没有「评分 ≥ ${min} 且有招呼语且未发送」的条目`, "warn");
-    confirmAndSend(targets, `筛选条件：评分 ≥ ${min}`);
+    if (!targets.length) return toast(`没有「评分 ≥ ${min}、安全状态完整且有招呼语」的条目`, "warn");
+    confirmAndSend(targets, `筛选条件：评分 ≥ ${min}`, { mode: "all" });
   });
   $("btn-send-sel").addEventListener("click", () => {
     const targets = matches.filter((m) => selected.has(m.encrypt_job_id) && !m.delivered_at && (m.greeting || "").trim());
     if (!targets.length) return toast("选中的条目里没有「有招呼语且未发送」的", "warn");
-    confirmAndSend(targets);
+    confirmAndSend(targets, "选中的职位将按匹配时安全快照执行策略", { mode: "selected" });
   });
 
-  function confirmAndSend(targets, scopeNote = "") {
+  function confirmAndSend(targets, scopeNote = "", { mode = "selected" } = {}) {
+    const restricted = targets.filter((m) => sendRestriction(m));
+    const restrictionNote = restricted.length
+      ? `<div class="banner warn mb-12">其中 ${restricted.length} 条受限职位：${escapeHtml([...new Set(restricted.map(sendRestriction))].join("、"))}。${mode === "all" ? "一键发送会自动排除它们。" : "确认后才会允许发送这些明确选中的职位。"}</div>`
+      : "";
     const rows = targets
       .map(
         (m) => `
         <div style="padding:10px 0;border-bottom:1px solid var(--stroke)">
           <div><strong>${escapeHtml(m.job_name)}</strong> <span class="muted">@ ${escapeHtml(m.brand_name)}</span>
-            <span class="pill accent" style="margin-left:6px">评分 ${m.match_score || 0}</span></div>
+            <span class="pill accent" style="margin-left:6px">评分 ${m.match_score || 0}</span>
+            ${sendRestriction(m) ? `<span class="pill static bad" style="margin-left:6px">${escapeHtml(sendRestriction(m))}</span>` : ""}
+          </div>
           <div class="greeting-box mt-8" style="font-size:12px">${escapeHtml(m.greeting || "（无招呼语）")}</div>
         </div>`
       )
@@ -825,6 +873,8 @@ export async function renderMatch(root) {
       title: `确认发送 · 共 ${targets.length} 条`,
       body: `
         <div class="banner warn mb-12">将先<strong>建立会话</strong>，再把下方的招呼语正文作为<strong>聊天消息</strong>单独发给招聘方。</div>
+        ${restrictionNote}
+        ${restrictionNote}
         ${scopeNote ? `<div class="muted mb-8" style="font-size:12px">${escapeHtml(scopeNote)}</div>` : ""}
         ${rows}
         <div class="btn-row mt-16">
@@ -840,7 +890,7 @@ export async function renderMatch(root) {
     no.addEventListener("click", () => dlg.close());
     ok.addEventListener("click", () => {
       dlg.close();
-      startDeliver(targets);
+      startDeliver(targets, { mode, confirmed: true, confirmationToken: mode === "manual" ? `ui-${Date.now()}` : "" });
     });
   }
 

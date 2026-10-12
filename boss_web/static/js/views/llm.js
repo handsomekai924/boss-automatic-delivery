@@ -1,7 +1,7 @@
 /** AI 设置：OpenAI 兼容接口配置 · 模型名在线下拉 · 第一次配置的分步引导 */
 
 import { api } from "../api.js";
-import { toast, escapeHtml, taskPanel } from "../ui.js";
+import { toast, escapeHtml, taskPanel, modal } from "../ui.js";
 
 //: DeepSeek 的「一键预设」。用户自己去找 Base URL 是最容易卡住的一步，
 //: 直接给填好。Key 必须他自己去平台拿——程序碰不到，也不该碰。
@@ -28,7 +28,80 @@ function shot(key) {
   return `<img class="guide-shot" src="${s.src}" alt="${s.alt}" loading="lazy" onerror="this.remove()">`;
 }
 
-export async function renderLLM(root) {
+//: 配置指引正文。整段塞进弹窗里，页面上只留一个入口按钮——
+//: 步骤带截图，展开收起会把表单顶到很下面，弹窗关掉就完事。
+function guideBodyHtml() {
+  return `
+    <ol class="guide-steps">
+      <li>
+        <div class="guide-n">1</div>
+        <div class="guide-body">
+          <b>打开 DeepSeek 开放平台，登录</b>
+          <p>
+            网址
+            <a class="mono" href="${PRESET.site}" target="_blank" rel="noopener">platform.deepseek.com</a>，
+            手机号收验证码或微信扫码都行，没注册过会自动帮你注册。
+            登录后建议顺手做一下<strong>实名认证</strong>，否则建不了 Key。
+          </p>
+          ${shot("login")}
+        </div>
+      </li>
+      <li>
+        <div class="guide-n">2</div>
+        <div class="guide-body">
+          <b>先充一点钱</b>
+          <p>
+            左侧菜单点「<strong>充值</strong>」，充 10 元就够试很久（余额不会过期）。
+            不充值也能建 Key，但一调用就会报「余额不足」。
+          </p>
+          ${shot("recharge")}
+        </div>
+      </li>
+      <li>
+        <div class="guide-n">3</div>
+        <div class="guide-body">
+          <b>建一个 API Key，然后复制走</b>
+          <p>
+            左侧菜单点「<a class="mono" href="${PRESET.keysPage}" target="_blank" rel="noopener">API keys</a>」，
+            再点右上角「<strong>创建 API key</strong>」，随便起个名字（比如「自动投递」）。
+          </p>
+          <p>
+            创建完会弹出一串 <span class="mono">sk-</span> 开头的字符——
+            <strong>这就是钥匙，只显示这一次</strong>，请立刻点「复制」存下来，
+            关掉窗口就再也看不到了（丢了只能删掉重新建一个）。
+          </p>
+          ${shot("keys")}
+          ${shot("copy")}
+        </div>
+      </li>
+      <li>
+        <div class="guide-n">4</div>
+        <div class="guide-body">
+          <b>粘贴到表单里</b>
+          <p>
+            点下面的「<strong>一键填入 DeepSeek 预设</strong>」把接口地址填好（会自动关掉本窗口）→
+            在「API Key」里粘贴刚才复制的那串 →
+            点「<strong>拉取模型</strong>」→ 选中 <span class="mono">${PRESET.model}</span> →
+            点「<strong>保存配置</strong>」。保存后程序会自己测一下通不通。
+          </p>
+        </div>
+      </li>
+    </ol>
+
+    <div class="banner info mb-16">
+      DeepSeek 的页面按钮偶尔会改名字，认准带「API」字样的入口就对了。
+      用别的也行——任何「OpenAI 兼容」的服务（Kimi、通义、本地部署的模型）都是填三个东西：
+      接口地址、Key、模型名。
+    </div>
+
+    <div class="btn-row">
+      <button class="btn primary btn-preset" type="button">一键填入 DeepSeek 预设</button>
+      <a class="btn" href="${PRESET.keysPage}" target="_blank" rel="noopener">去拿 Key（新窗口打开）</a>
+    </div>
+  `;
+}
+
+export async function renderLLM(root, onDirty = () => {}) {
   root.innerHTML = `
     <div class="page-head">
       <div class="page-head-text">
@@ -40,76 +113,13 @@ export async function renderLLM(root) {
     <div class="bento">
       <div class="card span-12" id="guide-card">
         <div class="card-head">
-          <h3 class="card-title">还没有 Key？照着做一次就好</h3>
+          <h3 class="card-title" id="guide-title">还没有 Key？照着做一次就好</h3>
           <span class="card-sub">第一次配置约 3 分钟</span>
-          <button class="btn sm ghost" id="guide-toggle" type="button">收起</button>
         </div>
-
-        <ol class="guide-steps" id="guide-steps">
-          <li>
-            <div class="guide-n">1</div>
-            <div class="guide-body">
-              <b>打开 DeepSeek 开放平台，登录</b>
-              <p>
-                网址
-                <a class="mono" href="${PRESET.site}" target="_blank" rel="noopener">platform.deepseek.com</a>，
-                手机号收验证码或微信扫码都行，没注册过会自动帮你注册。
-                登录后建议顺手做一下<strong>实名认证</strong>，否则建不了 Key。
-              </p>
-              ${shot("login")}
-            </div>
-          </li>
-          <li>
-            <div class="guide-n">2</div>
-            <div class="guide-body">
-              <b>先充一点钱</b>
-              <p>
-                左侧菜单点「<strong>充值</strong>」，充 10 元就够试很久（余额不会过期）。
-                不充值也能建 Key，但一调用就会报「余额不足」。
-              </p>
-              ${shot("recharge")}
-            </div>
-          </li>
-          <li>
-            <div class="guide-n">3</div>
-            <div class="guide-body">
-              <b>建一个 API Key，然后复制走</b>
-              <p>
-                左侧菜单点「<a class="mono" href="${PRESET.keysPage}" target="_blank" rel="noopener">API keys</a>」，
-                再点右上角「<strong>创建 API key</strong>」，随便起个名字（比如「自动投递」）。
-              </p>
-              <p>
-                创建完会弹出一串 <span class="mono">sk-</span> 开头的字符——
-                <strong>这就是钥匙，只显示这一次</strong>，请立刻点「复制」存下来，
-                关掉窗口就再也看不到了（丢了只能删掉重新建一个）。
-              </p>
-              ${shot("keys")}
-              ${shot("copy")}
-            </div>
-          </li>
-          <li>
-            <div class="guide-n">4</div>
-            <div class="guide-body">
-              <b>粘贴到下面的表单里</b>
-              <p>
-                点「<strong>一键填入 DeepSeek 预设</strong>」把接口地址填好 →
-                在「API Key」里粘贴刚才复制的那串 →
-                点「<strong>拉取模型</strong>」→ 选中 <span class="mono">${PRESET.model}</span> →
-                点「<strong>保存配置</strong>」。保存后程序会自己测一下通不通。
-              </p>
-            </div>
-          </li>
-        </ol>
-
-        <div class="banner info mb-16">
-          DeepSeek 的页面按钮偶尔会改名字，认准带「API」字样的入口就对了。
-          用别的也行——任何「OpenAI 兼容」的服务（Kimi、通义、本地部署的模型）都是填三个东西：
-          接口地址、Key、模型名。
-        </div>
-
         <div class="btn-row">
-          <button class="btn primary" id="btn-preset" type="button">一键填入 DeepSeek 预设</button>
-          <a class="btn" href="${PRESET.keysPage}" target="_blank" rel="noopener">去拿 Key（新窗口打开）</a>
+          <button class="btn sm primary btn-preset" id="btn-preset" type="button">一键填入 DeepSeek 预设</button>
+          <a class="btn sm" href="${PRESET.keysPage}" target="_blank" rel="noopener">去拿 Key（新窗口打开）</a>
+          <button class="btn sm" id="guide-open" type="button">查看配置指引</button>
         </div>
       </div>
 
@@ -143,7 +153,7 @@ export async function renderLLM(root) {
         </div>
 
         <div class="banner info mb-16" id="fixed-params">
-          程序已经定好 AI 的生成参数了（温度 0.7 · 最长 2048 字 · 超时 120 秒）。
+          程序已经定好 AI 的生成参数了（温度 0.7 · 通用 2048 tokens · 简历解析 8192 tokens · 人岗匹配 4096 tokens · 超时 120 秒）。
         </div>
 
         <div class="btn-row mb-16">
@@ -197,52 +207,35 @@ export async function renderLLM(root) {
     linkPanel.update({ status: state, percent, current: detail, counts: [] });
   }
 
-  // ---------- 引导卡：已配置过就默认收起，选择记在本地 ----------
-  const GUIDE_KEY = "boss-guide-collapsed";
-
-  function setGuideCollapsed(collapsed) {
-    $("guide-steps").classList.toggle("hidden", collapsed);
-    root.querySelector("#guide-card .banner").classList.toggle("hidden", collapsed);
-    root.querySelector("#guide-card .btn-row").classList.toggle("hidden", collapsed);
-    $("guide-toggle").textContent = collapsed ? "展开" : "收起";
-  }
-
-  $("guide-toggle").addEventListener("click", () => {
-    const next = !$("guide-steps").classList.contains("hidden");
-    collapsed = next ? "1" : "0";
-    setGuideCollapsed(next);
-    try {
-      localStorage.setItem(GUIDE_KEY, collapsed);
-    } catch { /* 隐私模式下写不了，无所谓 */ }
-  });
-
-  let collapsed = null;
-  try {
-    collapsed = localStorage.getItem(GUIDE_KEY);
-  } catch { /* 同上 */ }
-
+  // ---------- 引导：正文进弹窗，页面只留入口按钮 ----------
+  // 配好了只换标题，不再做展开/收起——弹窗自己会关，页面上不需要记状态
   function paintGuide(configured) {
-    // 用户手动选过就听他的
-    if (collapsed !== null) {
-      setGuideCollapsed(collapsed === "1");
-      return;
-    }
-    // 没选过：配好了就自动收起，并把这次决定记下来——不然每次开页面
-    // 都要先展开一大段再收起来，闪一下很难看
-    if (!configured) return;
-    collapsed = "1";
-    setGuideCollapsed(true);
-    try {
-      localStorage.setItem(GUIDE_KEY, "1");
-    } catch { /* 隐私模式下写不了，无所谓 */ }
+    $("guide-title").textContent = configured
+      ? "配置指引"
+      : "还没有 Key？照着做一次就好";
   }
 
-  $("btn-preset").addEventListener("click", () => {
+  /** 一键填入 DeepSeek 预设：填接口地址，光标丢到 Key 框 */
+  function applyPreset() {
     $("base-url").value = PRESET.baseUrl;
+    onDirty(true);
     const key = $("api-key");
     key.focus();
     toast(`已填好 ${PRESET.label} 的接口地址，粘贴 Key 后点「拉取模型」`, "ok");
-  });
+  }
+
+  /** 打开配置指引弹窗。宽一点，截图才看得清 */
+  function openGuide() {
+    const dlg = modal({ title: "API Key 配置指引", body: guideBodyHtml(), wide: true });
+    // 弹窗里也有「一键填入」——先关窗再填，焦点才落到 Key 框上
+    dlg.bodyEl.querySelector(".btn-preset").addEventListener("click", () => {
+      dlg.close();
+      applyPreset();
+    });
+  }
+
+  $("guide-open").addEventListener("click", openGuide);
+  $("btn-preset").addEventListener("click", applyPreset);
 
   function fillModelSelect(selected = "") {
     const sel = $("model");
@@ -262,9 +255,11 @@ export async function renderLLM(root) {
   function setFixedBanner(fixed) {
     const f = fixed || {};
     $("fixed-params").innerHTML =
-      `程序已经定好 AI 的生成参数了（温度 <span class="mono">${f.temperature ?? 0.7}</span> · ` +
-      `最长 <span class="mono">${f.max_tokens ?? 2048}</span> 字 · ` +
-      `超时 <span class="mono">${f.timeout ?? 120}</span> 秒），不用你调。`;
+      `程序已经定好 AI 的生成参数了（temperature ${f.temperature ?? 0.7} · ` +
+      `通用 ${f.max_tokens ?? 2048} tokens · ` +
+      `简历解析 ${f.resume_parse_max_tokens ?? 8192} tokens · ` +
+      `人岗匹配 ${f.match_max_tokens ?? 4096} tokens · ` +
+      `超时 ${f.timeout ?? 120} 秒）。`;
   }
 
   function paintReady(configured, model, baseUrl) {
@@ -339,6 +334,10 @@ export async function renderLLM(root) {
   }
 
   $("btn-models").addEventListener("click", () => fetchModels());
+  ["api-key", "base-url", "model"].forEach((id) => {
+    $(id).addEventListener("input", () => onDirty(true));
+    $(id).addEventListener("change", () => onDirty(true));
+  });
 
   $("btn-save").addEventListener("click", async () => {
     const model = $("model").value.trim();
@@ -358,6 +357,7 @@ export async function renderLLM(root) {
         ? `已保存 Key：${saved.api_key}（留空则不修改）`
         : "还没有保存过 Key";
       $("api-key").value = "";
+      onDirty(false);
       setFixedBanner(saved.fixed);
       paintReady(saved.configured, saved.model, saved.base_url);
       paintGuide(true);

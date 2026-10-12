@@ -62,12 +62,30 @@ class _FakeLLM:
         self.replies = list(replies)
         self.calls = 0
         self.messages = []
+        self.kwargs = []
         self.config = type("C", (), {"model": "fake-model"})()
 
     def chat(self, messages, **kw):
         self.calls += 1
         self.messages.append(messages)
+        self.kwargs.append(kw)
         return self.replies.pop(0) if self.replies else "{}"
+
+
+class _MetadataLLM(_FakeLLM):
+    def __init__(self, replies):
+        super().__init__(replies)
+        self.finish_reasons = []
+
+    def chat_with_metadata(self, messages, **kw):
+        from boss_web.services.llm_client import ChatResult
+
+        self.calls += 1
+        self.messages.append(messages)
+        self.kwargs.append(kw)
+        reply = self.replies.pop(0) if self.replies else "{}"
+        reason = self.finish_reasons.pop(0) if self.finish_reasons else None
+        return ChatResult(reply, reason)
 
 
 def test_parse_resume_llm_ok():
@@ -75,6 +93,9 @@ def test_parse_resume_llm_ok():
     data = parse_resume_llm("简历原文", llm=llm)
     assert data["basic"]["name"] == "A"
     assert llm.calls == 1
+    from boss_web import config as C
+
+    assert llm.kwargs == [{"max_tokens": C.LLM_RESUME_PARSE_MAX_TOKENS}]
 
 
 def test_parse_resume_llm_retries_then_fails():
@@ -91,6 +112,53 @@ def test_parse_resume_llm_retry_succeeds():
     data = parse_resume_llm("简历原文", llm=llm)
     assert data["summary"] == "ok"
     assert llm.calls == 2
+    from boss_web import config as C
+
+    assert llm.kwargs == [
+        {"max_tokens": C.LLM_RESUME_PARSE_MAX_TOKENS},
+        {"max_tokens": C.LLM_RESUME_PARSE_MAX_TOKENS},
+    ]
+
+
+def test_parse_resume_llm_retries_with_higher_limit_after_truncation():
+    from boss_web import config as C
+
+    llm = _MetadataLLM(["{\"summary\": \"partial\"}", json.dumps({"summary": "ok"})])
+    llm.finish_reasons = ["length", "stop"]
+
+    data = parse_resume_llm("简历原文", llm=llm)
+
+    assert data["summary"] == "ok"
+    assert llm.kwargs == [
+        {"max_tokens": C.LLM_RESUME_PARSE_MAX_TOKENS},
+        {"max_tokens": C.LLM_RESUME_PARSE_RETRY_MAX_TOKENS},
+    ]
+
+
+def test_parse_resume_llm_reports_truncation_after_retry():
+    from boss_web import config as C
+
+    llm = _MetadataLLM(["截断的 JSON", "仍然截断"])
+    llm.finish_reasons = ["length", "length"]
+
+    with pytest.raises(ResumeParseError, match="输出达到长度上限"):
+        parse_resume_llm("简历原文", llm=llm)
+
+    assert llm.kwargs == [
+        {"max_tokens": C.LLM_RESUME_PARSE_MAX_TOKENS},
+        {"max_tokens": C.LLM_RESUME_PARSE_RETRY_MAX_TOKENS},
+    ]
+
+
+def test_parse_resume_llm_propagates_upstream_error():
+    from boss_web.errors import UpstreamError
+
+    class FailingLLM(_FakeLLM):
+        def chat_with_metadata(self, messages, **kw):
+            raise UpstreamError("AI 服务暂时不可用")
+
+    with pytest.raises(UpstreamError):
+        parse_resume_llm("简历原文", llm=FailingLLM([]))
 
 
 def test_parse_and_stamp_shape():
@@ -232,6 +300,7 @@ def test_match_one_has_pros_and_cons():
     )
     llm = _FakeLLM(
         [
+            "不是 JSON",
             json.dumps(
                 {
                     "match_score": 85,
@@ -244,7 +313,7 @@ def test_match_one_has_pros_and_cons():
                     "greeting": "你好",
                 },
                 ensure_ascii=False,
-            )
+            ),
         ]
     )
     result = _match_one(llm, "简历摘要", job)
@@ -252,10 +321,47 @@ def test_match_one_has_pros_and_cons():
     assert result["pros"] == ["亮点A"]
     assert result["cons"] == ["短板B"]
     assert result["greeting"] == "你好"
+    from boss_web import config as C
+
+    assert llm.kwargs == [
+        {"max_tokens": C.LLM_MATCH_MAX_TOKENS},
+        {"max_tokens": C.LLM_MATCH_MAX_TOKENS},
+    ]
     prompt = llm.messages[0][1]["content"]
     assert "100 到 150 个字" in prompt
     assert "60 字以内" not in prompt
     assert "负责后端开发" in _job_desc_block(job)
+
+
+def test_legacy_analyzer_uses_match_token_limit():
+    from boss_jobs.models import Job
+    from boss_web.services.resume_analyzer import _analyze_one
+    from boss_web.services.resume_store import ResumeDraft
+    from boss_web import config as C
+
+    job = Job(
+        job_name="Python",
+        brand_name="某公司",
+        location="广州",
+        salary_desc="20-30K",
+        job_experience="3-5年",
+        job_degree="本科",
+        brand_industry="互联网",
+        brand_scale_name="100-499人",
+        encrypt_job_id="j1",
+        job_desc="负责后端开发",
+    )
+    draft = ResumeDraft("rs_x", "简历", "", 1.0, "原文")
+    response = json.dumps({"match_score": 80, "verdict": "合适"}, ensure_ascii=False)
+    llm = _FakeLLM(["非 JSON", response])
+
+    result = _analyze_one(llm, draft, job)
+
+    assert result["match_score"] == 80
+    assert llm.kwargs == [
+        {"max_tokens": C.LLM_MATCH_MAX_TOKENS},
+        {"max_tokens": C.LLM_MATCH_MAX_TOKENS},
+    ]
 
 
 def test_job_desc_fallback_when_missing():

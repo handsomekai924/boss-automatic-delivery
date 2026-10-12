@@ -31,6 +31,7 @@ class SearchFilterBody(BaseModel):
     payType: list[str] = Field(default_factory=list)
     partTime: list[str] = Field(default_factory=list)
     stage: list[str] = Field(default_factory=list)
+    pageSize: int = Field(15, ge=1, le=50)
 
     model_config = {"populate_by_name": True}
 
@@ -65,6 +66,7 @@ def put_search(body: SearchFilterBody) -> dict[str, Any]:
         pay_type=tuple(body.payType),
         part_time=tuple(body.partTime),
         stage=tuple(body.stage),
+        page_size=body.pageSize,
     )
     path = save_search_filter(f)
     return {**_filter_payload(f), "path": str(path)}
@@ -90,6 +92,7 @@ def _filter_payload(f: JobSearchFilter) -> dict[str, Any]:
         "payType": list(f.pay_type),
         "partTime": list(f.part_time),
         "stage": list(f.stage),
+        "pageSize": f.page_size,
         "is_blank": f.is_blank,
         "summary": _summary(f),
     }

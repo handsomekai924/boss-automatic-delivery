@@ -52,14 +52,20 @@ INSERT INTO jobs (
     city_name, area_district, business_district, brand_stage_name,
     job_labels, skills, welfare_list, boss_name, boss_title,
     expect_id, job_type, job_valid_status, security_id, lid,
-    page, raw_json, fetched_at, job_desc, detail_fetched_at
+    page, raw_json, fetched_at, job_desc, detail_fetched_at,
+    jd_status, jd_error, jd_rule_checked, jd_rule_checked_at,
+    is_blacklisted, company_blacklisted, jd_blacklisted, blacklist_types,
+    matched_rule_ids, matched_rule_snapshot, blacklist_checked_at, auto_delivery_blocked
 ) VALUES (
     :encrypt_job_id, :job_name, :brand_name, :location, :salary_desc,
     :job_experience, :job_degree, :brand_industry, :brand_scale_name,
     :city_name, :area_district, :business_district, :brand_stage_name,
     :job_labels, :skills, :welfare_list, :boss_name, :boss_title,
     :expect_id, :job_type, :job_valid_status, :security_id, :lid,
-    :page, :raw_json, :fetched_at, :job_desc, :detail_fetched_at
+    :page, :raw_json, :fetched_at, :job_desc, :detail_fetched_at,
+    :jd_status, :jd_error, :jd_rule_checked, :jd_rule_checked_at,
+    :is_blacklisted, :company_blacklisted, :jd_blacklisted, :blacklist_types,
+    :matched_rule_ids, :matched_rule_snapshot, :blacklist_checked_at, :auto_delivery_blocked
 )
 ON CONFLICT(encrypt_job_id) DO UPDATE SET
     job_name          = excluded.job_name,
@@ -173,7 +179,9 @@ class JobStore:
         return [self.save_page(result) for result in results]
 
     def update_job_desc(
-        self, encrypt_job_id: str, job_desc: str, *, fetched_at: str | None = None
+        self, encrypt_job_id: str, job_desc: str, *, fetched_at: str | None = None,
+        jd_status: str | None = None, jd_error: str = "", jd_rule_checked: bool | None = None,
+        jd_rule_checked_at: str | None = None,
     ) -> bool:
         """把详情接口抓到的 JD 写回一条职位。
 
@@ -181,10 +189,55 @@ class JobStore:
         :return: 有没有真的写到行（职位不在库里 → ``False``）。
         """
         cur = self._conn.execute(
-            "UPDATE jobs SET job_desc = ?, detail_fetched_at = ? WHERE encrypt_job_id = ?",
-            (job_desc or "", fetched_at or _now(), encrypt_job_id),
+            "UPDATE jobs SET job_desc = ?, detail_fetched_at = ?, "
+            "jd_status = COALESCE(?, jd_status), jd_error = ?, "
+            "jd_rule_checked = COALESCE(?, jd_rule_checked), "
+            "jd_rule_checked_at = COALESCE(?, jd_rule_checked_at) "
+            "WHERE encrypt_job_id = ?",
+            (
+                job_desc or "",
+                fetched_at or _now(),
+                jd_status,
+                jd_error or "",
+                None if jd_rule_checked is None else (1 if jd_rule_checked else 0),
+                jd_rule_checked_at,
+                encrypt_job_id,
+            ),
         )
         self._conn.commit()
+        return cur.rowcount > 0
+
+    def update_blacklist_state(
+        self,
+        encrypt_job_id: str,
+        *,
+        company_blacklisted: bool,
+        jd_blacklisted: bool,
+        matched_rules: Sequence[dict[str, Any]],
+        jd_rule_checked: bool,
+        jd_status: str,
+        auto_delivery_blocked: bool,
+        checked_at: str | None = None,
+    ) -> bool:
+        """Persist the current evaluation while keeping historical audit elsewhere."""
+        rule_snapshot = list(matched_rules)
+        types = sorted({str(rule.get("rule_type")) for rule in rule_snapshot if rule.get("rule_type")})
+        conn = self._conn
+        with conn:
+            cur = conn.execute(
+                "UPDATE jobs SET company_blacklisted=?, jd_blacklisted=?, is_blacklisted=?, "
+                "blacklist_types=?, matched_rule_ids=?, matched_rule_snapshot=?, "
+                "blacklist_checked_at=?, jd_rule_checked=?, jd_rule_checked_at=?, jd_status=?, "
+                "auto_delivery_blocked=? WHERE encrypt_job_id=?",
+                (
+                    int(company_blacklisted), int(jd_blacklisted), int(company_blacklisted or jd_blacklisted),
+                    json.dumps(types, ensure_ascii=False),
+                    json.dumps([r.get("rule_id") for r in rule_snapshot], ensure_ascii=False),
+                    json.dumps(rule_snapshot, ensure_ascii=False), checked_at or _now(),
+                    int(jd_rule_checked), checked_at or _now(), jd_status,
+                    int(auto_delivery_blocked), encrypt_job_id,
+                ),
+            )
         return cur.rowcount > 0
 
     # ------------------------------------------------------------------ #
@@ -212,13 +265,23 @@ class JobStore:
         offset: int = 0,
         city: str | None = None,
         keyword: str | None = None,
+        category: str | None = None,
+        jd_status: str | None = None,
+        stable: bool = False,
     ) -> list[Job]:
-        """按最近抓取顺序列职位。``keyword`` 同时匹配岗位名与公司名。"""
+        """按最近抓取顺序列职位。``keyword`` 同时匹配岗位名与公司名。
+
+        ``stable=True`` 时按主键排序：``fetched_at, page`` 不唯一，
+        OFFSET 翻页在并列时顺序会抖，批量扫描（规则重检）要用稳定序。
+        """
         sql = "SELECT * FROM jobs"
-        where, params = _match_where(city=city, keyword=keyword)
+        where, params = _match_where(city=city, keyword=keyword, category=category, jd_status=jd_status)
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY fetched_at DESC, page ASC LIMIT ? OFFSET ?"
+        if stable:
+            sql += " ORDER BY encrypt_job_id ASC LIMIT ? OFFSET ?"
+        else:
+            sql += " ORDER BY fetched_at DESC, page ASC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_job(row) for row in rows]
@@ -235,10 +298,14 @@ class JobStore:
         *,
         city: str | None = None,
         keyword: str | None = None,
+        category: str | None = None,
+        jd_status: str | None = None,
     ) -> int:
         """按 :meth:`list_jobs` 同款条件数职位，翻页前先看总数。"""
         sql = "SELECT COUNT(*) AS n FROM jobs"
-        where, params = _match_where(city=city, keyword=keyword)
+        where, params = _match_where(
+            city=city, keyword=keyword, category=category, jd_status=jd_status
+        )
         if where:
             sql += " WHERE " + " AND ".join(where)
         row = self._conn.execute(sql, params).fetchone()
@@ -362,6 +429,8 @@ def _match_where(
     *,
     city: str | None = None,
     keyword: str | None = None,
+    category: str | None = None,
+    jd_status: str | None = None,
 ) -> tuple[list[str], list[Any]]:
     """``list_jobs`` / ``delete_*`` 共用的 WHERE 片段。"""
     where: list[str] = []
@@ -372,6 +441,21 @@ def _match_where(
     if keyword:
         where.append("(job_name LIKE ? OR brand_name LIKE ?)")
         params.extend([f"%{keyword}%", f"%{keyword}%"])
+    if category == "ordinary":
+        where.append("is_blacklisted = 0")
+    elif category == "company_blacklisted":
+        where.append("company_blacklisted = 1 AND jd_blacklisted = 0")
+    elif category == "jd_blacklisted":
+        where.append("jd_blacklisted = 1 AND company_blacklisted = 0")
+    elif category == "both":
+        where.append("company_blacklisted = 1 AND jd_blacklisted = 1")
+    elif category == "jd_not_collected":
+        where.append("jd_status IN ('pending', 'collecting', 'unchecked')")
+    elif category == "jd_failed":
+        where.append("jd_status = 'failed'")
+    if jd_status:
+        where.append("jd_status = ?")
+        params.append(jd_status)
     return where, params
 
 
@@ -383,6 +467,18 @@ def _job_params(job: Job, fetched_at: str) -> dict[str, Any]:
     params["fetched_at"] = fetched_at
     params["job_desc"] = job.job_desc
     params["detail_fetched_at"] = job.detail_fetched_at
+    params["jd_status"] = job.jd_status
+    params["jd_error"] = job.jd_error
+    params["jd_rule_checked"] = int(job.jd_rule_checked)
+    params["jd_rule_checked_at"] = job.jd_rule_checked_at
+    params["is_blacklisted"] = int(job.is_blacklisted)
+    params["company_blacklisted"] = int(job.company_blacklisted)
+    params["jd_blacklisted"] = int(job.jd_blacklisted)
+    params["blacklist_types"] = json.dumps(list(job.blacklist_types), ensure_ascii=False)
+    params["matched_rule_ids"] = json.dumps(list(job.matched_rule_ids), ensure_ascii=False)
+    params["matched_rule_snapshot"] = json.dumps(list(job.matched_rule_snapshot), ensure_ascii=False)
+    params["blacklist_checked_at"] = job.blacklist_checked_at
+    params["auto_delivery_blocked"] = int(job.auto_delivery_blocked)
     return params
 
 
@@ -416,6 +512,18 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         page=int(data.get("page") or 0),
         job_desc=data.get("job_desc") or "",
         detail_fetched_at=data.get("detail_fetched_at") or "",
+        jd_status=data.get("jd_status") or ("completed" if data.get("detail_fetched_at") and data.get("job_desc") else "pending"),
+        jd_error=data.get("jd_error") or "",
+        jd_rule_checked=bool(data.get("jd_rule_checked")),
+        jd_rule_checked_at=data.get("jd_rule_checked_at") or "",
+        is_blacklisted=bool(data.get("is_blacklisted")),
+        company_blacklisted=bool(data.get("company_blacklisted")),
+        jd_blacklisted=bool(data.get("jd_blacklisted")),
+        blacklist_types=_json_tuple(data.get("blacklist_types")),
+        matched_rule_ids=_json_tuple(data.get("matched_rule_ids")),
+        matched_rule_snapshot=_json_dict_tuple(data.get("matched_rule_snapshot")),
+        blacklist_checked_at=data.get("blacklist_checked_at") or "",
+        auto_delivery_blocked=bool(data.get("auto_delivery_blocked", 1)),
     )
 
 
@@ -429,6 +537,18 @@ def _json_tuple(raw: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(str(item) for item in value)
+
+
+def _json_dict_tuple(raw: Any) -> tuple[dict[str, Any], ...]:
+    if not raw:
+        return ()
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, dict))
 
 
 def _now() -> str:

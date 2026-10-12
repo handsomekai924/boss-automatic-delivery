@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -28,7 +28,11 @@ class ConfigBody(BaseModel):
 
 class DeliverBody(BaseModel):
     analysis_id: str
-    #: 要发送的岗位：单条 = 1 个，多条 = 勾选的 N 个，一键 = 全部目标
+    #: 模式必须显式传入；未声明模式的旧客户端按 selected 处理，不能获得 all 权限。
+    mode: Literal["all", "selected", "manual"] = "selected"
+    #: 受限职位在 selected/manual 模式下需要显式确认。
+    confirmed: bool = False
+    confirmation_token: str = ""
     encrypt_job_ids: list[str] = Field(default_factory=list)
 
 
@@ -47,7 +51,11 @@ def start(body: DeliverBody) -> dict[str, Any]:
     if not body.encrypt_job_ids:
         raise ValidationWebError("没有要发送的岗位")
     task = deliver_tasks.start(
-        analysis_id=body.analysis_id, job_ids=body.encrypt_job_ids
+        analysis_id=body.analysis_id,
+        job_ids=body.encrypt_job_ids,
+        mode=body.mode,
+        confirmed=body.confirmed,
+        confirmation_token=body.confirmation_token,
     )
     return task.snapshot()
 

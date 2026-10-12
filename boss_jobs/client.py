@@ -15,7 +15,7 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -39,6 +39,36 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class CrawlBlacklistContext:
+    """Immutable rule view supplied by the web crawl task.
+
+    The jobs client deliberately knows nothing about the web application's rule
+    tables.  Callbacks return serialisable match snapshots; the client owns the
+    ordering of company-before-detail and JD-after-detail decisions.
+    """
+
+    task_id: str = ""
+    store_blacklisted: bool = True
+    has_jd_rules: bool = False
+    #: JD 规则的匹配范围（``job_name`` / ``job_desc`` / ``both``）。
+    #: 旧调用方可省略，此时按 ``both`` 处理（需要 JD 正文才能算检查完成）。
+    jd_scopes: tuple[str, ...] = ()
+    company_matches: Callable[[Any], list[dict[str, Any]]] | None = None
+    jd_matches: Callable[[Any, str], list[dict[str, Any]]] | None = None
+    record_hit: Callable[..., None] | None = None
+
+
+def _jd_scope_flags(context: "CrawlBlacklistContext | None") -> tuple[bool, bool]:
+    """``(can_check_name, requires_desc)``：按规则 scope 判断这轮能不能检查 JD。"""
+    if context is None or not context.has_jd_rules:
+        return False, False
+    scopes = set(context.jd_scopes or ()) or {"both"}
+    can_check_name = bool(scopes & {"job_name", "both"})
+    requires_desc = bool(scopes & {"job_desc", "both"})
+    return can_check_name, requires_desc
+
+
+@dataclass(frozen=True)
 class CrawlStats:
     """一次翻页抓取的累计结果。"""
 
@@ -49,9 +79,13 @@ class CrawlStats:
     dropped_count: int = 0
     inserted: int = 0
     updated: int = 0
+    skipped: int = 0
+    company_hits: int = 0
+    jd_hits: int = 0
     stopped_reason: str = ""
 
-    def add(self, result: PageResult, outcome: SaveOutcome) -> "CrawlStats":
+    def add(self, result: PageResult, outcome: SaveOutcome, *, skipped: int = 0,
+            company_hits: int = 0, jd_hits: int = 0) -> "CrawlStats":
         return CrawlStats(
             run_id=self.run_id,
             pages=self.pages + 1,
@@ -60,6 +94,9 @@ class CrawlStats:
             dropped_count=self.dropped_count + result.dropped_count,
             inserted=self.inserted + outcome.inserted,
             updated=self.updated + outcome.updated,
+            skipped=self.skipped + skipped,
+            company_hits=self.company_hits + company_hits,
+            jd_hits=self.jd_hits + jd_hits,
             stopped_reason=self.stopped_reason,
         )
 
@@ -72,6 +109,9 @@ class CrawlStats:
             dropped_count=self.dropped_count,
             inserted=self.inserted,
             updated=self.updated,
+            skipped=self.skipped,
+            company_hits=self.company_hits,
+            jd_hits=self.jd_hits,
             stopped_reason=reason,
         )
 
@@ -81,7 +121,8 @@ class CrawlStats:
             f"抓取页数  {self.pages}",
             f"接口条数  {self.raw_count}",
             f"洗后条数  {self.kept_count}（丢弃 {self.dropped_count}）",
-            f"入库条数  新增 {self.inserted} / 更新 {self.updated}",
+            f"入库条数  新增 {self.inserted} / 更新 {self.updated} / 跳过 {self.skipped}",
+            f"黑名单命中  公司 {self.company_hits} / JD {self.jd_hits}",
             f"停止原因  {self.stopped_reason or '（未记录）'}",
         ]
 
@@ -809,6 +850,7 @@ class JobClient:
         should_stop: Callable[[], bool] | None = None,
         enrich_details: bool = False,
         detail_interval: float | None = None,
+        blacklist_context: CrawlBlacklistContext | None = None,
     ) -> CrawlReport:
         """分页抓取职位，**每页即时清洗入库**，页与页之间硬睡一会。
 
@@ -885,20 +927,140 @@ class JobClient:
                     result = self.fetch_search_page(search_filter, page=page)
                 else:
                     result = self.fetch_page_clean(page)
-                outcome = store.save_page(result)
-                report.pages.append(result)
-                stats = stats.add(result, outcome)
-                report.stats = stats
-                _push(result, outcome)
+                if blacklist_context is None:
+                    # Preserve the established ordinary crawl contract: persist
+                    # the list page first, then enrich its already-stored rows.
+                    outcome = store.save_page(result)
+                    report.pages.append(result)
+                    stats = stats.add(result, outcome)
+                    report.stats = stats
+                    _push(result, outcome)
+                    if enrich_details:
+                        self._enrich_page_details(
+                            result, store=store, interval=detail_gap,
+                            on_detail=_push_detail, should_stop=should_stop,
+                        )
+                else:
+                    company_hits: list[dict[str, Any]] = []
+                    candidates = []
+                    skipped_ids: set[str] = set()
+                    for job in result.jobs:
+                        hits = blacklist_context.company_matches(job) if blacklist_context.company_matches else []
+                        company_hits.extend(hits)
+                        if hits and not blacklist_context.store_blacklisted:
+                            skipped_ids.add(job.encrypt_job_id)
+                            for hit in hits:
+                                if blacklist_context.record_hit:
+                                    blacklist_context.record_hit(job, hit, action="skipped", jd_status="unchecked")
+                            _push_detail({"event": "company_blacklist_skipped", "encrypt_job_id": job.encrypt_job_id,
+                                          "job_name": job.job_name, "brand_name": job.brand_name})
+                            continue
+                        if hits:
+                            # 入库并标记：命中要进审计流水（action=stored），后面 save/汇总都用本轮结果
+                            for h in hits:
+                                if blacklist_context.record_hit:
+                                    blacklist_context.record_hit(
+                                        job, h, action="stored",
+                                        jd_status=str(job.jd_status or "pending"),
+                                    )
+                            job = replace(
+                                job,
+                                company_blacklisted=True,
+                                is_blacklisted=True,
+                                blacklist_types=tuple(sorted(set(job.blacklist_types + ("company",)))),
+                                matched_rule_ids=tuple(str(h.get("rule_id") or "") for h in hits),
+                                matched_rule_snapshot=tuple(hits),
+                                auto_delivery_blocked=True,
+                            )
+                        candidates.append(job)
 
-                if enrich_details:
-                    self._enrich_page_details(
-                        result,
-                        store=store,
-                        interval=detail_gap,
-                        on_detail=_push_detail,
-                        should_stop=should_stop,
+                    page_result = PageResult(
+                        page=result.page, jobs=tuple(candidates), has_more=result.has_more,
+                        raw_count=result.raw_count, dropped=result.dropped, lid=result.lid,
                     )
+                    jd_hits = 0
+                    if enrich_details:
+                        page_result, jd_hits = self._enrich_page_details(
+                            page_result, store=store, interval=detail_gap, on_detail=_push_detail,
+                            should_stop=should_stop, blacklist_context=blacklist_context,
+                        )
+                    else:
+                        # 不补 JD 时也要落完整安全快照：未查完的规则/缺公司名保守拦自动投递。
+                        # 纯名称规则不依赖正文，这里就地查；需要正文的规则只能标「未检查」。
+                        can_check_name, requires_desc = _jd_scope_flags(blacklist_context)
+                        has_jd_rules = bool(blacklist_context.has_jd_rules)
+                        name_only = has_jd_rules and can_check_name and not requires_desc
+                        checked = (not has_jd_rules) or name_only
+                        finalized = []
+                        for j in page_result.jobs:
+                            name_hits: list[dict[str, Any]] = []
+                            if name_only and blacklist_context.jd_matches:
+                                name_hits = blacklist_context.jd_matches(j, "")
+                            for h in name_hits:
+                                if blacklist_context.record_hit:
+                                    blacklist_context.record_hit(
+                                        j, h,
+                                        action="skipped" if not blacklist_context.store_blacklisted else "stored",
+                                        jd_status="unchecked",
+                                    )
+                                jd_hits += 1
+                            if name_hits and not blacklist_context.store_blacklisted:
+                                continue
+                            missing_company = not str(j.brand_name or "").strip()
+                            if name_hits:
+                                # 公司命中可能已先落过快照，这里合并而不是覆盖
+                                prior = tuple(j.matched_rule_snapshot or ())
+                                merged = prior + tuple(hits for hits in name_hits if hits not in prior)
+                                j = replace(
+                                    j,
+                                    jd_blacklisted=True,
+                                    is_blacklisted=True,
+                                    blacklist_types=tuple(sorted(set(j.blacklist_types + ("jd_keyword",)))),
+                                    matched_rule_ids=tuple(str(h.get("rule_id") or "") for h in merged),
+                                    matched_rule_snapshot=merged,
+                                )
+                            # Job.from_api 的默认值是 pending；有规则却查不了时改记 unchecked
+                            if has_jd_rules and not checked:
+                                next_status = "unchecked"
+                            else:
+                                next_status = j.jd_status or ("unchecked" if has_jd_rules else "pending")
+                            j = replace(
+                                j,
+                                jd_status=next_status,
+                                jd_rule_checked=checked,
+                                auto_delivery_blocked=bool(
+                                    j.company_blacklisted
+                                    or j.jd_blacklisted
+                                    or missing_company
+                                    or (has_jd_rules and not checked)
+                                ),
+                            )
+                            finalized.append(j)
+                        page_result = PageResult(
+                            page=page_result.page,
+                            jobs=tuple(finalized),
+                            has_more=page_result.has_more, raw_count=page_result.raw_count,
+                            dropped=page_result.dropped, lid=page_result.lid,
+                        )
+
+                    outcome = store.save_page(page_result)
+                    # UPSERT 故意不覆盖安全列；这里按本轮评估显式回写，重抓才能刷新旧状态
+                    for job in page_result.jobs:
+                        store.update_blacklist_state(
+                            job.encrypt_job_id,
+                            company_blacklisted=bool(job.company_blacklisted),
+                            jd_blacklisted=bool(job.jd_blacklisted),
+                            matched_rules=[dict(rule) for rule in job.matched_rule_snapshot],
+                            jd_rule_checked=bool(job.jd_rule_checked),
+                            jd_status=str(job.jd_status or "pending"),
+                            auto_delivery_blocked=bool(job.auto_delivery_blocked),
+                            checked_at=job.blacklist_checked_at or None,
+                        )
+                    report.pages.append(page_result)
+                    stats = stats.add(result, outcome, skipped=len(skipped_ids),
+                                      company_hits=len(company_hits), jd_hits=jd_hits)
+                    report.stats = stats
+                    _push(result, outcome, {"skipped": len(skipped_ids), "company_hits": len(company_hits), "jd_hits": jd_hits})
 
                 if result.is_empty:
                     reason = f"第 {page} 页接口回空列表"
@@ -933,100 +1095,214 @@ class JobClient:
         interval: float = C.DETAIL_INTERVAL,
         on_detail: Callable[[dict[str, Any]], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
-    ) -> None:
-        """一页入库后顺带把 JD 补上。
-
-        **已经有描述的不再重复拉**（重抓一页时尤其重要：已有 JD 的不该再打
-        一遍详情接口）。只对 ``detail_fetched_at`` 还空着的补。
-
-        **单条失败不拖垮列表抓取**：只发一条 ``detail_error`` 事件就下一条。
-        描述抓到了也立刻 ``update_job_desc`` 落库，中途断了不丢。
-
-        撞安全网关 code 37 时按 :data:`config.BROWSER_CHECK_COOLOFF` 多躺一会儿
-        再碰下一条（限速墙抬手前别拿它探墙）；**连续**
-        :data:`config.BROWSER_CHECK_GIVEUP` 次就停掉本页补 JD，列表抓取本身
-        照常走。
-        """
+        blacklist_context: CrawlBlacklistContext | None = None,
+    ) -> tuple[PageResult, int]:
+        """Fetch details and evaluate JD rules before the page is persisted."""
         def _emit(payload: dict[str, Any]) -> None:
             if on_detail is not None:
                 on_detail(payload)
 
         already = store.fetched_desc_ids([job.encrypt_job_id for job in result.jobs])
-        todo = [job for job in result.jobs if job.encrypt_job_id not in already]
-        if already:
-            logger.debug(
-                "本页 %d 条里 %d 条已有描述，跳过；只补剩下 %d 条",
-                len(result.jobs),
-                len(already),
-                len(todo),
-            )
-
         done = 0
         consecutive_37 = 0
-        for job in result.jobs:
+        kept: list[Any] = []
+        jd_hit_count = 0
+        for index, job in enumerate(result.jobs):
+            existing = store.get_job(job.encrypt_job_id)
             if job.encrypt_job_id in already:
-                _emit(
-                    {
-                        "event": "detail_skipped",
-                        "encrypt_job_id": job.encrypt_job_id,
-                        "job_name": job.job_name,
-                        "reason": "已有描述",
-                    }
+                # The list endpoint is not authoritative for JD or blacklist state.
+                job = replace(
+                    job,
+                    job_desc=existing.job_desc if existing else job.job_desc,
+                    detail_fetched_at=existing.detail_fetched_at if existing else job.detail_fetched_at,
+                    jd_status=existing.jd_status if existing else job.jd_status,
+                    jd_error=existing.jd_error if existing else job.jd_error,
+                    jd_rule_checked=existing.jd_rule_checked if existing else job.jd_rule_checked,
+                    jd_rule_checked_at=existing.jd_rule_checked_at if existing else job.jd_rule_checked_at,
+                    is_blacklisted=existing.is_blacklisted if existing else job.is_blacklisted,
+                    company_blacklisted=existing.company_blacklisted if existing else job.company_blacklisted,
+                    jd_blacklisted=existing.jd_blacklisted if existing else job.jd_blacklisted,
+                    blacklist_types=existing.blacklist_types if existing else job.blacklist_types,
+                    matched_rule_ids=existing.matched_rule_ids if existing else job.matched_rule_ids,
+                    matched_rule_snapshot=existing.matched_rule_snapshot if existing else job.matched_rule_snapshot,
+                    blacklist_checked_at=existing.blacklist_checked_at if existing else job.blacklist_checked_at,
+                    auto_delivery_blocked=existing.auto_delivery_blocked if existing else job.auto_delivery_blocked,
                 )
-                continue
-            if should_stop is not None and should_stop():
+                _emit({"event": "detail_skipped", "encrypt_job_id": job.encrypt_job_id,
+                       "job_name": job.job_name, "reason": "已有详情"})
+                if blacklist_context and blacklist_context.has_jd_rules and blacklist_context.jd_matches:
+                    can_check_name, requires_desc = _jd_scope_flags(blacklist_context)
+                    can_check_desc = bool(job.job_desc) and requires_desc
+                    can_check_jd = can_check_name or can_check_desc
+                    checked = bool(job.job_desc) or (can_check_name and not requires_desc)
+                    hits = (
+                        blacklist_context.jd_matches(job, job.job_desc or "")
+                        if can_check_jd
+                        else []
+                    )
+                    # 本轮规则结果覆盖旧 jd_keyword 快照：规则删了/不再命中要清掉
+                    if hits:
+                        job = replace(
+                            job,
+                            jd_blacklisted=True,
+                            is_blacklisted=True,
+                            blacklist_types=tuple(sorted(set(job.blacklist_types + ("jd_keyword",)))),
+                            matched_rule_ids=tuple(str(h.get("rule_id") or "") for h in hits),
+                            matched_rule_snapshot=tuple(hits),
+                            auto_delivery_blocked=True,
+                            jd_rule_checked=checked,
+                        )
+                        for hit in hits:
+                            if blacklist_context.record_hit:
+                                blacklist_context.record_hit(
+                                    job, hit, action="skipped" if not blacklist_context.store_blacklisted else "stored",
+                                    jd_status=job.jd_status,
+                                )
+                        jd_hit_count += len(hits)
+                    else:
+                        job = replace(
+                            job,
+                            jd_blacklisted=False,
+                            is_blacklisted=bool(job.company_blacklisted),
+                            blacklist_types=tuple(t for t in job.blacklist_types if t != "jd_keyword"),
+                            matched_rule_ids=tuple(
+                                rid for rid, snap in zip(job.matched_rule_ids, job.matched_rule_snapshot)
+                                if snap.get("rule_type") != "jd_keyword"
+                            ) if job.matched_rule_ids else (),
+                            matched_rule_snapshot=tuple(
+                                snap for snap in job.matched_rule_snapshot
+                                if snap.get("rule_type") != "jd_keyword"
+                            ),
+                            jd_rule_checked=checked,
+                            auto_delivery_blocked=bool(
+                                job.company_blacklisted or not checked or not str(job.brand_name or "").strip()
+                            ),
+                        )
+
+            elif should_stop is not None and should_stop():
+                job = replace(job, jd_status="pending", auto_delivery_blocked=True)
                 _emit({"event": "detail_stopped", "reason": "收到停止信号"})
-                return
-            try:
-                detail = self.fetch_job_detail(
-                    security_id=job.security_id, lid=job.lid
-                )
-            except Exception as exc:  # noqa: BLE001 - 详情失败不拖垮列表抓取
-                logger.warning(
-                    "补抓 JD 失败 %s / %s：%s", job.encrypt_job_id, job.job_name, exc
-                )
-                _emit(
-                    {
-                        "event": "detail_error",
-                        "encrypt_job_id": job.encrypt_job_id,
-                        "job_name": job.job_name,
-                        "message": str(exc),
-                    }
-                )
-                if isinstance(exc, JobApiError) and exc.is_browser_check:
-                    consecutive_37 += 1
-                    if consecutive_37 >= C.BROWSER_CHECK_GIVEUP:
-                        logger.warning(
-                            "连续 %d 次撞安全网关 code 37，本页补 JD 停手；"
-                            "过几分钟再试（别在这时候继续砸）",
-                            consecutive_37,
-                        )
-                        _emit(
-                            {
-                                "event": "detail_stopped",
-                                "reason": (
-                                    f"连续 {consecutive_37} 次撞安全网关 code 37，"
-                                    "已停补 JD；过几分钟再试"
-                                ),
-                            }
-                        )
-                        return
-                    self._sleep(C.BROWSER_CHECK_COOLOFF)
             else:
-                consecutive_37 = 0
-                store.update_job_desc(job.encrypt_job_id, detail.job_desc)
-                _emit(
-                    {
-                        "event": "detail_done",
-                        "encrypt_job_id": job.encrypt_job_id,
-                        "job_name": job.job_name,
-                        "has_desc": detail.has_desc,
-                        "desc_len": len(detail.job_desc),
-                    }
-                )
-            done += 1
-            if interval > 0 and done < len(todo):
-                self._sleep(interval)
+                try:
+                    detail = self.fetch_job_detail(security_id=job.security_id, lid=job.lid)
+                except Exception as exc:  # noqa: BLE001 - 详情失败不拖垮列表抓取
+                    logger.warning("补抓 JD 失败 %s / %s：%s", job.encrypt_job_id, job.job_name, exc)
+                    failed_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                    job = replace(
+                        job,
+                        jd_status="failed",
+                        jd_error=str(exc),
+                        detail_fetched_at=failed_at,
+                        jd_rule_checked=False,
+                        auto_delivery_blocked=True,
+                    )
+                    # Persist immediately for the legacy save-before-enrich path.
+                    # For a blacklist crawl the candidate may not exist yet; its
+                    # complete state is written by the later filtered save_page.
+                    store.update_job_desc(
+                        job.encrypt_job_id,
+                        "",
+                        fetched_at=failed_at,
+                        jd_status="failed",
+                        jd_error=str(exc),
+                        jd_rule_checked=False,
+                        jd_rule_checked_at="",
+                    )
+                    _emit({"event": "detail_error", "encrypt_job_id": job.encrypt_job_id,
+                           "job_name": job.job_name, "message": str(exc)})
+                    if isinstance(exc, JobApiError) and exc.is_browser_check:
+                        consecutive_37 += 1
+                        if consecutive_37 >= C.BROWSER_CHECK_GIVEUP:
+                            _emit({"event": "detail_stopped", "reason": f"连续 {consecutive_37} 次撞安全网关 code 37，已停补 JD"})
+                            # Mark remaining candidates as incomplete without more requests.
+                            kept.append(job)
+                            kept.extend(replace(rest, jd_status="pending", auto_delivery_blocked=True)
+                                        for rest in result.jobs[index + 1:])
+                            break
+                        self._sleep(C.BROWSER_CHECK_COOLOFF)
+                else:
+                    consecutive_37 = 0
+                    can_check_name, requires_desc = _jd_scope_flags(blacklist_context)
+                    can_check_desc = bool(detail.job_desc) and requires_desc
+                    can_check_jd = can_check_name or can_check_desc
+                    has_jd_rules = bool(blacklist_context and blacklist_context.has_jd_rules)
+                    # 无 JD 规则 → 无需检查；有规则时：有正文可全查，或纯名称规则不需要正文
+                    checked = (not has_jd_rules) or bool(detail.job_desc) or (can_check_name and not requires_desc)
+                    jd_status = "completed" if detail.job_desc else "empty"
+                    job = replace(job, job_desc=detail.job_desc, detail_fetched_at=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), jd_status=jd_status,
+                                  jd_error="", jd_rule_checked=checked,
+                                  auto_delivery_blocked=bool(has_jd_rules and not checked))
+                    store.update_job_desc(
+                        job.encrypt_job_id,
+                        detail.job_desc,
+                        fetched_at=job.detail_fetched_at,
+                        jd_status=jd_status,
+                        jd_error="",
+                        jd_rule_checked=checked,
+                        jd_rule_checked_at=job.detail_fetched_at if checked else "",
+                    )
+                    if can_check_jd and blacklist_context and blacklist_context.jd_matches:
+                        hits = blacklist_context.jd_matches(job, detail.job_desc or "")
+                        if hits:
+                            jd_hit_count += len(hits)
+                            job = replace(job, jd_blacklisted=True, is_blacklisted=True,
+                                          blacklist_types=tuple(sorted(set(job.blacklist_types + ("jd_keyword",)))),
+                                          matched_rule_ids=tuple(str(h.get("rule_id") or "") for h in hits),
+                                          matched_rule_snapshot=tuple(hits), auto_delivery_blocked=True)
+                            for hit in hits:
+                                if blacklist_context.record_hit:
+                                    blacklist_context.record_hit(job, hit, action="skipped" if not blacklist_context.store_blacklisted else "stored",
+                                                                jd_status=jd_status)
+                            _emit({"event": "jd_blacklist_hit", "encrypt_job_id": job.encrypt_job_id,
+                                   "job_name": job.job_name, "stored": blacklist_context.store_blacklisted})
+                    _emit({"event": "detail_done", "encrypt_job_id": job.encrypt_job_id,
+                           "job_name": job.job_name, "has_desc": bool(detail.job_desc),
+                           "jd_status": jd_status, "desc_len": len(detail.job_desc)})
+                done += 1
+                if interval > 0 and done < len(result.jobs):
+                    self._sleep(interval)
+
+            # 公司命中只认本轮规则结果，不沿用库里旧快照（规则删了要能翻案）
+            company_hits: list[dict[str, Any]] = []
+            if blacklist_context and blacklist_context.company_matches:
+                company_hits = blacklist_context.company_matches(job)
+            has_jd_rules = bool(blacklist_context and blacklist_context.has_jd_rules)
+            # JD 命中同理：本轮有 JD 规则才认快照里的 jd_keyword，否则清掉陈旧命中
+            jd_hits_now = (
+                [dict(hit) for hit in job.matched_rule_snapshot if hit.get("rule_type") == "jd_keyword"]
+                if has_jd_rules
+                else []
+            )
+            matched_rules = company_hits + jd_hits_now
+            company_blacklisted = bool(company_hits)
+            jd_blacklisted = bool(jd_hits_now)
+            types = {str(h.get("rule_type")) for h in matched_rules if h.get("rule_type")}
+            checked_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            can_check_name, requires_desc = _jd_scope_flags(blacklist_context)
+            checked = (not has_jd_rules) or bool(job.job_desc) or (can_check_name and not requires_desc)
+            requires_jd = has_jd_rules
+            # 公司名缺失无法确认安全，保守拦自动投递（不算命中）
+            missing_company = not str(job.brand_name or "").strip()
+            blocked = bool(
+                company_blacklisted
+                or jd_blacklisted
+                or missing_company
+                or (requires_jd and not checked)
+                or (requires_jd and job.jd_status in {"failed", "pending", "collecting", "unchecked"})
+            )
+            job = replace(job, company_blacklisted=company_blacklisted, jd_blacklisted=jd_blacklisted,
+                          is_blacklisted=company_blacklisted or jd_blacklisted,
+                          blacklist_types=tuple(sorted(types)),
+                          matched_rule_ids=tuple(str(h.get("rule_id") or "") for h in matched_rules),
+                          matched_rule_snapshot=tuple(matched_rules), blacklist_checked_at=checked_at,
+                          jd_rule_checked=checked, jd_rule_checked_at=checked_at if checked else "",
+                          auto_delivery_blocked=blocked)
+            if jd_blacklisted and blacklist_context and not blacklist_context.store_blacklisted:
+                continue
+            kept.append(job)
+
+        return PageResult(page=result.page, jobs=tuple(kept), has_more=result.has_more,
+                          raw_count=result.raw_count, dropped=result.dropped, lid=result.lid), jd_hit_count
 
     def iter_pages(
         self,
@@ -1117,6 +1393,9 @@ class JobClient:
             except ValueError as exc:
                 last_error = JobTransportError(f"{action or path} 响应不是 JSON：{exc}")
                 continue
+
+            if path == self.endpoints.get("friend_add"):
+                print(f"新建会话原始响应：{payload}", flush=True)
 
             if not isinstance(payload, dict):
                 last_error = JobDataError(f"{action or path} 响应不是 JSON 对象")

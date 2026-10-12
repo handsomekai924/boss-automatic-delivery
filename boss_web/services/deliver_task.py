@@ -44,7 +44,7 @@ from boss_jobs.config import (
 from boss_jobs.errors import ChatSendError, JobApiError
 from boss_jobs.store import JobStore
 
-from ..errors import ConflictError, NotFoundError
+from ..errors import ConflictError, NotFoundError, ValidationWebError
 from .resume_store import (
     DELIVER_FAILED,
     DELIVER_OK,
@@ -52,6 +52,7 @@ from .resume_store import (
     load_analysis,
     update_delivery,
 )
+from .deliver_config_store import load_config as load_deliver_config
 from .troubleshoot import humanize
 
 logger = logging.getLogger(__name__)
@@ -61,15 +62,63 @@ ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
 
-#: 发送状态里「这条跳过了」（已发送过）
+#: Any safety field marks a current-format match snapshot.
+_SAFETY_FIELDS = (
+    "is_blacklisted", "company_blacklisted", "jd_blacklisted", "jd_rule_checked",
+    "jd_status", "auto_delivery_blocked", "matched_rule_snapshot",
+)
+
+
+def _has_safety_snapshot(item: dict[str, Any]) -> bool:
+    # 必须字段齐全才算有安全快照；缺字段的旧分析不能进自动投递
+    return all(key in item for key in _SAFETY_FIELDS)
+
+
+def _delivery_restriction(item: dict[str, Any], *, automatic: bool = False) -> str:
+    """Return a stable reason from the immutable match-time safety snapshot.
+
+    Legacy analyses can still be explicitly sent by a user-selected request for
+    backwards compatibility, but they are never eligible for automatic/all send.
+    """
+    if not _has_safety_snapshot(item):
+        return "缺少匹配时职位安全快照" if automatic else ""
+    if item.get("company_blacklisted"):
+        return "公司黑名单职位"
+    if item.get("jd_blacklisted"):
+        return "JD 关键词黑名单职位"
+    if not item.get("jd_rule_checked", False):
+        return "JD 规则未检查"
+    if str(item.get("jd_status") or "") in {"failed", "pending", "collecting", "unchecked"}:
+        return "JD 状态不完整"
+    if item.get("auto_delivery_blocked"):
+        return "职位状态不完整，禁止自动投递"
+    return ""
+
+
+def _all_restriction(item: dict[str, Any]) -> str:
+    """Return reasons that an automatic/all batch must never send."""
+    return _delivery_restriction(item, automatic=True) or (
+        "没有招呼语正文" if not str(item.get("greeting") or "").strip() else ""
+    )
+
+
 ITEM_SKIPPED = "skipped"
-
-
 class DeliverTask:
-    def __init__(self, analysis_id: str, job_ids: Sequence[str]) -> None:
+    def __init__(
+        self,
+        analysis_id: str,
+        job_ids: Sequence[str],
+        *,
+        mode: str = "selected",
+        confirmed: bool = False,
+        confirmation_token: str = "",
+    ) -> None:
         self.task_id = "dv_" + uuid.uuid4().hex[:10]
         self.analysis_id = analysis_id
         self.job_ids = list(job_ids)
+        self.mode = mode
+        self.confirmed = bool(confirmed)
+        self.confirmation_token = confirmation_token
         self.status = ST_RUNNING
         self.created_at = time.time()
         self.ended_at: float | None = None
@@ -118,6 +167,9 @@ class DeliverTask:
                 "task_id": self.task_id,
                 "analysis_id": self.analysis_id,
                 "status": self.status,
+                "mode": self.mode,
+                "confirmed": self.confirmed,
+                "confirmation_token": self.confirmation_token,
                 "created_at": self.created_at,
                 "ended_at": self.ended_at,
                 "error": self.error,
@@ -165,11 +217,27 @@ class DeliverTaskManager:
             raise NotFoundError(f"发送任务不存在：{task_id}")
         return task.snapshot()
 
-    def start(self, *, analysis_id: str, job_ids: Sequence[str]) -> DeliverTask:
+    def start(
+        self,
+        *,
+        analysis_id: str,
+        job_ids: Sequence[str],
+        mode: str = "selected",
+        confirmed: bool = False,
+        confirmation_token: str = "",
+    ) -> DeliverTask:
+        if mode not in {"all", "selected", "manual"}:
+            raise ValueError("mode 必须是 all、selected 或 manual")
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有发送任务在跑，等它结束或先取消")
-            task = DeliverTask(analysis_id, job_ids)
+            task = DeliverTask(
+                analysis_id,
+                job_ids,
+                mode=mode,
+                confirmed=confirmed,
+                confirmation_token=confirmation_token,
+            )
             self._task = task
 
         thread = threading.Thread(target=self._run, args=(task,), daemon=True, name=task.task_id)
@@ -206,24 +274,65 @@ class DeliverTaskManager:
             if isinstance(m, dict) and m.get("encrypt_job_id")
         }
 
+        minimum = load_deliver_config().min_score if task.mode == "all" else None
+        candidate_ids = list(index) if task.mode == "all" else task.job_ids
         todo: list[dict[str, Any]] = []
-        for jid in task.job_ids:
+        restricted: list[dict[str, Any]] = []
+        for jid in candidate_ids:
             item = index.get(jid)
             if item is None:
                 logger.warning("分析 %s 里没有职位 %s，跳过", task.analysis_id, jid)
                 continue
             if item.get("delivered_at"):
-                task.add_item(
-                    jid,
-                    job_name=str(item.get("job_name") or ""),
-                    brand_name=str(item.get("brand_name") or ""),
+                self._record(
+                    task,
+                    item,
                     status=ITEM_SKIPPED,
+                    error="已发送",
                     delivered_at=float(item.get("delivered_at") or 0.0),
                 )
-                task.skipped += 1
                 task.push("skipped", {"encrypt_job_id": jid, "reason": "已发送"})
                 continue
+            restriction = _delivery_restriction(item)
+            if task.mode == "all":
+                restriction = _all_restriction(item)
+                if not restriction and minimum is not None and (item.get("match_score") or 0) < minimum:
+                    restriction = f"匹配分低于一键发送阈值 {minimum}"
+                if restriction:
+                    self._record(task, item, status=ITEM_SKIPPED, error=restriction)
+                    task.push("skipped", {"encrypt_job_id": jid, "reason": restriction})
+                    continue
+            elif restriction:
+                restricted.append(item)
             todo.append(item)
+
+        if restricted and (not task.confirmed or (task.mode == "manual" and not task.confirmation_token.strip())):
+            reasons = sorted({
+                _delivery_restriction(item) or "受限职位"
+                for item in restricted
+            })
+            message = "发送清单包含受限职位，必须确认后才能发送：" + "、".join(reasons)
+            for item in restricted:
+                self._record(
+                    task,
+                    item,
+                    status=ITEM_SKIPPED,
+                    error="未确认受限职位：" + (_delivery_restriction(item) or "受限职位"),
+                )
+                task.push(
+                    "skipped",
+                    {
+                        "encrypt_job_id": item.get("encrypt_job_id"),
+                        "reason": _delivery_restriction(item) or "受限职位",
+                        "requires_confirmation": True,
+                    },
+                )
+            with task.lock:
+                task.status = ST_ERROR
+                task.error = message
+                task.ended_at = time.time()
+            task.push("confirmation_required", {"message": message, "count": len(restricted)})
+            return
 
         task.total = len(todo)
         if not todo:
@@ -405,6 +514,8 @@ class DeliverTaskManager:
         )
         if status == DELIVER_OK:
             task.ok += 1
+        elif status == ITEM_SKIPPED:
+            task.skipped += 1
         else:
             task.failed += 1
         try:

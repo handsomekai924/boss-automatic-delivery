@@ -139,6 +139,434 @@ export function debounce(fn, ms = 300) {
   };
 }
 
+/* ---------- 弹层通用（多选下拉 / 级联共用） ---------- */
+
+//: 弹层挂 body + fixed 定位：采集配置那栏是 overflow 滚动容器，贴在字段上会被裁掉。
+//: 同一时刻只开一个，全局只挂一份监听——组件再多个也不会漏，页面切换也不用手工拆。
+let openPop = null;
+
+function closeOpenPop() {
+  if (!openPop) return;
+  openPop.close();
+  openPop = null;
+}
+
+document.addEventListener("click", (e) => {
+  if (!openPop || openPop.inside(e)) return;
+  closeOpenPop();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeOpenPop();
+});
+window.addEventListener("resize", () => openPop && openPop.place());
+document.addEventListener("scroll", () => openPop && openPop.place(), true);
+
+/**
+ * 把弹层挂到 body 并贴着 trigger 定位，自动翻边、超出右边界往左收。
+ *
+ * @param {HTMLElement} trigger 触发按钮
+ * @param {HTMLElement} pop     弹层本体（初始 hidden）
+ * @param {{minWidth?: number, onOpen?: () => void, onClose?: () => void}} [opts]
+ */
+function attachPop(trigger, pop, { minWidth = 200, onOpen, onClose } = {}) {
+  function place() {
+    const r = trigger.getBoundingClientRect();
+    const h = Math.min(pop.scrollHeight || 280, 360);
+    const w = Math.max(r.width, minWidth);
+    let left = r.left;
+    if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
+    pop.style.left = `${left}px`;
+    pop.style.width = `${w}px`;
+    // 默认向下；贴到窗口底部就翻上去，免得被截断
+    const roomBelow = window.innerHeight - r.bottom;
+    if (roomBelow < h + 12 && r.top > roomBelow) {
+      pop.style.top = "auto";
+      pop.style.bottom = `${window.innerHeight - r.top + 6}px`;
+      pop.style.maxHeight = `${Math.max(200, r.top - 12)}px`;
+    } else {
+      pop.style.bottom = "auto";
+      pop.style.top = `${r.bottom + 6}px`;
+      pop.style.maxHeight = `${Math.max(200, roomBelow - 12)}px`;
+    }
+  }
+
+  function open() {
+    closeOpenPop();
+    document.body.appendChild(pop);
+    pop.hidden = false;
+    if (onOpen) onOpen();
+    place();
+    trigger.classList.add("open");
+    trigger.setAttribute("aria-expanded", "true");
+    // 点击后组件常会重绘（innerHTML 重写），e.target 已脱离文档，contains() 判不出来。
+    // 事件路径是派发那一刻算好的，照样包含弹层，用它认「点在弹层里」。
+    openPop = {
+      close,
+      place,
+      inside(e) {
+        const path = typeof e.composedPath === "function" ? e.composedPath() : [e.target];
+        return path.includes(trigger) || path.includes(pop);
+      },
+    };
+  }
+
+  function close() {
+    pop.hidden = true;
+    pop.remove();
+    trigger.classList.remove("open");
+    trigger.setAttribute("aria-expanded", "false");
+    if (onClose) onClose();
+    if (openPop && openPop.close === close) openPop = null;
+  }
+
+  return { open, close, place, isOpen: () => !pop.hidden };
+}
+
+/* ---------- 多选下拉 ---------- */
+
+//: 原生 `<select multiple>` 是列表框，选项一直摊开占半屏。
+//: 这里做成「点开才弹」的勾选面板，值仍然是 code 数组。
+/**
+ * 多选下拉。外观对齐 `.select`，点开才显示选项。
+ *
+ *   const ms = multiSelect({ onChange: (values) => … });
+ *   host.replaceWith(ms.el);
+ *   ms.setOptions([{ code: "1", name: "…", … }]);
+ *   ms.setValues(["1"]);
+ *   ms.getValues(); // ["1"]
+ *
+ * @param {object} o
+ * @param {Array<{code: string, name?: string}>} [o.options]
+ * @param {string[]} [o.values]
+ * @param {string} [o.placeholder] 一个都没选时的文案
+ * @param {(values: string[]) => void} [o.onChange] 用户勾选/清空时才回调，setValues 不触发
+ */
+export function multiSelect({ options = [], values = [], placeholder = "不限", onChange } = {}) {
+  const root = el(`
+    <div class="multi-select">
+      <button type="button" class="select multi-select-trigger" aria-haspopup="listbox" aria-expanded="false">
+        <span class="multi-select-label"></span>
+      </button>
+    </div>
+  `);
+  const pop = el(`
+    <div class="multi-select-pop" role="listbox" aria-multiselectable="true" hidden>
+      <div class="multi-select-list"></div>
+      <div class="multi-select-foot">
+        <button type="button" class="btn sm ghost multi-select-clear">清空</button>
+      </div>
+    </div>
+  `);
+  const trigger = root.querySelector(".multi-select-trigger");
+  const labelEl = root.querySelector(".multi-select-label");
+  const listEl = pop.querySelector(".multi-select-list");
+
+  let opts = [];
+  let selected = new Set();
+
+  function paintLabel() {
+    const names = opts.filter((o) => selected.has(o.code)).map((o) => o.name);
+    if (!names.length) {
+      labelEl.textContent = placeholder;
+      labelEl.classList.add("is-placeholder");
+      return;
+    }
+    labelEl.classList.remove("is-placeholder");
+    labelEl.textContent = names.length <= 2 ? names.join("、") : `${names[0]} 等 ${names.length} 项`;
+  }
+
+  function paintList() {
+    if (!opts.length) {
+      listEl.innerHTML = `<div class="muted multi-select-empty">暂无选项</div>`;
+      return;
+    }
+    listEl.innerHTML = opts
+      .map(
+        (o) => `
+        <label class="multi-select-item">
+          <input type="checkbox" value="${escapeHtml(o.code)}" ${selected.has(o.code) ? "checked" : ""}>
+          <span>${escapeHtml(o.name)}</span>
+        </label>`
+      )
+      .join("");
+    listEl.querySelectorAll("input").forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) selected.add(input.value);
+        else selected.delete(input.value);
+        paintLabel();
+        if (onChange) onChange(getValues());
+      });
+    });
+  }
+
+  function getValues() {
+    return opts.filter((o) => selected.has(o.code)).map((o) => o.code);
+  }
+
+  function setOptions(next) {
+    const keep = [...selected];
+    opts = (next || []).map((o) => ({ code: String(o.code), name: o.name || String(o.code) }));
+    selected = new Set(keep.filter((c) => opts.some((o) => o.code === c)));
+    paintList();
+    paintLabel();
+  }
+
+  function setValues(v) {
+    selected = new Set((v || []).map(String));
+    paintList();
+    paintLabel();
+  }
+
+  const popApi = attachPop(trigger, pop);
+  trigger.addEventListener("click", () => (popApi.isOpen() ? popApi.close() : popApi.open()));
+  pop.querySelector(".multi-select-clear").addEventListener("click", () => {
+    selected = new Set();
+    paintList();
+    paintLabel();
+    if (onChange) onChange(getValues());
+  });
+
+  setOptions(options);
+  setValues(values);
+
+  return { el: root, getValues, setValues, setOptions, close: popApi.close };
+}
+
+/* ---------- 级联选择 ---------- */
+
+function eachNode(nodes, fn) {
+  for (const n of nodes || []) {
+    fn(n);
+    if (n.children?.length) eachNode(n.children, fn);
+  }
+}
+
+function findNode(nodes, code) {
+  let hit = null;
+  eachNode(nodes, (n) => {
+    if (!hit && n.code === code) hit = n;
+  });
+  return hit;
+}
+
+/** 到某个 code 的祖先链（不含自己）+ 自己；找不到返回 [] */
+function pathToNode(nodes, code) {
+  const chain = [];
+  function go(list) {
+    for (const n of list) {
+      chain.push(n);
+      if (n.code === code) return true;
+      if (n.children?.length && go(n.children)) return true;
+      chain.pop();
+    }
+    return false;
+  }
+  return go(nodes) ? chain : [];
+}
+
+/**
+ * 级联选择：每列只渲染当前路径的一层，几千个城市节点也不卡。
+ *
+ * 单选（城市）：点任意节点即取值；有子级的同时展开下一级。点「确定」或点外面才收起。
+ * 多选（行业）：父级只导航，点叶子勾选/取消，勾完点「确定」。
+ *
+ *   const c = cascader({ nodes: [{ code, name, children }], onChange: (v) => … });
+ *   host.replaceWith(c.el);
+ *   c.setNodes(nodes); c.setValue("101280100"); c.getValue();
+ *
+ * @param {object} o
+ * @param {Array<{code: string, name: string, children?: array}>} [o.nodes] 顶层节点
+ * @param {boolean} [o.multiple] 多选模式（叶子才可勾）
+ * @param {string|string[]} [o.value]
+ * @param {string} [o.placeholder]
+ * @param {(value: string|string[]) => void} [o.onChange] 点选/清空时才回调，setValue 不触发
+ */
+export function cascader({ nodes = [], value, multiple = false, placeholder = "不限", onChange } = {}) {
+  const root = el(`
+    <div class="cascader-field">
+      <button type="button" class="cascader-trigger" aria-haspopup="listbox" aria-expanded="false">
+        <span class="cascader-path"></span>
+        <span class="cascader-caret">▾</span>
+      </button>
+    </div>
+  `);
+  const pop = el(`
+    <div class="cascader-pop" hidden>
+      <div class="cascader-cols"></div>
+      <div class="cascader-foot">
+        <button type="button" class="btn sm ghost cascader-clear">清空</button>
+        <button type="button" class="btn sm primary cascader-ok">确定</button>
+      </div>
+    </div>
+  `);
+  const trigger = root.querySelector(".cascader-trigger");
+  const labelEl = root.querySelector(".cascader-path");
+  const colsEl = pop.querySelector(".cascader-cols");
+
+  let tree = [];
+  /** 已展开的节点链：drill[i] 的 children 是第 i+1 列 */
+  let drill = [];
+  /** 多选：已勾的 code 集合；单选：pickedCode */
+  let picked = new Set();
+  let pickedCode = "";
+
+  function visibleColumns() {
+    const cols = [tree];
+    for (const node of drill) {
+      if (!node.children?.length) break;
+      cols.push(node.children);
+    }
+    return cols;
+  }
+
+  function paintLabel() {
+    if (multiple) {
+      const names = [];
+      eachNode(tree, (n) => {
+        if (picked.has(n.code)) names.push(n.name);
+      });
+      if (!names.length) {
+        labelEl.textContent = placeholder;
+        labelEl.classList.add("is-placeholder");
+      } else {
+        labelEl.classList.remove("is-placeholder");
+        labelEl.textContent = names.length <= 2 ? names.join("、") : `${names[0]} 等 ${names.length} 项`;
+      }
+      return;
+    }
+    const hit = pickedCode ? findNode(tree, pickedCode) : null;
+    if (!hit && !pickedCode) {
+      labelEl.textContent = placeholder;
+      labelEl.classList.add("is-placeholder");
+      return;
+    }
+    labelEl.classList.remove("is-placeholder");
+    // 找不到就先把 code 亮出来，别让已存的值看起来像没配
+    labelEl.textContent = hit ? hit.name : pickedCode;
+  }
+
+  function paintCols() {
+    const cols = visibleColumns();
+    colsEl.style.setProperty("--cascader-n", String(Math.max(cols.length, 1)));
+    if (!tree.length) {
+      colsEl.innerHTML = `<div class="cascader-empty">暂无选项</div>`;
+      return;
+    }
+    colsEl.innerHTML = cols
+      .map((list, i) => {
+        const items = list
+          .map((n) => {
+            const hasKids = Boolean(n.children?.length);
+            const isActive = drill[i]?.code === n.code;
+            const isPicked = multiple ? picked.has(n.code) : pickedCode === n.code;
+            const cls = `cascader-item${isActive ? " active" : ""}${isPicked ? " picked" : ""}`;
+            const code = escapeHtml(n.code);
+            const name = escapeHtml(n.name);
+            // 多选：只有叶子能勾，父级点开下一级；单选：任意节点都能取值
+            if (multiple && !hasKids) {
+              return `<label class="${cls}" data-code="${code}">
+                <input type="checkbox" data-code="${code}" ${isPicked ? "checked" : ""}>
+                <span class="cascader-name">${name}</span>
+              </label>`;
+            }
+            return `<button type="button" class="${cls}" data-code="${code}">
+              <span class="cascader-name">${name}</span>
+              ${hasKids ? '<span class="caret">›</span>' : ""}
+            </button>`;
+          })
+          .join("");
+        return `<div class="cascader-col">${items}</div>`;
+      })
+      .join("");
+
+    colsEl.querySelectorAll("button.cascader-item").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const code = btn.dataset.code;
+        const node = findNode(tree, code);
+        if (!node) return;
+        const colIndex = [...colsEl.children].indexOf(btn.closest(".cascader-col"));
+        drill = drill.slice(0, colIndex);
+        if (node.children?.length) drill.push(node);
+        if (multiple) {
+          // 多选的父级只负责展开
+          paintCols();
+          return;
+        }
+        pickedCode = node.code;
+        paintCols();
+        paintLabel();
+        if (onChange) onChange(pickedCode);
+        // 选完不关窗：还能继续改主意 / 往下点别的路径，点「确定」或点外面才收
+      });
+    });
+    colsEl.querySelectorAll("input[data-code]").forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) picked.add(input.dataset.code);
+        else picked.delete(input.dataset.code);
+        paintCols();
+        paintLabel();
+        if (onChange) onChange(getValue());
+      });
+    });
+  }
+
+  function getValue() {
+    if (!multiple) return pickedCode || "";
+    const out = [];
+    eachNode(tree, (n) => {
+      if (picked.has(n.code)) out.push(n.code);
+    });
+    return out;
+  }
+
+  function setValue(v) {
+    if (multiple) picked = new Set((v || []).map(String));
+    else pickedCode = v ? String(v) : "";
+    paintCols();
+    paintLabel();
+  }
+
+  function setNodes(next) {
+    tree = normalizeNodes(next || []);
+    drill = [];
+    paintCols();
+    paintLabel();
+  }
+
+  /** code 统一成字符串，子级递归；调用方给嵌套 DTO 也能用 */
+  function normalizeNodes(list) {
+    return (list || []).map((n) => {
+      const node = { code: String(n.code), name: n.name || String(n.code) };
+      if (n.children?.length) node.children = normalizeNodes(n.children);
+      return node;
+    });
+  }
+
+  const popApi = attachPop(trigger, pop, {
+    minWidth: 320,
+    // 打开时把路径还原到当前值那一层（含自己，好让它的子级也亮出来），不用每次从头点
+    onOpen() {
+      const target = multiple ? getValue()[0] : pickedCode;
+      drill = target ? pathToNode(tree, target) : [];
+      paintCols();
+    },
+  });
+  trigger.addEventListener("click", () => (popApi.isOpen() ? popApi.close() : popApi.open()));
+  pop.querySelector(".cascader-clear").addEventListener("click", () => {
+    picked = new Set();
+    pickedCode = "";
+    paintCols();
+    paintLabel();
+    if (onChange) onChange(getValue());
+  });
+  pop.querySelector(".cascader-ok").addEventListener("click", () => popApi.close());
+
+  setNodes(nodes);
+  setValue(value ?? (multiple ? [] : ""));
+
+  return { el: root, getValue, setValue, setNodes, close: popApi.close };
+}
+
 /* ---------- 长任务状态 ---------- */
 
 export const TASK_STATUS = {

@@ -56,7 +56,7 @@ export async function renderHome(root) {
           </div>
         </div>
         <div class="btn-row mt-16">
-          <a class="btn" href="#/llm">去设置</a>
+          <a class="btn" href="#/settings">系统配置</a>
         </div>
       </div>
 

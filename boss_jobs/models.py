@@ -164,6 +164,20 @@ class Job:
     job_desc: str = ""
     #: 详情抓取时间（ISO 风格 ``%Y-%m-%d %H:%M:%S``）；空串 = 还没抓过。
     detail_fetched_at: str = ""
+    #: 详情处理状态：pending / collecting / completed / empty / failed / unchecked。
+    jd_status: str = "pending"
+    jd_error: str = ""
+    jd_rule_checked: bool = False
+    jd_rule_checked_at: str = ""
+    #: 当前规则评估结果；历史分析另存自己的不可变快照。
+    is_blacklisted: bool = False
+    company_blacklisted: bool = False
+    jd_blacklisted: bool = False
+    blacklist_types: tuple[str, ...] = ()
+    matched_rule_ids: tuple[str, ...] = ()
+    matched_rule_snapshot: tuple[dict[str, Any], ...] = ()
+    blacklist_checked_at: str = ""
+    auto_delivery_blocked: bool = True
 
     @classmethod
     def from_api(cls, item: dict[str, Any], *, page: int = 0) -> "Job":

@@ -200,6 +200,7 @@ class AnalyzeTaskManager:
                 "job_degree": job.job_degree,
                 "brand_industry": job.brand_industry,
                 "brand_scale_name": job.brand_scale_name,
+                **_safety_snapshot(job),
                 **result,
             }
             with task.lock:
@@ -231,6 +232,27 @@ def _work_brief(resume: ResumeDraft) -> str:
     if len(work) > 500:
         work = work[:500] + "…"
     return f"- 经历摘录：\n{work}" if work else ""
+
+
+def _safety_snapshot(job: Job) -> dict[str, Any]:
+    """把职位当前安全状态拷进 match（与 match_task 同款字段）。
+
+    老的 ``/api/resume/analyze`` 路径仍然可达；没有这些字段的分析
+    在发送侧会被当成「缺少匹配时安全快照」，自动投递一律拒绝。
+    """
+    return {
+        "is_blacklisted": bool(getattr(job, "is_blacklisted", False)),
+        "company_blacklisted": bool(getattr(job, "company_blacklisted", False)),
+        "jd_blacklisted": bool(getattr(job, "jd_blacklisted", False)),
+        "blacklist_types": list(getattr(job, "blacklist_types", ()) or ()),
+        "matched_rule_ids": list(getattr(job, "matched_rule_ids", ()) or ()),
+        "matched_rule_snapshot": [dict(rule) for rule in (getattr(job, "matched_rule_snapshot", ()) or ())],
+        "blacklist_checked_at": getattr(job, "blacklist_checked_at", ""),
+        "jd_status": getattr(job, "jd_status", "") or "pending",
+        "jd_rule_checked": bool(getattr(job, "jd_rule_checked", False)),
+        "jd_rule_checked_at": getattr(job, "jd_rule_checked_at", ""),
+        "auto_delivery_blocked": bool(getattr(job, "auto_delivery_blocked", False)),
+    }
 
 
 def _analyze_one(llm: LLMClient, resume: ResumeDraft, job: Job) -> dict[str, Any]:
@@ -288,6 +310,13 @@ def _finalize(task: AnalyzeTask, resume: ResumeDraft, cfg: Any) -> None:
         for skill in item.get("missing_skills") or []:
             gaps[str(skill)] += 1
     ranked = sorted(task.matches, key=lambda m: m.get("match_score") or 0, reverse=True)
+    safety_counts = {
+        "total": len(ranked),
+        "company_blacklisted": sum(1 for m in ranked if m.get("company_blacklisted")),
+        "jd_blacklisted": sum(1 for m in ranked if m.get("jd_blacklisted")),
+        "jd_rule_unchecked": sum(1 for m in ranked if not m.get("jd_rule_checked", False)),
+        "auto_delivery_blocked": sum(1 for m in ranked if m.get("auto_delivery_blocked")),
+    }
 
     payload = {
         "analysis_id": task.analysis_id,
@@ -302,6 +331,7 @@ def _finalize(task: AnalyzeTask, resume: ResumeDraft, cfg: Any) -> None:
             "summary": resume.summary,
         },
         "matches": ranked,
+        "blacklist_summary": safety_counts,
         "skill_gaps": [{"skill": k, "count": v} for k, v in gaps.most_common(15)],
         "top_recommendations": [
             m["encrypt_job_id"] for m in ranked if (m.get("match_score") or 0) >= 70

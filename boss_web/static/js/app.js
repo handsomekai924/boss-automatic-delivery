@@ -7,7 +7,7 @@ import { renderLogin } from "./views/login.js";
 import { renderJobs } from "./views/jobs.js";
 import { renderResume } from "./views/resume.js";
 import { renderMatch } from "./views/match.js";
-import { renderLLM } from "./views/llm.js";
+import { renderSettings } from "./views/settings.js";
 
 const routes = {
   "": renderHome,
@@ -16,7 +16,8 @@ const routes = {
   "/jobs": renderJobs,
   "/resume": renderResume,
   "/match": renderMatch,
-  "/llm": renderLLM,
+  "/settings": renderSettings,
+  "/llm": renderSettings,
 };
 
 let disposePrev = null;
@@ -31,7 +32,7 @@ function stageOf(path) {
   if (path.startsWith("/jobs")) return "jobs";
   if (path.startsWith("/resume")) return "resume";
   if (path.startsWith("/match")) return "match";
-  if (path.startsWith("/llm")) return "llm";
+  if (path.startsWith("/settings") || path.startsWith("/llm")) return "settings";
   return "";
 }
 

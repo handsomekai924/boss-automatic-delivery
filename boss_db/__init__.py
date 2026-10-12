@@ -56,6 +56,7 @@ DOC_STOKEN: Final[str] = "stoken"
 DOC_LLM_CONFIG: Final[str] = "llm_config"
 DOC_DELIVER_CONFIG: Final[str] = "deliver_config"
 DOC_APP_SETTINGS: Final[str] = "app_settings"
+DOC_COLLECTION_CONFIG: Final[str] = "collection_config"
 
 #: 迁移闸门字段
 _MIGRATED_FLAG: Final[str] = "legacy_imported"
@@ -127,7 +128,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- 职位描述（JD 正文）：列表接口不回，靠 /wapi/zpgeek/job/detail.json 逐条补。
     -- 旧库要能升级，见 _migrate_columns()（CREATE TABLE IF NOT EXISTS 不会补列）。
     job_desc           TEXT NOT NULL DEFAULT '',
-    detail_fetched_at  TEXT NOT NULL DEFAULT ''
+    detail_fetched_at  TEXT NOT NULL DEFAULT '',
+    jd_status          TEXT NOT NULL DEFAULT 'pending',
+    jd_error           TEXT NOT NULL DEFAULT '',
+    jd_rule_checked    INTEGER NOT NULL DEFAULT 0,
+    jd_rule_checked_at TEXT NOT NULL DEFAULT '',
+    is_blacklisted     INTEGER NOT NULL DEFAULT 0,
+    company_blacklisted INTEGER NOT NULL DEFAULT 0,
+    jd_blacklisted     INTEGER NOT NULL DEFAULT 0,
+    blacklist_types    TEXT NOT NULL DEFAULT '[]',
+    matched_rule_ids   TEXT NOT NULL DEFAULT '[]',
+    matched_rule_snapshot TEXT NOT NULL DEFAULT '[]',
+    blacklist_checked_at TEXT NOT NULL DEFAULT '',
+    auto_delivery_blocked INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_brand  ON jobs(brand_name);
@@ -149,6 +162,44 @@ CREATE TABLE IF NOT EXISTS fetch_pages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fetch_pages_page ON fetch_pages(page);
+
+CREATE TABLE IF NOT EXISTS blacklist_rules (
+    rule_id       TEXT PRIMARY KEY,
+    rule_type     TEXT NOT NULL,
+    pattern       TEXT NOT NULL,
+    match_mode    TEXT NOT NULL,
+    scope         TEXT NOT NULL DEFAULT '',
+    description   TEXT NOT NULL DEFAULT '',
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    last_error    TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_blacklist_rules_type_enabled
+    ON blacklist_rules(rule_type, enabled);
+
+CREATE TABLE IF NOT EXISTS blacklist_hits (
+    log_id        TEXT PRIMARY KEY,
+    task_id       TEXT NOT NULL DEFAULT '',
+    job_id        TEXT NOT NULL DEFAULT '',
+    job_name      TEXT NOT NULL DEFAULT '',
+    brand_name    TEXT NOT NULL DEFAULT '',
+    rule_id       TEXT NOT NULL DEFAULT '',
+    rule_type     TEXT NOT NULL DEFAULT '',
+    pattern       TEXT NOT NULL DEFAULT '',
+    match_mode    TEXT NOT NULL DEFAULT '',
+    match_scope   TEXT NOT NULL DEFAULT '',
+    matched_text  TEXT NOT NULL DEFAULT '',
+    action        TEXT NOT NULL DEFAULT 'stored',
+    jd_status     TEXT NOT NULL DEFAULT '',
+    error         TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_blacklist_hits_rule ON blacklist_hits(rule_id);
+CREATE INDEX IF NOT EXISTS idx_blacklist_hits_job ON blacklist_hits(job_id);
+CREATE INDEX IF NOT EXISTS idx_blacklist_hits_task ON blacklist_hits(task_id);
 """
 
 
@@ -246,6 +297,18 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     "jobs": {
         "job_desc": "TEXT NOT NULL DEFAULT ''",
         "detail_fetched_at": "TEXT NOT NULL DEFAULT ''",
+        "jd_status": "TEXT NOT NULL DEFAULT 'pending'",
+        "jd_error": "TEXT NOT NULL DEFAULT ''",
+        "jd_rule_checked": "INTEGER NOT NULL DEFAULT 0",
+        "jd_rule_checked_at": "TEXT NOT NULL DEFAULT ''",
+        "is_blacklisted": "INTEGER NOT NULL DEFAULT 0",
+        "company_blacklisted": "INTEGER NOT NULL DEFAULT 0",
+        "jd_blacklisted": "INTEGER NOT NULL DEFAULT 0",
+        "blacklist_types": "TEXT NOT NULL DEFAULT '[]'",
+        "matched_rule_ids": "TEXT NOT NULL DEFAULT '[]'",
+        "matched_rule_snapshot": "TEXT NOT NULL DEFAULT '[]'",
+        "blacklist_checked_at": "TEXT NOT NULL DEFAULT ''",
+        "auto_delivery_blocked": "INTEGER NOT NULL DEFAULT 1",
     },
 }
 
