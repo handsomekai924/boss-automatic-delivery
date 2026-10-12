@@ -13,6 +13,7 @@ build/
 # Python 缓存
 __pycache__/
 *.py[cod]
+.venv
 
 # IDE / 编辑器
 .idea/

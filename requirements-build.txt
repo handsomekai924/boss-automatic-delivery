@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
 # 构建期依赖：只用来打包成 exe，不属于运行期依赖，所以不放进 requirements.txt。
 # 运行期依赖见 requirements.txt。
+# 顶上那行 coding 声明别删：pip 在中文 Windows 上按 GBK 读 requirements，没它会解码失败。
 pyinstaller>=6.6

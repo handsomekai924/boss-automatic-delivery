@@ -17,3 +17,4 @@ if errorlevel 1 exit /b 1
 echo.
 echo 打包完成： dist\BossAutoDelivery.exe
 echo 自检：     dist\BossAutoDelivery.exe --self-check
+pause
