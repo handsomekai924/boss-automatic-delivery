@@ -240,6 +240,18 @@ def test_list_jobs_missing_desc_已有描述不再重复获取(store: JobStore):
     assert {j.encrypt_job_id for j in store.list_jobs_missing_desc()} == {"a", "d"}
 
 
+def test_list_jobs_missing_desc_采集失败要能重试(store: JobStore):
+    """失败只是 detail_fetched_at 被盖过，不算抓到——否则「补全描述」永远是 0 条。"""
+    store.save_page(
+        make_page(jobs=[make_job("a"), make_job("b"), make_job("c"), make_job("d")])
+    )
+    store.update_job_desc("b", "已经有 JD 了", fetched_at="2026-10-08 12:00:00")
+    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00", jd_status="empty")
+    store.update_job_desc("d", "", fetched_at="2026-10-08 12:00:00", jd_status="failed")
+    assert store.count_jobs_missing_desc() == 2
+    assert {j.encrypt_job_id for j in store.list_jobs_missing_desc()} == {"a", "d"}
+
+
 def test_fetched_desc_ids(store: JobStore):
     """批量问「哪些已经抓过详情」——抓取流程顺带补 JD 时跳过已有的。"""
     store.save_page(make_page(jobs=[make_job("a"), make_job("b"), make_job("c")]))
@@ -249,6 +261,14 @@ def test_fetched_desc_ids(store: JobStore):
     assert store.fetched_desc_ids(["a", "b", "c", "不在库里的"]) == {"b", "c"}
     assert store.fetched_desc_ids([]) == set()
     assert store.fetched_desc_ids(["a"]) == set()
+
+
+def test_fetched_desc_ids_失败不算抓过(store: JobStore):
+    store.save_page(make_page(jobs=[make_job("a"), make_job("b")]))
+    store.update_job_desc("a", "", fetched_at="2026-10-08 12:00:00", jd_status="failed")
+    store.update_job_desc("b", "", fetched_at="2026-10-08 12:00:00", jd_status="empty")
+
+    assert store.fetched_desc_ids(["a", "b"]) == {"b"}
 
 
 def test_column_migration_adds_desc_columns(tmp_path):

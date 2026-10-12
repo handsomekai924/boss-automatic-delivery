@@ -145,8 +145,9 @@ class DescTaskManager:
                         return
 
                     # 兜底：列表本来就没带这些，但真跑起来再确认一次——
-                    # 已有描述的不再重复获取。
-                    if job.job_desc or job.detail_fetched_at:
+                    # 已有描述的不再重复获取；抓过但回空 JD 的也不再撞。
+                    # 失败的要重试（它只是 detail_fetched_at 被盖过，不算抓到）。
+                    if job.job_desc or (job.detail_fetched_at and job.jd_status != "failed"):
                         with task.lock:
                             task.progress["done"] += 1
                             task.progress["already"] += 1

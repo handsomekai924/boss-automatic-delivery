@@ -316,13 +316,19 @@ class JobStore:
     ) -> list[Job]:
         """列出**还没抓到描述**的职位，手动补抓用。
 
-        两条都不回，保证「已有描述的不再重复获取」：
+        两类进这个名单：
+
+        - ``detail_fetched_at = ''`` —— 一次都没抓过；
+        - ``jd_status = 'failed'`` —— 抓过但失败了（超时、风控…），要能重试。
+
+        两类不回，保证「已有描述的不再重复获取」：
 
         - ``job_desc != ''`` —— 已经有 JD 了；
-        - ``detail_fetched_at != ''`` —— 抓过（哪怕接口回了空 JD），别每次去撞同一批。
+        - 抓过且回了空 JD（``jd_status = 'empty'``）——别每次去撞同一批。
         """
         rows = self._conn.execute(
-            "SELECT * FROM jobs WHERE job_desc = '' AND detail_fetched_at = '' "
+            "SELECT * FROM jobs WHERE job_desc = '' "
+            "AND (detail_fetched_at = '' OR jd_status = 'failed') "
             "ORDER BY fetched_at DESC, page ASC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
@@ -330,7 +336,8 @@ class JobStore:
 
     def count_jobs_missing_desc(self) -> int:
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM jobs WHERE job_desc = '' AND detail_fetched_at = ''"
+            "SELECT COUNT(*) AS n FROM jobs WHERE job_desc = '' "
+            "AND (detail_fetched_at = '' OR jd_status = 'failed')"
         ).fetchone()
         return int(row["n"]) if row else 0
 
@@ -338,6 +345,7 @@ class JobStore:
         """批量问「这些职位里哪些已经抓过详情」，回已抓过的 id 集合。
 
         抓取流程顺带补 JD 时用：一页里已入库、已有描述的**不再重复拉详情**。
+        失败的不算抓过——下次抓取再试一次。
         """
         ids = [str(i) for i in encrypt_job_ids if i]
         if not ids:
@@ -345,7 +353,8 @@ class JobStore:
         placeholders = ",".join("?" * len(ids))
         rows = self._conn.execute(
             f"SELECT encrypt_job_id FROM jobs "
-            f"WHERE encrypt_job_id IN ({placeholders}) AND detail_fetched_at != ''",
+            f"WHERE encrypt_job_id IN ({placeholders}) AND detail_fetched_at != '' "
+            f"AND COALESCE(jd_status, '') != 'failed'",
             ids,
         ).fetchall()
         return {str(row["encrypt_job_id"]) for row in rows}

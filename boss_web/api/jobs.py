@@ -79,7 +79,10 @@ def stats() -> dict[str, Any]:
 
 @router.post("/fetch-descriptions")
 def fetch_descriptions(body: FetchDescBody | None = None) -> dict[str, Any]:
-    """对 ``detail_fetched_at = ''`` 的职位批量补 JD（后台任务）。"""
+    """对还没抓到描述的职位批量补 JD（后台任务）。
+
+    名单 = 一次没抓过的 + 抓过但 ``jd_status = 'failed'`` 的；回过空 JD 的不再撞。
+    """
     limit = (body.limit if body else 0) or 0
     interval = (body.interval if body else 0.0) or None
     task = desc_tasks.start(limit=limit, interval=interval)
