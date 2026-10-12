@@ -64,6 +64,12 @@ OpenAI 兼容协议（DeepSeek / Kimi / 本地 vLLM 都行）。Key 只存本地
 
 ![AI 设置页](images/llm-page.png)
 
+### 采集配置
+
+配置采集参数，如城市 / 求职类型 / 薪资 / 经验 / 学历 / 行业 / 规模，增加了黑名单规则配置。
+
+![采集配置](images/crawl-config.png)
+
 ### 批量匹配
 
 选好简历后一键匹配全部，AI 并行出匹配度、优缺点与个性化招呼语。
