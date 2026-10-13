@@ -70,6 +70,30 @@ def submit_login(body: LoginRequest) -> dict[str, Any]:
     return task.snapshot()
 
 
+class QrStartRequest(BaseModel):
+    """APP 扫码登录的启动参数。pk 省略就用登录页那个 ``cpc_user_sign_up``。"""
+
+    pk: str = ""
+
+
+@router.post("/qr")
+def start_qr(body: QrStartRequest | None = None) -> dict[str, Any]:
+    """起一条 APP 扫码登录：后台出二维码，网页去 ``/qr/{id}/image`` 取图。"""
+    task = login_tasks.start_qr(pk=(body.pk if body else ""))
+    return task.snapshot()
+
+
+@router.get("/qr/{task_id}/image")
+def qr_image(task_id: str) -> Response:
+    """把当前二维码画成 PNG。``?v=`` 递增可破浏览器缓存（票据换发后内容会变）。"""
+    png = login_tasks.qr_png(task_id)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/tasks/{task_id}")
 def task_status(task_id: str) -> dict[str, Any]:
     return login_tasks.snapshot(task_id)

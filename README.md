@@ -185,7 +185,7 @@ python -m boss_web --host 0.0.0.0 --port 8787
 
 打开控制台后按页面顺序走：
 
-1. **登录** —— 填手机号收码，滑块验证时按页面提示在浏览器里完成拼图
+1. **登录** —— 填手机号收码（滑块验证时按页面提示在浏览器里完成拼图），或切到「APP 扫码登录」用手机 BOSS APP 扫二维码确认
 2. **找职位** —— 配置筛选条件，一键分页搜索，浏览 / 管理职位库
 3. **上传简历** —— 传 `.docx` / `.pdf` / `.md` / `.txt`，自动触发解析
 4. **AI 设置** —— 填自己的 API Key / 接口地址 / 模型名，先「测试连接」再保存；页面上有分步图文引导
@@ -196,9 +196,10 @@ python -m boss_web --host 0.0.0.0 --port 8787
 
 ```bash
 # 1. 登录
-python -m boss_login login --phone 13800138000
-python -m boss_login whoami          # 看当前登录用户
-python -m boss_login logout          # 清本地登录态
+python -m boss_login login --phone 13800138000   # 短信验证码
+python -m boss_login qr                          # APP 扫码（终端出二维码，手机 BOSS APP 扫）
+python -m boss_login whoami                      # 看当前登录用户
+python -m boss_login logout                      # 清本地登录态
 
 # 2. 看筛选项（想导出完整表给配置用）
 python -m boss_filter show

@@ -28,6 +28,8 @@
     * **不实现验证码破解**：滑块的题由本人在浏览器里拖（官方极验组件），
       本模块只负责把挑战参数递过去、把票据交回来。其余风控仍然抛
       ``RiskControlRequired`` 交由使用者处理。
+    * **APP 扫码登录**是另一条链（等手机扫、等 App 确认），实现在
+      :mod:`boss_login.qrcode`，跟这里的短信流程共用同一个会话。
 """
 
 from __future__ import annotations
@@ -134,7 +136,12 @@ class ZhipinLoginClient:
         headers: Mapping[str, str] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.endpoints = {**C.ENDPOINTS, **C.VERIFY_ENDPOINTS, **(endpoints or {})}
+        self.endpoints = {
+            **C.ENDPOINTS,
+            **C.VERIFY_ENDPOINTS,
+            **C.QR_ENDPOINTS,
+            **(endpoints or {}),
+        }
         self.timeout = timeout
         self.retries = max(0, retries)
         self.backoff = backoff
@@ -892,11 +899,19 @@ class ZhipinLoginClient:
         *,
         method: str = "POST",
         extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> ApiResponse:
         """发请求 + 网络层重试 + 解析 JSON。业务码判定交给 ``_handle_response``。"""
         body = urlencode(payload) if method == "POST" else None
         params = payload if method == "GET" else None
-        return self._request(method, path, body=body, params=params, extra_headers=extra_headers)
+        return self._request(
+            method,
+            path,
+            body=body,
+            params=params,
+            extra_headers=extra_headers,
+            timeout=timeout,
+        )
 
     def _sms_v2_form(
         self,
@@ -1030,8 +1045,14 @@ class ZhipinLoginClient:
         logger.debug("  表单键 %s", sorted(body))
         return self._post(path, body)
 
-    def _get(self, path: str, params: Mapping[str, Any]) -> ApiResponse:
-        return self._request("GET", path, params=params)
+    def _get(
+        self,
+        path: str,
+        params: Mapping[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> ApiResponse:
+        return self._request("GET", path, params=params, timeout=timeout)
 
     def _request(
         self,
@@ -1042,14 +1063,17 @@ class ZhipinLoginClient:
         params: Mapping[str, Any] | None = None,
         extra_headers: Mapping[str, str] | None = None,
         action: str = "",
+        timeout: float | None = None,
     ) -> ApiResponse:
         """发请求 + 网络层重试 + 解析 JSON。业务码判定交给 ``_handle_response``。
 
         :param extra_headers: 叠在默认请求头之上（滑块票据就走这里）。
+        :param timeout:       覆盖实例级超时。扫码那族长轮询接口要挂 100 秒。
         """
         url = self.base_url + path
         headers = {**C.DEFAULT_HEADERS, **(extra_headers or {})}
         last_error: Exception | None = None
+        request_timeout = self.timeout if timeout is None else timeout
 
         for attempt in range(self.retries + 1):
             if attempt:
@@ -1063,7 +1087,7 @@ class ZhipinLoginClient:
                     data=body,
                     params=params,
                     headers=headers,
-                    timeout=self.timeout,
+                    timeout=request_timeout,
                     allow_redirects=True,
                 )
             except requests.RequestException as exc:

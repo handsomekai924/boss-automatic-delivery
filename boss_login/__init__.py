@@ -22,7 +22,14 @@ from .client import (
     validate_code,
     validate_phone,
 )
-from .config import BASE_URL, CODE_LENGTH, ENDPOINTS, RESEND_COOLDOWN_SECONDS, SMS_SCENES
+from .config import (
+    BASE_URL,
+    CODE_LENGTH,
+    ENDPOINTS,
+    QR_ENDPOINTS,
+    RESEND_COOLDOWN_SECONDS,
+    SMS_SCENES,
+)
 from .errors import (
     AccountBlocked,
     ApiError,
@@ -35,7 +42,18 @@ from .errors import (
     TransportError,
     ValidationError,
 )
+from .crypto import decrypt_account, decrypt_text, encrypt_account, encrypt_text
 from .models import ApiResponse, LoginResult, SmsCodeTicket, UserInfo, mask_phone
+from .qrcode import (
+    AppScanLogin,
+    QrConfirmOutcome,
+    QrScanOutcome,
+    QrTicket,
+    render_qr_png,
+    render_qr_svg,
+    render_qr_terminal,
+    run_qr_login,
+)
 from .session import (
     DEFAULT_DB_PATH,
     StoredSession,
@@ -61,12 +79,16 @@ __version__ = "1.1.0"
 __all__ = [
     # 核心
     "ZhipinLoginClient",
+    "AppScanLogin",
     "create_client",
     "persist_login",
     # 模型
     "ApiResponse",
     "LoginResult",
     "SmsCodeTicket",
+    "QrConfirmOutcome",
+    "QrScanOutcome",
+    "QrTicket",
     "SliderChallenge",
     "SliderHelperError",
     "SliderSolution",
@@ -90,6 +112,14 @@ __all__ = [
     "normalize_phone",
     "parse_challenge",
     "parse_solution",
+    "render_qr_png",
+    "render_qr_svg",
+    "render_qr_terminal",
+    "run_qr_login",
+    "encrypt_text",
+    "decrypt_text",
+    "encrypt_account",
+    "decrypt_account",
     "solve_via_helper",
     "validate_code",
     "validate_phone",
@@ -103,6 +133,7 @@ __all__ = [
     "CODE_LENGTH",
     "DEFAULT_DB_PATH",
     "ENDPOINTS",
+    "QR_ENDPOINTS",
     "RESEND_COOLDOWN_SECONDS",
     "SMS_SCENES",
     "__version__",

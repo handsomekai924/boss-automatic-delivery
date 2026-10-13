@@ -49,6 +49,30 @@ ENDPOINTS: Final[dict[str, str]] = {
     "logout": "/wapi/zppassport/user/logout",
 }
 
+#: APP 扫码登录（登录页 ``BossAppScan``）的接口。
+#:
+#: 来源是按需 chunk ``user-login.5398946e.js`` 里 BossAppScan 用到的那几个
+#: 请求构造器（``Ie/Fe/Ue/qe/Le/$e/ze``），路径与调用顺序都照抄。2026-10-13
+#: 打过真实站点：``randkey`` 能拿到 ``qrId``，``scan`` 会挂住长轮询，
+#: ``scanLogin`` 在没人扫时立刻回 ``{scaned:true, login:false}``（真正等人确认时
+#: 才会挂住），``getSecondKey`` 未扫码时回 ``zpData:{code:1092}``。
+QR_ENDPOINTS: Final[dict[str, str]] = {
+    #: POST 无参。zpData: {qrId, randKey, secretKey, shortRandKey}
+    "qr_randkey": "/wapi/zppassport/captcha/randkey",
+    #: GET ?uuid=<qrId>  长轮询，等手机扫；回 {scaned, validate?, allweb?}
+    "qr_scan": "/wapi/zppassport/qrcode/scan",
+    #: GET ?uuid=<qrId>  扫过之后换发第二把钥匙；zpData.qrId → secondUuid
+    "qr_second_key": "/wapi/zppassport/captcha/getSecondKey",
+    #: GET ?uuid=<secondUuid>  长轮询，等 App 端二次确认；回 {scaned}
+    "qr_scan_second": "/wapi/zppassport/qrcode/scanSecond",
+    #: GET ?qrId=<qrId>  拿扫码账号头像；zpData: {large, wxMp}
+    "qr_head_img": "/wapi/zppassport/qrcode/getHeadImg",
+    #: GET ?qrId=<qrId>  长轮询，等确认/取消；回 {scaned, login}
+    "qr_scan_login": "/wapi/zppassport/qrcode/scanLogin",
+    #: GET ?qrId=<qrId>&pk=…&fp=…  换登录态，Set-Cookie 就在这一发上
+    "qr_dispatcher": "/wapi/zppassport/qrcode/dispatcher",
+}
+
 #: probe 时要依次尝试的候选地址（第一个命中即视为可用）
 CANDIDATE_ENDPOINTS: Final[dict[str, list[str]]] = {
     "send_sms_code": [
@@ -64,6 +88,16 @@ CANDIDATE_ENDPOINTS: Final[dict[str, list[str]]] = {
         "/wapi/zppassport/user/smsLogin",
         "/wapi/zppassport/login/sms",
         "/wapi/zppassport/user/login",
+    ],
+    "qr_randkey": [
+        "/wapi/zppassport/captcha/randkey",
+        "/wapi/zppassport/qrcode/randkey",
+    ],
+    "qr_scan": [
+        "/wapi/zppassport/qrcode/scan",
+    ],
+    "qr_dispatcher": [
+        "/wapi/zppassport/qrcode/dispatcher",
     ],
 }
 
@@ -103,6 +137,47 @@ DEFAULT_PK: Final[str] = "cpc_user_sign_up"
 #: formData.identity 的取值，发码时被放进 purpose
 IDENTITY_JOB_SEEKER: Final[int] = 0
 IDENTITY_RECRUITER: Final[int] = 1
+
+# --------------------------------------------------------------------------- #
+# APP 扫码登录
+# --------------------------------------------------------------------------- #
+# 登录页 ``SignLoginScanApp`` → ``new BossAppScan({expireTime: 3e4})``：
+#
+#   randkey ──► uuid=qrId（二维码内容就是这串 uuid）
+#      │
+#      ├─ 长轮询 qrcode/scan?uuid=          等手机扫
+#      │        └─ scaned → captcha/getSecondKey?uuid= → secondUuid
+#      │                   （页面上的二维码内容跟着换成 secondUuid，但此时
+#      │                     UI 已经切成「扫码成功」步骤条，二维码不再露出）
+#      ├─ 1 秒兜底定时器 与 qrcode/scanSecond?uuid=secondUuid 赛跑
+#      │        └─ 先到者：getHeadImg + 长轮询 qrcode/scanLogin?qrId=
+#      └─ scanLogin 回 {scaned, login}：
+#               login=true  → qrcode/dispatcher?qrId=…&pk=…&fp=… 换 Set-Cookie
+#               login=false → 取消，整段刷新二维码
+#
+#: 页面上二维码的存活时间（毫秒转秒）。超时只影响展示层，服务端的票据另有寿命。
+QR_EXPIRE_SECONDS: Final[int] = 30
+#: ``scan`` / ``scanSecond`` / ``scanLogin`` 三个长轮询接口的单次请求超时。
+#: 登录页 axios 上写的是 ``timeout: 1e5``（100 秒）。
+QR_POLL_TIMEOUT: Final[float] = 100.0
+#: 扫码成功后，页面先等 1 秒再开始 ``scanLogin``（``secondScanTimer``）；
+#: 期间 ``scanSecond`` 若先返回 ``scaned``，就不再等这 1 秒。
+QR_CONFIRM_DELAY_SECONDS: Final[float] = 1.0
+#: 本地对「扫码成功 → App 端确认」的兜底等待。登录页本身不设上限（二维码
+#: 过期才停），这里给个宽限，免得脚本挂死。
+QR_CONFIRM_TIMEOUT_SECONDS: Final[float] = 180.0
+#: App 扫码后二维码内容的取值顺序（``qrCodeContent = secondUuid || uuid``）
+QR_CONTENT_PREFER_SECOND: Final[bool] = True
+
+#: 登录限额 / 风控码（登录页 ``loginLimitCode`` + 4942–4950 区间）。
+#: 命中就别再重试了，直接把提示语抛给使用者。
+QR_LOGIN_LIMIT_CODES: Final[frozenset[int]] = frozenset(
+    {4563, 4567, 4912, 4918, 4930, 4999, 5004}
+)
+QR_LOGIN_LIMIT_RANGE: Final[tuple[int, int]] = (4942, 4950)
+
+#: 页面的 ``pk`` 来自 ``#page_key_name``，扫码登录那页写的是 ``cpc_user_sign_up``。
+QR_DEFAULT_PK: Final[str] = "cpc_user_sign_up"
 
 # --------------------------------------------------------------------------- #
 # 请求头

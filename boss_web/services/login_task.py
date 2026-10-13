@@ -1,4 +1,4 @@
-"""登录任务状态机：把 ``run_sms_login`` 的阻塞回调接到网页表单上。
+"""登录任务状态机：把 ``run_sms_login`` / ``AppScanLogin.run`` 的阻塞回调接到网页表单上。
 
 网页上「发码 → 输码 → （滑块）→ 登录成功」分两步走，每步都在后台线程里跑，
 HTTP 只负责启动和喂料：
@@ -6,6 +6,9 @@ HTTP 只负责启动和喂料：
 * :meth:`LoginTaskManager.start_send` 起线程发短信，命中滑块时把帮助页挂出来；
 * :meth:`LoginTaskManager.submit_code` 把验证码塞给阻塞中的 ``code_provider``；
 * :meth:`LoginTaskManager.solve_slider` 把极验票据塞给阻塞中的 ``slider_solver``。
+
+APP 扫码登录是另一条：``start_qr`` 起线程跑 ``AppScanLogin``，网页只需要把
+二维码画出来、轮询状态，手机扫完在 App 里点确认就完事（见 ``qr`` 字段）。
 
 滑块只是**人机协作管道**：官方组件渲染、人拖、票据回传。不认缺口、不伪造轨迹。
 """
@@ -24,7 +27,9 @@ from boss_login import (
     create_client,
     persist_login,
 )
+from boss_login.config import QR_DEFAULT_PK
 from boss_login.errors import (
+    AccountBlocked,
     BossLoginError,
     CodeRejected,
     RateLimited,
@@ -32,6 +37,7 @@ from boss_login.errors import (
     ValidationError,
 )
 from boss_login.models import LoginResult
+from boss_login.qrcode import AppScanLogin, render_qr_png
 from boss_login.verify import (
     SliderChallenge,
     SliderSolution,
@@ -51,6 +57,8 @@ ST_SENDING = "sending_sms"
 ST_NEED_CODE = "need_code"
 ST_NEED_SLIDER = "need_slider"
 ST_LOGGING_IN = "logging_in"
+#: 扫码登录：二维码已经出好了，等手机扫
+ST_NEED_SCAN = "need_scan"
 ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
@@ -65,6 +73,10 @@ class LoginTask:
     task_id: str
     phone: str
     dial_code: str = "86"
+    #: 任务类型：``sms`` 短信验证码 / ``qr`` APP 扫码。两条流的状态机长得像
+    #: （都叫 pending / logging_in / done），但界面完全是两套，前端必须按这个
+    #: 字段分派，不能按 status 猜——扫码的 pending 会误触发短信的步骤条。
+    kind: str = "sms"
     status: str = ST_PENDING
     created_at: float = field(default_factory=time.time)
     events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
@@ -89,6 +101,15 @@ class LoginTask:
     lock: threading.RLock = field(default_factory=threading.RLock)
     cancel_flag: bool = False
 
+    # 扫码登录：AppScanLogin 的 on_payload 把二维码内容写进来，网页去 /qr/{id}/image 取图
+    qr_payload: str = ""
+    qr_head_img: str = ""
+    qr_scanned: bool = False
+    qr_confirmed: bool = False
+    qr_pk: str = ""
+    #: 票据换发（secondUuid）后二维码内容会变，让前端知道该重画了
+    qr_revision: int = 0
+
     def record(self, name: str, payload: Mapping[str, Any] | None = None) -> None:
         with self.lock:
             self.events.append(
@@ -107,6 +128,7 @@ class LoginTask:
         with self.lock:
             return {
                 "task_id": self.task_id,
+                "kind": self.kind,
                 "status": self.status,
                 "phone": self.phone,
                 "phone_masked": _mask_phone(self.phone),
@@ -120,6 +142,20 @@ class LoginTask:
                     "needed": self.slider_needed,
                     "solved": bool(self.slider_box.get("solution")),
                     "page_url": f"/api/auth/slider/{self.task_id}",
+                },
+                "qr": {
+                    "active": self.status == ST_NEED_SCAN or self.qr_scanned,
+                    "payload": self.qr_payload,
+                    "scanned": self.qr_scanned,
+                    "confirmed": self.qr_confirmed,
+                    "head_img": self.qr_head_img,
+                    "pk": self.qr_pk,
+                    "revision": self.qr_revision,
+                    "image_url": (
+                        f"/api/auth/qr/{self.task_id}/image?v={self.qr_revision}"
+                        if self.qr_payload
+                        else ""
+                    ),
                 },
                 "events": list(self.events),
             }
@@ -189,7 +225,9 @@ class LoginTaskManager:
             if self._current is not None and not self._current.finished:
                 raise ConflictError("已有登录流程在进行中，请先完成或取消")
 
-            task = LoginTask(task_id=uuid.uuid4().hex[:12], phone=digits, dial_code=dial_code)
+            task = LoginTask(
+                task_id=uuid.uuid4().hex[:12], phone=digits, dial_code=dial_code, kind="sms"
+            )
             self._tasks[task.task_id] = task
             self._current = task
 
@@ -198,6 +236,34 @@ class LoginTaskManager:
         )
         thread.start()
         return task
+
+    def start_qr(self, *, pk: str = "") -> LoginTask:
+        """起一条 APP 扫码登录：后台出二维码、等手机扫、等 App 确认。"""
+        with self._lock:
+            if self._current is not None and not self._current.finished:
+                raise ConflictError("已有登录流程在进行中，请先完成或取消")
+
+            task = LoginTask(task_id=uuid.uuid4().hex[:12], phone="", dial_code="", kind="qr")
+            task.qr_pk = pk
+            self._tasks[task.task_id] = task
+            self._current = task
+
+        thread = threading.Thread(
+            target=self._run_qr_login, args=(task,), daemon=True, name=f"qr-{task.task_id}"
+        )
+        thread.start()
+        return task
+
+    def qr_png(self, task_id: str) -> bytes:
+        """把任务当前的二维码画成 PNG，给网页 ``<img src>`` 用。"""
+        task = self.get(task_id)
+        payload = task.qr_payload
+        if not payload:
+            raise NotFoundError("本次登录还没有二维码")
+        try:
+            return render_qr_png(payload, scale=10, border=1)
+        except RuntimeError as exc:
+            raise UpstreamError(str(exc)) from exc
 
     def submit_code(self, task_id: str, code: str) -> LoginTask:
         task = self.get(task_id)
@@ -373,6 +439,57 @@ class LoginTaskManager:
         except Exception as exc:  # noqa: BLE001 - 兜住线程里的意外
             logger.exception("登录任务 %s 崩了", task.task_id)
             self._finish_err(task, f"登录流程出错：{exc}")
+
+    def _run_qr_login(self, task: LoginTask) -> None:
+        """APP 扫码登录的后台线程：出二维码 → 等手机扫 → 等 App 确认 → 落盘。"""
+        kwargs: dict[str, Any] = {"load_stored": True}
+        if self._session_path is not None:
+            kwargs["session_path"] = self._session_path
+        client = create_client(**kwargs)
+        login = AppScanLogin(client, pk=task.qr_pk or QR_DEFAULT_PK)
+
+        def on_payload(payload: str) -> None:
+            with task.lock:
+                task.qr_payload = payload
+                task.qr_revision += 1
+                task.set_status(ST_NEED_SCAN)
+            task.record("qr_ready", {"revision": task.qr_revision})
+
+        def on_event(name: str, payload: dict[str, Any]) -> None:
+            # 这几个事件把前端关心的状态写进任务快照，光有 events 不够用
+            with task.lock:
+                if name == "qr_scanned":
+                    task.qr_scanned = True
+                    task.set_status(ST_LOGGING_IN)
+                elif name == "qr_head":
+                    task.qr_head_img = str(payload.get("head_img") or "")
+                elif name == "qr_confirmed":
+                    task.qr_confirmed = True
+                elif name in ("qr_cancelled", "qr_expired"):
+                    task.cancel_flag = True
+            task.record(name, payload)
+
+        try:
+            task.record("started", {"kind": "qr"})
+            result = login.run(
+                on_event=on_event,
+                on_payload=on_payload,
+                should_cancel=lambda: task.cancel_flag,
+            )
+            if task.cancel_flag:
+                task.set_status(ST_CANCELLED)
+                return
+            self._finish_ok(task, client, result)
+        except AccountBlocked as exc:
+            self._finish_err(task, f"账号或 IP 被限制，别再扫了：{exc}")
+        except BossLoginError as exc:
+            if task.cancel_flag:
+                task.set_status(ST_CANCELLED)
+            else:
+                self._finish_err(task, str(exc))
+        except Exception as exc:  # noqa: BLE001 - 兜住线程里的意外
+            logger.exception("扫码登录任务 %s 崩了", task.task_id)
+            self._finish_err(task, f"扫码登录出错：{exc}")
 
     def _finish_ok(self, task: LoginTask, client: Any, result: LoginResult) -> None:
         try:

@@ -383,3 +383,60 @@ def test_版本判断只查_gitee():
 def test_首页环境卡显示当前版本():
     home = _read("js/views/home.js")
     assert "h.version" in home
+
+
+# --------------------------------------------------------------------------- #
+# 登录页：短信与扫码两条流互不串台
+# --------------------------------------------------------------------------- #
+
+
+def _fn_body(src: str, name: str) -> str:
+    """抠出 ``function <name>(...) { ... }`` 的函数体（一层大括号配对）。"""
+    marker = f"function {name}("
+    start = src.find(marker)
+    assert start >= 0, f"找不到函数 {name}"
+    brace = src.find("{", start)
+    assert brace >= 0
+    depth = 0
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[brace : i + 1]
+    raise AssertionError(f"函数 {name} 的大括号没配对")
+
+
+def test_登录分派按任务类型不按页签():
+    """applyTask 必须按 task.kind 分派——两条流的 status 字符串是重叠的。
+
+    共用一个分派器就会串台：扫码任务一启动是 pending，落进短信的分支就
+    goStep(2) 把「滑块」那格点亮了，短信进度无端前进。
+    """
+    login = _read("js/views/login.js")
+    body = _fn_body(login, "applyTask")
+    assert "task.kind" in body
+    assert "applyQrTask" in body and "applySmsTask" in body
+    # 分派器本身只做转交，不许直接动界面进度
+    assert "goStep(" not in body
+
+
+def test_扫码任务不推短信步骤条():
+    login = _read("js/views/login.js")
+    body = _fn_body(login, "applyQrTask")
+    assert "goStep(" not in body, "扫码任务的处理不该碰短信的 4 步轨"
+    assert "showQrPane(" in body
+
+
+def test_短信任务不推扫码面板():
+    login = _read("js/views/login.js")
+    body = _fn_body(login, "applySmsTask")
+    assert "showQrPane(" not in body, "短信任务的处理不该碰扫码面板"
+    assert "goStep(" in body
+
+
+def test_后端任务快照带kind():
+    src = (STATIC.parents[1] / "boss_web" / "services" / "login_task.py").read_text(encoding="utf-8")
+    assert '"kind": self.kind' in src
+    assert 'kind="qr"' in src

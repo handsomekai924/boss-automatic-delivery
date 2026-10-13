@@ -83,6 +83,73 @@ def test_slider_refresh_without_active_slider_conflicts(client: TestClient):
         lt.login_tasks._tasks.pop(task.task_id, None)
 
 
+# --------------------------------------------------------------------------- #
+# APP 扫码登录
+# --------------------------------------------------------------------------- #
+
+
+def test_qr_image_without_payload_404(client: TestClient):
+    from boss_web.services import login_task as lt
+
+    task = lt.LoginTask(task_id="qr-empty", phone="")
+    lt.login_tasks._tasks[task.task_id] = task
+    try:
+        r = client.get(f"/api/auth/qr/{task.task_id}/image")
+        assert r.status_code == 404
+    finally:
+        lt.login_tasks._tasks.pop(task.task_id, None)
+
+
+def test_qr_image_renders_png(client: TestClient):
+    """快照里有 payload 就能出 PNG——给前端 <img src> 用。"""
+    from boss_web.services import login_task as lt
+
+    task = lt.LoginTask(task_id="qr-img", phone="")
+    task.qr_payload = "qr-uuid-1234"
+    lt.login_tasks._tasks[task.task_id] = task
+    try:
+        r = client.get(f"/api/auth/qr/{task.task_id}/image")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/png"
+        assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+        assert r.headers.get("cache-control") == "no-store"
+    finally:
+        lt.login_tasks._tasks.pop(task.task_id, None)
+
+
+def test_qr_snapshot_carries_image_url(client: TestClient):
+    from boss_web.services import login_task as lt
+
+    task = lt.LoginTask(task_id="qr-snap", phone="", kind="qr")
+    task.qr_payload = "qr-uuid"
+    task.status = lt.ST_NEED_SCAN
+    lt.login_tasks._tasks[task.task_id] = task
+    try:
+        snap = task.snapshot()
+        assert snap["status"] == "need_scan"
+        # 前端按 kind 分派两条流——串台就靠这个字段挡住
+        assert snap["kind"] == "qr"
+        assert snap["qr"]["payload"] == "qr-uuid"
+        assert snap["qr"]["image_url"].startswith("/api/auth/qr/qr-snap/image")
+        assert snap["qr"]["scanned"] is False
+    finally:
+        lt.login_tasks._tasks.pop(task.task_id, None)
+
+
+def test_qr_conflict_when_sms_running(client: TestClient):
+    """同一时刻只跑一个登录任务：短信没跑完就不该另起扫码。"""
+    from boss_web.services import login_task as lt
+
+    task = lt.LoginTask(task_id="busy", phone="13800138000")
+    task.status = lt.ST_NEED_CODE
+    lt.login_tasks._current = task
+    try:
+        r = client.post("/api/auth/qr", json={})
+        assert r.status_code == 409
+    finally:
+        lt.login_tasks._current = None
+
+
 def test_jobs_list(client: TestClient):
     r = client.get("/api/jobs?limit=5")
     assert r.status_code == 200

@@ -27,6 +27,12 @@ export async function renderLogin(root) {
           <span class="card-sub" id="gate-state">idle</span>
         </div>
 
+        <div class="btn-row" id="mode-row" style="margin-bottom:12px">
+          <button class="btn sm primary" id="mode-sms">短信登录</button>
+          <button class="btn sm ghost" id="mode-qr">APP 扫码登录</button>
+        </div>
+
+        <div id="mode-sms-panel">
         <div class="track" id="track">
           <div class="node on" data-step="1"><i></i><span>手机号</span></div>
           <div class="node" data-step="2"><i></i><span>滑块</span></div>
@@ -77,6 +83,42 @@ export async function renderLogin(root) {
             <button class="btn danger" id="btn-logout">退出登录</button>
           </div>
         </div>
+        </div>
+
+        <div id="mode-qr-panel" class="hidden">
+          <div id="qr-idle">
+            <div class="banner info">用手机上的 <b>BOSS 直聘 APP</b> 扫下面的二维码，然后在 App 里点「确认登录」。</div>
+            <div class="btn-row">
+              <button class="btn primary" id="btn-qr-start">生成二维码</button>
+            </div>
+          </div>
+
+          <div id="qr-wait" class="hidden" style="text-align:center">
+            <div id="qr-status" class="muted mb-8">二维码已生成，请用 BOSS APP 扫码</div>
+            <img id="qr-img" alt="登录二维码" style="width:220px;height:220px;border-radius:12px;background:#fff;padding:10px;box-sizing:content-box">
+            <div class="muted mt-8" id="qr-payload" style="font-size:11px;word-break:break-all"></div>
+            <div class="btn-row" style="justify-content:center">
+              <button class="btn ghost" id="btn-qr-refresh">刷新二维码</button>
+              <button class="btn ghost" id="btn-qr-cancel">放弃</button>
+            </div>
+          </div>
+
+          <div id="qr-scanned" class="hidden" style="text-align:center">
+            <div class="banner warn">✓ 手机已扫码，请在 App 里点「确认登录」</div>
+            <img id="qr-head" alt="" style="width:64px;height:64px;border-radius:50%;margin:8px 0">
+            <div class="btn-row" style="justify-content:center">
+              <button class="btn ghost" id="btn-qr-cancel-2">放弃</button>
+            </div>
+          </div>
+
+          <div id="qr-done" class="hidden">
+            <div class="banner info">✓ 扫码登录成功，会话已写入 <span class="mono">data/boss.db</span>。</div>
+            <div class="btn-row">
+              <a class="btn primary" href="#/jobs">去抓职位</a>
+              <button class="btn danger" id="btn-logout-qr">退出登录</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="card span-5">
@@ -112,6 +154,47 @@ export async function renderLogin(root) {
     $("step-slider").classList.toggle("hidden", n !== 2);
     $("step-code").classList.toggle("hidden", n !== 3);
     $("step-done").classList.toggle("hidden", n !== 4);
+  }
+
+  // ---- 扫码登录 --------------------------------------------------------- //
+  let mode = "sms";          // "sms" | "qr"
+  let qrRevision = -1;       // 票据换发后二维码内容会变，变了就重取图
+
+  function setMode(next) {
+    if (next === mode) return;
+    mode = next;
+    const sms = mode === "sms";
+    $("mode-sms-panel").classList.toggle("hidden", !sms);
+    $("mode-qr-panel").classList.toggle("hidden", sms);
+    $("mode-sms").classList.toggle("primary", sms);
+    $("mode-sms").classList.toggle("ghost", !sms);
+    $("mode-qr").classList.toggle("primary", !sms);
+    $("mode-qr").classList.toggle("ghost", sms);
+  }
+
+  function showQrPane(name) {
+    for (const id of ["qr-idle", "qr-wait", "qr-scanned", "qr-done"]) {
+      $(id).classList.toggle("hidden", id !== name);
+    }
+  }
+
+  function applyQr(task) {
+    const qr = task.qr || {};
+    if (!qr.payload) return;
+    if (qr.revision !== qrRevision) {
+      qrRevision = qr.revision;
+      // ?v= 破缓存：票据换发后内容变了，旧图不能再留着
+      $("qr-img").src = `${qr.image_url || `/api/auth/qr/${task.task_id}/image`}`;
+      $("qr-payload").textContent = qr.payload;
+    }
+    if (qr.head_img) $("qr-head").src = qr.head_img;
+    if (qr.scanned) {
+      showQrPane("qr-scanned");
+      $("qr-status").textContent = "已扫码，等 App 确认…";
+    } else {
+      showQrPane("qr-wait");
+      $("qr-status").textContent = "二维码已生成，请用 BOSS APP 扫码（30 秒内有效）";
+    }
   }
 
   function renderTaskEvents(events) {
@@ -191,13 +274,19 @@ export async function renderLogin(root) {
 
   async function abandonLogin(message) {
     const id = taskId;
+    const wasQr = currentTask?.kind === "qr";
     taskId = null;
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
     closeSlider();
-    goStep(1);
+    // 只把**自己那条**流的界面归位，别顺手推对方的进度条
+    if (wasQr) {
+      showQrPane("qr-idle");
+    } else {
+      goStep(1);
+    }
     if (id) {
       try {
         await api.post("/api/auth/cancel", { task_id: id });
@@ -213,6 +302,20 @@ export async function renderLogin(root) {
     $("gate-state").textContent = task.status;
     renderTaskEvents(task.events);
 
+    // 按**任务自己的类型**分派，不按当前停在哪个页签。
+    //
+    // 两条流的 status 字符串是重叠的（pending / logging_in / done），共用一个
+    // 分派器就会串台：扫码任务一启动也是 pending，落进短信那支就会把短信的
+    // 步骤条往前推一格——短信进度无端前进，就是这么来的。
+    if (task.kind === "qr") {
+      applyQrTask(task);
+    } else {
+      applySmsTask(task);
+    }
+  }
+
+  /** 短信登录：只推进短信那条 4 步轨，绝不碰扫码面板。 */
+  function applySmsTask(task) {
     const st = task.status;
     const prev = lastStatus;
     lastStatus = st;
@@ -256,6 +359,40 @@ export async function renderLogin(root) {
     }
   }
 
+  /** APP 扫码登录：只推进扫码那几块面板，绝不碰短信的步骤条。 */
+  function applyQrTask(task) {
+    const st = task.status;
+    lastStatus = st;
+    // 二维码一出来就该让人看见它（后端可能刚从短信页签切过来）
+    if (task.qr && (task.qr.payload || task.qr.scanned)) {
+      if (mode !== "qr") setMode("qr");
+      applyQr(task);
+    }
+
+    if (st === "pending") {
+      // 刚起线程，二维码还没出：留在「生成中」，别去动短信轨
+      if (mode === "qr") showQrPane("qr-idle");
+    } else if (st === "need_scan") {
+      setMode("qr");
+      showQrPane("qr-wait");
+    } else if (st === "logging_in") {
+      setMode("qr");
+      showQrPane("qr-scanned");
+    } else if (st === "done") {
+      setMode("qr");
+      showQrPane("qr-done");
+      toast("登录成功，会话已保存", "ok");
+      refreshSession();
+      refreshBridge();
+    } else if (st === "error") {
+      showQrPane("qr-idle");
+      toast(task.error || "扫码登录失败", "bad");
+    } else if (st === "cancelled") {
+      showQrPane("qr-idle");
+      toast("已取消本次扫码登录", "warn");
+    }
+  }
+
   async function poll() {
     if (!taskId) return;
     try {
@@ -288,6 +425,54 @@ export async function renderLogin(root) {
     }
   });
 
+  // ---- 扫码登录按钮 ---- //
+  async function startQr() {
+    try {
+      qrRevision = -1; // 强制重取图
+      const task = await api.post("/api/auth/qr", {});
+      taskId = task.task_id;
+      lastStatus = null;
+      setMode("qr");
+      applyTask(task);
+      clearInterval(pollTimer);
+      pollTimer = setInterval(poll, 900);
+      poll();
+    } catch (err) {
+      toast(err.message || "生成二维码失败", "bad");
+    }
+  }
+
+  $("btn-qr-start").addEventListener("click", startQr);
+  $("btn-qr-refresh").addEventListener("click", async () => {
+    if (taskId) {
+      try {
+        await api.post("/api/auth/cancel", { task_id: taskId });
+      } catch { /* 已结束就算了 */ }
+    }
+    await startQr();
+  });
+
+  async function cancelQr(message) {
+    const id = taskId;
+    taskId = null;
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    showQrPane("qr-idle");
+    if (id) {
+      try {
+        await api.post("/api/auth/cancel", { task_id: id });
+      } catch { /* 任务已结束就算了 */ }
+    }
+    if (message) toast(message, "warn");
+  }
+  $("btn-qr-cancel").addEventListener("click", () => cancelQr("已放弃本次扫码登录"));
+  $("btn-qr-cancel-2").addEventListener("click", () => cancelQr("已放弃本次扫码登录"));
+
+  $("mode-sms").addEventListener("click", () => setMode("sms"));
+  $("mode-qr").addEventListener("click", () => setMode("qr"));
+
   $("btn-login").addEventListener("click", async () => {
     if (!taskId) return toast("请先发送验证码", "warn");
     try {
@@ -318,6 +503,16 @@ export async function renderLogin(root) {
     logoutBtn.addEventListener("click", async () => {
       await api.post("/api/auth/logout");
       toast("已退出", "ok");
+      refreshSession();
+      refreshBridge();
+    });
+  }
+  const logoutQrBtn = $("btn-logout-qr");
+  if (logoutQrBtn) {
+    logoutQrBtn.addEventListener("click", async () => {
+      await api.post("/api/auth/logout");
+      toast("已退出", "ok");
+      showQrPane("qr-idle");
       refreshSession();
       refreshBridge();
     });

@@ -1,6 +1,7 @@
 """命令行入口。
 
     python -m boss_login login  --phone 13800138000     # 完整流程（发码 → 交互式输入验证码 → 登录）
+    python -m boss_login qr                             # APP 扫码登录（终端/文件出二维码，手机扫）
     python -m boss_login whoami                         # 查看当前登录用户
     python -m boss_login logout                         # 退出并清除本地登录态
     python -m boss_login probe                          # 探测真实接口路径
@@ -15,13 +16,21 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 from typing import Any
 
 import boss_db
 
 from . import __version__, create_client, persist_login
 from .client import normalize_phone
-from .config import AUTH_COOKIES, RISK_CODE_SLIDER, SLIDER_HELPER_PORT, SLIDER_HELPER_TIMEOUT
+from .config import (
+    AUTH_COOKIES,
+    QR_CONFIRM_TIMEOUT_SECONDS,
+    QR_DEFAULT_PK,
+    RISK_CODE_SLIDER,
+    SLIDER_HELPER_PORT,
+    SLIDER_HELPER_TIMEOUT,
+)
 from .errors import (
     AccountBlocked,
     ApiError,
@@ -78,6 +87,41 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("--verify-token", default=None, help="人工完成安全验证后取得的票据")
     login.add_argument("--no-save", action="store_true", help="登录成功后不写入本地登录态")
     _add_slider_options(login)
+
+    qr = sub.add_parser(
+        "qr",
+        help="APP 扫码登录（打印/保存二维码，手机 BOSS APP 扫码并确认）",
+        parents=[global_opts],
+    )
+    qr.add_argument(
+        "--png",
+        default=None,
+        metavar="PATH",
+        help="把二维码保存成 PNG 文件（便于手机另存后从相册扫，或发到手机上）",
+    )
+    qr.add_argument(
+        "--svg",
+        default=None,
+        metavar="PATH",
+        help="把二维码保存成 SVG 文件（矢量，缩放不糊）",
+    )
+    qr.add_argument(
+        "--no-terminal",
+        action="store_true",
+        help="不在终端画二维码（只出文件时用；避免图形把日志刷没）",
+    )
+    qr.add_argument(
+        "--pk",
+        default=None,
+        help=f"页面 pk，默认 {QR_DEFAULT_PK}",
+    )
+    qr.add_argument(
+        "--confirm-timeout",
+        type=float,
+        default=None,
+        help="等手机扫码 + App 确认的总预算秒数（默认 180）",
+    )
+    qr.add_argument("--no-save", action="store_true", help="登录成功后不写入本地登录态")
 
     sub.add_parser("whoami", help="查看当前登录用户", parents=[global_opts])
 
@@ -176,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "login": _cmd_login,
+        "qr": _cmd_qr,
         "whoami": _cmd_whoami,
         "logout": _cmd_logout,
         "probe": _cmd_probe,
@@ -280,6 +325,95 @@ def _cmd_login(args: argparse.Namespace, client: Any) -> int:
     print(f"  token：{_short(result.token) if result.token else '（以 Cookie 鉴权）'}")
     # 真实站点的登录响应体里没有 token，鉴权靠 Set-Cookie；名字可能不在
     # 已知名单里。把这次实际拿到的 Cookie 名打出来，好据此补 AUTH_COOKIES。
+    if result.new_cookies:
+        print(f"  本次登录种下的 Cookie：{sorted(result.new_cookies)}")
+    elif result.cookies:
+        print(f"  Cookie：{sorted(result.cookies)}")
+
+    if args.no_save:
+        print("  本地登录态未保存（--no-save）")
+    else:
+        path = persist_login(client, result, session_path=args.db)
+        print(f"  登录态已保存至 {path}")
+    return EXIT_OK
+
+
+def _cmd_qr(args: argparse.Namespace, client: Any) -> int:
+    """APP 扫码登录：出二维码 → 手机扫 → App 确认 → 落盘登录态。"""
+    from .qrcode import AppScanLogin, render_qr_png, render_qr_svg, render_qr_terminal
+
+    print(BANNER)
+    print(" APP 扫码登录：用手机 BOSS APP 扫下面的二维码，然后在 App 里点「确认登录」")
+    print(" 二维码 30 秒内有效；过期会自动刷新。Ctrl+C 可随时取消。")
+    print()
+
+    seen: set[str] = set()
+
+    def draw(payload: str) -> None:
+        if not payload or payload in seen:
+            return
+        seen.add(payload)
+        if args.png:
+            path = Path(args.png)
+            path.write_bytes(render_qr_png(payload, scale=10))
+            print(f"✓ 二维码已写入 {path}（把这张图发到手机上，长按识别即可）")
+        if args.svg:
+            path = Path(args.svg)
+            path.write_text(render_qr_svg(payload, scale=10), encoding="utf-8")
+            print(f"✓ 二维码已写入 {path}")
+        if not args.no_terminal:
+            try:
+                art = render_qr_terminal(payload, border=1)
+            except RuntimeError:
+                print("  （终端二维码需要 segno：pip install segno；也可以用 --png 出图）")
+                print(f"  二维码内容（直接复制给手机也可）：{payload}")
+            else:
+                print(art)
+        if args.png or args.svg or args.no_terminal:
+            print(f"  二维码内容：{payload}")
+
+    def on_event(name: str, payload: dict[str, Any]) -> None:
+        if name == "qr_created":
+            print(f"✓ 已生成二维码（pk={payload.get('pk')}），请用手机 BOSS APP 扫码")
+        elif name == "qr_scanned":
+            print("✓ 手机已扫码，请在 App 里点「确认登录」…")
+        elif name == "qr_head":
+            who = payload.get("head_img") or ""
+            if who:
+                print(f"  扫码账号头像：{who[:60]}{'…' if len(who) > 60 else ''}")
+            if payload.get("wx_mp"):
+                print("  提示：这是小程序扫码，请在移动设备上确认登录")
+        elif name == "qr_confirmed":
+            print("✓ App 端已确认，正在换登录态…")
+        elif name == "qr_cancelled":
+            print("✗ 已在 App 端取消登录")
+        elif name == "qr_expired":
+            print(f"✗ {payload.get('message', '二维码已过期')}")
+        elif name == "success":
+            print(f"✓ 登录成功：{payload.get('user') or '未知用户'}")
+
+    login = AppScanLogin(
+        client,
+        pk=args.pk or QR_DEFAULT_PK,
+        confirm_timeout=(
+            QR_CONFIRM_TIMEOUT_SECONDS if args.confirm_timeout is None else args.confirm_timeout
+        ),
+    )
+    try:
+        result = login.run(on_event=on_event, on_payload=draw)
+    except KeyboardInterrupt:
+        print("\n已取消。", file=sys.stderr)
+        return EXIT_ERROR
+
+    print()
+    print("✓ 登录成功")
+    if result.user.name:
+        print(f"  用户：{result.user.name}（ID: {result.user.user_id or '未知'}）")
+    if result.user.phone_masked:
+        print(f"  手机：{result.user.phone_masked}")
+    if result.is_new_user:
+        print("  说明：该手机号首次验证，已自动完成注册")
+    print(f"  token：{_short(result.token) if result.token else '（以 Cookie 鉴权）'}")
     if result.new_cookies:
         print(f"  本次登录种下的 Cookie：{sorted(result.new_cookies)}")
     elif result.cookies:

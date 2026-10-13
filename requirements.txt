@@ -7,3 +7,5 @@ uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 python-docx>=1.1.0
 pypdf>=4.2.0
+# 扫码登录出二维码图用（纯 Python，无其他依赖）；装不上也能跑，只是不出图
+segno>=1.6.0

@@ -28,10 +28,18 @@ class ApiResponse:
     message: str = ""
     data: dict[str, Any] = field(default_factory=dict)
     http_status: int = 200
+    #: 原始 JSON 载荷。扫码那族接口把 ``scaned`` / ``login`` 摊在顶层
+    #: （不在 ``zpData`` 里），``data`` 装不下，只能留在这里看。
+    raw: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
         return self.code == 0
+
+    def flag(self, name: str, default: bool = False) -> bool:
+        """读顶层的布尔旗标（``scaned`` / ``login`` 之类）。"""
+        value = self.raw.get(name, default)
+        return bool(value) if value is not None else default
 
     @classmethod
     def from_payload(cls, payload: Any, http_status: int = 200) -> "ApiResponse":
@@ -50,7 +58,13 @@ class ApiResponse:
         if not isinstance(data, dict):
             data = {"value": data}
 
-        return cls(code=code, message=message, data=data, http_status=http_status)
+        return cls(
+            code=code,
+            message=message,
+            data=data,
+            http_status=http_status,
+            raw=dict(payload),
+        )
 
 
 @dataclass(frozen=True)
