@@ -141,31 +141,21 @@ def cookie_map(http) -> dict[str, str]:
     return dict(jar.items())
 
 
+class _StubFilter:
+    """最小可用的 JobSearchFilter 桩：只要 to_params/for_page。
 
+    推荐页 special/zone 已移除，crawl/iter_pages 必须给 search_filter 或
+    expect_filter，所以每个走管线的用例都带上它。
+    """
 
-def test_fetch_page_hits_special_zone_route():
-    client, http, _ = client_with([ok_page([api_item("a")])])
-    payload = client.fetch_page(1)
-    assert payload["code"] == 0
-    call = http.calls[0]
-    assert call["method"] == "GET"
-    assert call["url"] == "https://example.test/wapi/zpgeek/pc/special/zone/joblist.json"
-    assert call["params"]["page"] == 1
-    assert call["params"]["type"] == "1"
-    assert http.headers.get("X-Requested-With") == "XMLHttpRequest"
+    def __init__(self, params=None):
+        self._params = dict(params or {"query": "python", "city": "101280100", "page": "1"})
 
+    def to_params(self):
+        return dict(self._params)
 
-def test_fetch_page_rejects_page_below_one():
-    client, _, _ = client_with([])
-    with pytest.raises(ValueError):
-        client.fetch_page(0)
-
-
-def test_fetch_page_clean_maps_fields():
-    client, _, _ = client_with([ok_page([api_item("a", jobName="  爬虫 工程师  ")])])
-    result = client.fetch_page_clean(1)
-    assert result.jobs[0].job_name == "爬虫 工程师"
-    assert result.page == 1
+    def for_page(self, page):
+        return _StubFilter({**self._params, "page": str(page)})
 
 
 
@@ -183,9 +173,9 @@ def test_crawl_cleans_and_stores_each_page_then_sleeps(tmp_path):
     client, http, sleeper = client_with(pages)
     store = JobStore(tmp_path / "jobs.db")
 
-    report = client.crawl(store=store, page_interval=1.0)
+    report = client.crawl(store=store, page_interval=1.0, search_filter=_StubFilter())
 
-    assert [c["params"]["page"] for c in http.calls] == [1, 2, 3]
+    assert [int(c["params"]["page"]) for c in http.calls] == [1, 2, 3]
     assert sleeper.calls == [1.0, 1.0]
     assert store.count_pages() == 3
     assert store.count_jobs() == 3
@@ -217,7 +207,7 @@ def test_crawl_saves_before_sleep(tmp_path):
         sleeper.calls.append(seconds)
 
     client._sleep = spy
-    client.crawl(store=store, page_interval=1.0)
+    client.crawl(store=store, page_interval=1.0, search_filter=_StubFilter())
 
     assert seen == [1, 2]
 
@@ -226,7 +216,7 @@ def test_crawl_respects_max_pages(tmp_path):
     pages = [ok_page([api_item(f"id{i}")]) for i in range(1, 6)]
     client, http, sleeper = client_with(pages)
     with JobStore(tmp_path / "jobs.db") as store:
-        report = client.crawl(store=store, max_pages=2, page_interval=1.0)
+        report = client.crawl(store=store, max_pages=2, page_interval=1.0, search_filter=_StubFilter())
 
     assert len(http.calls) == 2
     assert sleeper.calls == [1.0]
@@ -241,7 +231,7 @@ def test_crawl_stops_on_partial_page_without_more(tmp_path):
     partial = [api_item(f"id{i}") for i in range(C.PAGE_SIZE - 3)]
     client, http, sleeper = client_with([ok_page(partial, has_more=False)])
     with JobStore(tmp_path / "jobs.db") as store:
-        report = client.crawl(store=store, page_interval=1.0)
+        report = client.crawl(store=store, page_interval=1.0, search_filter=_StubFilter())
 
     assert len(http.calls) == 1
     assert sleeper.calls == []
@@ -259,16 +249,16 @@ def test_crawl_ignores_unreliable_has_more_on_full_page(tmp_path):
     ]
     client, http, _ = client_with(pages)
     with JobStore(tmp_path / "jobs.db") as store:
-        report = client.crawl(store=store, page_interval=0.0)
+        report = client.crawl(store=store, page_interval=0.0, search_filter=_StubFilter())
 
-    assert [c["params"]["page"] for c in http.calls] == [1, 2]
+    assert [int(c["params"]["page"]) for c in http.calls] == [1, 2]
     assert report.stats.kept_count == C.PAGE_SIZE
 
 
 def test_crawl_zero_interval_skips_sleep(tmp_path):
     client, _, sleeper = client_with([ok_page([])])
     with JobStore(tmp_path / "jobs.db") as store:
-        client.crawl(store=store, page_interval=0.0)
+        client.crawl(store=store, page_interval=0.0, search_filter=_StubFilter())
     assert sleeper.calls == []
 
 
@@ -281,7 +271,7 @@ def test_crawl_keeps_already_stored_pages_on_error(tmp_path):
     store = JobStore(tmp_path / "jobs.db")
 
     with pytest.raises(JobApiError) as excinfo:
-        client.crawl(store=store, page_interval=1.0)
+        client.crawl(store=store, page_interval=1.0, search_filter=_StubFilter())
 
     assert excinfo.value.is_session_expired
     assert store.count_jobs() == 1
@@ -291,26 +281,13 @@ def test_crawl_opens_default_store_when_not_given(tmp_path, monkeypatch):
     db_path = tmp_path / "auto.db"
     monkeypatch.setattr("boss_jobs.client.open_store", lambda path=None: JobStore(db_path))
     client, _, _ = client_with([ok_page([])])
-    report = client.crawl(page_interval=0.0)
+    report = client.crawl(page_interval=0.0, search_filter=_StubFilter())
     assert report.stats.pages == 1
     assert db_path.exists()
 
 
-class _StubFilter:
-    """最小可用的 JobSearchFilter 桩：只要 to_params/for_page。"""
-
-    def __init__(self, params=None):
-        self._params = dict(params or {"query": "python", "city": "101280100", "page": "1"})
-
-    def to_params(self):
-        return dict(self._params)
-
-    def for_page(self, page):
-        return _StubFilter({**self._params, "page": str(page)})
-
-
 def test_crawl_带search_filter_走搜索流(tmp_path):
-    """给了 search_filter 就打 search/joblist，不打 special/zone。"""
+    """给了 search_filter 就打 search/joblist。"""
     client, http, _ = client_with(
         [{"code": 0, "zpData": {"jobList": [api_item("s1")], "hasMore": False}}],
         stoken_provider=FakeProvider(),
@@ -320,16 +297,17 @@ def test_crawl_带search_filter_走搜索流(tmp_path):
 
     assert report.stats.pages == 1
     assert "search/joblist" in http.calls[0]["url"]
-    assert "special/zone" not in http.calls[0]["url"]
     assert http.calls[0]["params"]["query"] == "python"
     assert http.calls[0]["params"]["city"] == "101280100"
 
 
-def test_crawl_不带search_filter_走推荐流(tmp_path):
+def test_crawl_两个filter都不给就报错(tmp_path):
+    """推荐页 special/zone 已移除：两个 filter 都不给 = 没有检索语义，抛 ValueError。"""
     client, http, _ = client_with([ok_page([api_item("r1")], has_more=False)])
     with JobStore(tmp_path / "r.db") as store:
-        client.crawl(store=store, max_pages=1, page_interval=0.0)
-    assert "special/zone" in http.calls[0]["url"]
+        with pytest.raises(ValueError, match="expect_filter 或 search_filter"):
+            client.crawl(store=store, max_pages=1, page_interval=0.0)
+    assert http.calls == []
 
 
 def test_crawl_搜索流_翻页时换页码(tmp_path):
@@ -357,10 +335,16 @@ def test_iter_pages_yields_without_store():
         ok_page([api_item("b1")], has_more=False),  # 不满页（1 < 15）→ 停
     ]
     client, _, sleeper = client_with(pages)
-    results = list(client.iter_pages(page_interval=1.0))
+    results = list(client.iter_pages(page_interval=1.0, search_filter=_StubFilter()))
     assert [r.page for r in results] == [1, 2]
     assert [j.encrypt_job_id for r in results for j in r.jobs] == ["a1", "b1"]
     assert sleeper.calls == [1.0]
+
+
+def test_iter_pages_两个filter都不给就报错():
+    client, _, _ = client_with([])
+    with pytest.raises(ValueError, match="expect_filter 或 search_filter"):
+        list(client.iter_pages())
 
 
 
@@ -453,7 +437,7 @@ def test_request_json_surfaces_dialog_content_as_message():
     }
     client, _, _ = client_with([FakeResponse(raw)])
     with pytest.raises(JobApiError) as excinfo:
-        client.fetch_page(1)
+        client.fetch_search_page(_StubFilter())
     assert excinfo.value.is_chat_remind
     assert "还剩30次沟通机会" in excinfo.value.message
     assert not excinfo.value.is_session_expired
@@ -468,13 +452,13 @@ def test_browser_check_error_is_tagged():
 def test_transport_error_on_bad_json():
     client, _, _ = client_with([FakeResponse(None, text="<html>oops</html>")])
     with pytest.raises(JobTransportError):
-        client.fetch_page(1)
+        client.fetch_search_page(_StubFilter())
 
 
 def test_data_error_on_non_object_payload():
     client, _, _ = client_with([FakeResponse([1, 2, 3])])
     with pytest.raises(JobDataError):
-        client.fetch_page(1)
+        client.fetch_search_page(_StubFilter())
 
 
 def test_retries_then_succeeds():
@@ -484,7 +468,8 @@ def test_retries_then_succeeds():
         ok_page([api_item("a")]),
     ]
     client, http, _ = client_with(pages, sleeper=sleeper, retries=1, backoff=0.5)
-    assert client.fetch_page(1)["code"] == 0
+    result = client.fetch_search_page(_StubFilter())
+    assert [j.encrypt_job_id for j in result.jobs] == ["a"]
     assert len(http.calls) == 2
     assert sleeper.calls == [0.5]
 
@@ -667,6 +652,154 @@ def test_fetch_search_page_code37_标记成浏览器校验():
     assert not excinfo.value.is_session_expired
 
 
+# --------------------------------------------------------------------------- #
+# 期望流（recommend/job/list + recommend/expect/list）
+# --------------------------------------------------------------------------- #
+
+
+def expect_filter(**kwargs):
+    from boss_filter.expect import JobExpectFilter
+
+    kwargs.setdefault("kind", "expect")
+    kwargs.setdefault("encrypt_expect_id", "E1")
+    return JobExpectFilter(**kwargs)
+
+
+def ok_expects(*, mix=None, expects=(), part_time=()) -> dict:
+    zp: dict = {}
+    if mix is not None:
+        zp["mixExpect"] = mix
+    if expects:
+        zp["expectList"] = list(expects)
+    if part_time:
+        zp["partTimeExpectList"] = list(part_time)
+    return {"code": 0, "message": "Success", "zpData": zp}
+
+
+def test_fetch_expect_list_打期望元数据路由():
+    client, http, _ = client_with(
+        [ok_expects(mix={"encryptExpectId": "MIX1", "positionName": "混合", "locationName": "佛山", "mixExpectType": "2"})]
+    )
+    result = client.fetch_expect_list()
+    call = http.calls[0]
+    assert call["method"] == "GET"
+    assert call["url"].endswith("/wapi/zpgeek/pc/recommend/expect/list.json")
+    assert result.mix is not None
+    assert result.mix.encrypt_expect_id == "MIX1"
+
+
+def test_fetch_expect_page_打期望流路由():
+    client, http, _ = client_with([ok_page([api_item("a")])])
+    client.fetch_expect_page(expect_filter())
+    call = http.calls[0]
+    assert call["method"] == "GET"
+    assert call["url"].endswith("/wapi/zpgeek/pc/recommend/job/list.json")
+
+
+def test_fetch_expect_page_四种kind的主参数():
+    cases = [
+        (dict(kind="recommend", encrypt_expect_id="MIX1", mix_expect_type="2", city="101280100"),
+         {"encryptExpectId": "MIX1", "mixExpectType": "2", "city": "101280100"}),
+        (dict(kind="part_time", encrypt_expect_id="PT1"),
+         {"encryptExpectId": "PT1", "jobType": "1903"}),
+        (dict(kind="expect", encrypt_expect_id="E1"),
+         {"encryptExpectId": "E1"}),
+        (dict(kind="temp_expect", expect_info='{"expectType":"1"}'),
+         {"expectInfo": '{"expectType":"1"}'}),
+    ]
+    for kwargs, want in cases:
+        client, http, _ = client_with([ok_page([])])
+        client.fetch_expect_page(expect_filter(**kwargs))
+        params = http.calls[0]["params"]
+        for key, value in want.items():
+            assert params.get(key) == value, f"{kwargs} 的 {key} 不对：{params}"
+        assert "query" not in params
+        assert "scene" not in params
+
+
+def test_fetch_expect_page_翻页只改页码():
+    client, http, _ = client_with([ok_page([]), ok_page([])])
+    f = expect_filter()
+    first = client.fetch_expect_page(f, page=1)
+    second = client.fetch_expect_page(f, page=2)
+    assert http.calls[0]["params"]["page"] == "1"
+    assert http.calls[1]["params"]["page"] == "2"
+    assert first.page == 1
+    assert second.page == 2
+
+
+def test_fetch_expect_page_走stoken重试():
+    """期望流在安全网关后面（缺令牌回 code 37），撞 37 先退避拿同一枚重试。"""
+    from boss_jobs import config as C
+
+    tokens = []
+
+    class OnceProvider:
+        def ensure(self, *, force: bool = False):
+            tokens.append(force)
+            return "TOKEN-1"
+
+    http = FakeHttp(
+        [
+            {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
+            ok_page([api_item("a")]),
+        ]
+    )
+    sleeper = RecordingSleeper()
+    client = JobClient(http=http, stoken_provider=OnceProvider(), sleeper=sleeper)
+    result = client.fetch_expect_page(expect_filter())
+    assert [job.job_name for job in result.jobs] == ["岗位"]
+    assert tokens == [False]  # 同一枚重试，没急着换新
+    assert sleeper.calls == [C.BROWSER_CHECK_BACKOFF]
+    assert len(http.calls) == 2
+
+
+def test_crawl_带expect_filter_走期望流(tmp_path):
+    """给了 expect_filter 就打 recommend/job/list，不打 search。"""
+    client, http, _ = client_with(
+        [ok_page([api_item("e1")], has_more=False)],
+        stoken_provider=FakeProvider(),
+    )
+    with JobStore(tmp_path / "e1.db") as store:
+        report = client.crawl(
+            store=store, max_pages=1, page_interval=0.0, expect_filter=expect_filter()
+        )
+    assert report.stats.pages == 1
+    assert "recommend/job/list" in http.calls[0]["url"]
+    assert "search/joblist" not in http.calls[0]["url"]
+    assert http.calls[0]["params"]["encryptExpectId"] == "E1"
+
+
+def test_crawl_expect_filter优先于search_filter(tmp_path):
+    """两条都给时以期望流为准（配置里 expect_kind 非空就走期望流）。"""
+    client, http, _ = client_with(
+        [ok_page([api_item("e1")], has_more=False)],
+        stoken_provider=FakeProvider(),
+    )
+    with JobStore(tmp_path / "e.db") as store:
+        client.crawl(
+            store=store,
+            max_pages=1,
+            page_interval=0.0,
+            expect_filter=expect_filter(),
+            search_filter=_StubFilter(),
+        )
+    assert "recommend/job/list" in http.calls[0]["url"]
+    assert "search/joblist" not in http.calls[0]["url"]
+
+
+def test_crawl_只有search_filter_仍走搜索流(tmp_path):
+    """不破坏已有两条流：只给 search_filter 时仍是 search/joblist。"""
+    client, http, _ = client_with(
+        [ok_page([api_item("s1")], has_more=False)],
+        stoken_provider=FakeProvider(),
+    )
+    with JobStore(tmp_path / "s2.db") as store:
+        client.crawl(store=store, max_pages=1, page_interval=0.0, search_filter=_StubFilter())
+    assert "search/joblist" in http.calls[0]["url"]
+    assert "recommend/job/list" not in http.calls[0]["url"]
+
+
 
 
 def test_cli_fetch_writes_db(tmp_path, monkeypatch):
@@ -682,9 +815,11 @@ def test_cli_fetch_writes_db(tmp_path, monkeypatch):
         "boss_jobs.client.http_from_session",
         lambda *a, **k: fake_http,
     )
+    f = tmp_path / "f.json"
+    f.write_text('{"query": "python"}', encoding="utf-8")
     db_path = tmp_path / "cli.db"
     code = cli.main(
-        ["--db", str(db_path), "fetch", "--interval", "0"]
+        ["--db", str(db_path), "fetch", "--interval", "0", "--filter", str(f)]
     )
     assert code == 0
     with JobStore(db_path) as store:
@@ -705,8 +840,10 @@ def test_cli_fetch_reports_browser_check(tmp_path, monkeypatch, capsys):
             ]
         ),
     )
+    f = tmp_path / "f.json"
+    f.write_text('{"query": "python"}', encoding="utf-8")
     code = cli.main(
-        ["--db", str(tmp_path / "x.db"), "fetch"]
+        ["--db", str(tmp_path / "x.db"), "fetch", "--filter", str(f)]
     )
     assert code == 1
     err = capsys.readouterr().err
@@ -723,8 +860,10 @@ def test_cli_fetch_reports_risk_control(tmp_path, monkeypatch, capsys):
             [{"code": 36, "message": "您的账户存在异常行为", "zpData": {}}]
         ),
     )
+    f = tmp_path / "f.json"
+    f.write_text('{"query": "python"}', encoding="utf-8")
     code = cli.main(
-        ["--db", str(tmp_path / "x.db"), "fetch"]
+        ["--db", str(tmp_path / "x.db"), "fetch", "--filter", str(f)]
     )
     assert code == 1
     err = capsys.readouterr().err
@@ -796,17 +935,131 @@ def test_cli_fetch_库里的条件_走搜索流(tmp_path, monkeypatch, capsys):
     assert "库里的搜索条件" in out
 
 
-def test_cli_fetch_两边都没有条件_走推荐流(tmp_path, monkeypatch, capsys):
+def test_cli_fetch_两边都没有条件_报错(tmp_path, monkeypatch, capsys):
+    """推荐页 special/zone 已下线：库里条件全空 + 没给 --filter/--expect → 报错退出。"""
     captured = {}
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session", lambda *a, **k: _capturing_http(captured)
     )
     code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1"])
+    assert code == cli.EXIT_USAGE
+    assert captured == {}, "条件全空不该发请求"
+    err = capsys.readouterr().err
+    assert "搜索条件全空" in err
+    assert "special/zone" in err
+
+
+def _routing_http(captured, *, expects=None):
+    """按 URL 路由：期望元数据回 expects，职位页回 ok_page 并记下参数。"""
+
+    def _request(method, url, **kwargs):
+        captured["url"] = url
+        captured.setdefault("calls", []).append({"url": url, "params": kwargs.get("params") or {}})
+        if "expect/list" in url:
+            return FakeResponse(expects if expects is not None else ok_expects())
+        captured["params"] = kwargs.get("params") or {}
+        return FakeResponse(ok_page([api_item("j1")], has_more=False))
+
+    return _Httplet(_request)
+
+
+def test_cli_fetch_expect_兼职(tmp_path, monkeypatch, capsys):
+    """--expect part_time → 期望流，jobType 写死 1903，id 取 partTimeExpectList[0]。"""
+    captured = {}
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session",
+        lambda *a, **k: _routing_http(
+            captured,
+            expects=ok_expects(part_time=[{"encryptExpectId": "PT1", "positionName": "派单", "locationName": "佛山"}]),
+        ),
+    )
+    code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1", "--expect", "part_time"])
     assert code == 0
-    assert "special/zone" in captured["url"]
+    assert "recommend/job/list" in captured["url"]
+    assert captured["params"]["jobType"] == "1903"
+    assert captured["params"]["encryptExpectId"] == "PT1"
     assert "query" not in captured["params"]
     out = capsys.readouterr().out
-    assert "推荐流" in out
+    assert "期望流" in out
+
+
+def test_cli_fetch_expect_推荐(tmp_path, monkeypatch, capsys):
+    """--expect recommend → 混合期望，带 mixExpectType，city 取 mix.location。"""
+    captured = {}
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session",
+        lambda *a, **k: _routing_http(
+            captured,
+            expects=ok_expects(
+                mix={"encryptExpectId": "MIX1", "mixExpectType": "2", "positionName": "前端", "locationName": "佛山", "location": "101280800"}
+            ),
+        ),
+    )
+    code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1", "--expect", "recommend"])
+    assert code == 0
+    assert "recommend/job/list" in captured["url"]
+    assert captured["params"]["encryptExpectId"] == "MIX1"
+    assert captured["params"]["mixExpectType"] == "2"
+    assert captured["params"]["city"] == "101280800"
+
+
+def test_cli_fetch_expect_指定期望(tmp_path, monkeypatch, capsys):
+    """--expect expect:<id> 显式点名，不必先拉期望列表。"""
+    captured = {}
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session",
+        lambda *a, **k: _routing_http(captured, expects=ok_expects()),
+    )
+    code = cli.main(
+        ["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1", "--expect", "expect:E9"]
+    )
+    assert code == 0
+    assert "recommend/job/list" in captured["url"]
+    assert captured["params"]["encryptExpectId"] == "E9"
+    # 显式 id 不拉期望列表
+    assert all("expect/list" not in c["url"] for c in captured["calls"])
+
+
+def test_cli_fetch_expect_临时期望(tmp_path, monkeypatch, capsys):
+    """--expect temp:<file> 读 expectInfo JSON，发 expectInfo 不发 encryptExpectId。"""
+    info = tmp_path / "temp.json"
+    info.write_text(
+        '{"expectType":"1","position":"python","location":"101280100","lowSalary":"10","highSalary":"20"}',
+        encoding="utf-8",
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session",
+        lambda *a, **k: _routing_http(captured, expects=ok_expects()),
+    )
+    code = cli.main(
+        ["--db", str(tmp_path / "d.db"), "fetch", "--max-pages", "1", "--expect", f"temp:{info}"]
+    )
+    assert code == 0
+    assert "recommend/job/list" in captured["url"]
+    assert "expectInfo" in captured["params"]
+    assert "encryptExpectId" not in captured["params"]
+
+
+def test_cli_fetch_expect与filter互斥(tmp_path, capsys):
+    """两条流是「这次走哪条检索路径」的二选一，同时给就报错退出。"""
+    f = tmp_path / "f.json"
+    f.write_text('{"query": "python"}', encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--expect", "part_time", "--filter", str(f)])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "互斥" in err
+
+
+def test_cli_fetch_expect_取值不认识就报错(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "boss_jobs.client.http_from_session", lambda *a, **k: _routing_http({}, expects=ok_expects())
+    )
+    code = cli.main(["--db", str(tmp_path / "d.db"), "fetch", "--expect", "bogus"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "取值不认识" in err
 
 
 def test_cli_list_and_stats(tmp_path, monkeypatch, capsys):
@@ -834,7 +1087,7 @@ def test_crawl_on_progress_fires_per_page(tmp_path):
     client, _, _ = client_with(pages)
     events: list[dict] = []
     with JobStore(tmp_path / "p.db") as store:
-        client.crawl(store=store, page_interval=0.0, on_progress=events.append)
+        client.crawl(store=store, page_interval=0.0, on_progress=events.append, search_filter=_StubFilter())
 
     assert len(events) == 2
     assert events[0]["page"] == 1
@@ -866,6 +1119,7 @@ def test_crawl_should_stop_breaks_before_next_page(tmp_path):
             page_interval=0.0,
             on_progress=counting,
             should_stop=stop_after_first,
+            search_filter=_StubFilter(),
         )
         assert store.count_jobs() == 1
 
@@ -877,7 +1131,7 @@ def test_crawl_without_hooks_still_works(tmp_path):
     """不传 on_progress / should_stop 时行为不变。"""
     client, _, _ = client_with([ok_page([])])
     with JobStore(tmp_path / "n.db") as store:
-        report = client.crawl(store=store, page_interval=0.0)
+        report = client.crawl(store=store, page_interval=0.0, search_filter=_StubFilter())
     assert report.stats.pages == 1
 
 

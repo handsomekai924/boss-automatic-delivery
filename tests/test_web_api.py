@@ -139,6 +139,123 @@ def test_filters_search_roundtrip(client: TestClient):
     assert r2.json()["city"] == "101280100"
 
 
+def test_collection_config_期望流字段往返(client: TestClient):
+    """expect_kind / encrypt_expect_id / mix_expect_type / expect_info / expect_name 要存得下、读得回。"""
+    r = client.put(
+        "/api/collection/config",
+        json={
+            "max_pages": 3,
+            "use_search": True,
+            "expect_kind": "expect",
+            "encrypt_expect_id": "E1",
+            "mix_expect_type": "",
+            "expect_info": "",
+            "expect_name": "前端开发工程师(佛山)",
+        },
+    )
+    assert r.status_code == 200
+    cfg = r.json()["collection"]
+    assert cfg["expect_kind"] == "expect"
+    assert cfg["encrypt_expect_id"] == "E1"
+    assert cfg["expect_name"] == "前端开发工程师(佛山)"
+    # 期望 + 关键词：encrypt_expect_id 同时落进搜索 payload（前端 onSearch 的 lastExpectId）
+    assert r.json()["search"]["encryptExpectId"] == "E1"
+
+    r2 = client.get("/api/collection/config")
+    assert r2.json()["collection"]["expect_kind"] == "expect"
+    assert r2.json()["collection"]["encrypt_expect_id"] == "E1"
+
+
+def test_collection_config_临时期望的expectInfo往返(client: TestClient):
+    """temp_expect 主参数是 expectInfo JSON 串，要原样存得下、读得回（不被清洗掉）。"""
+    info = '{"expectType":"1","position":"python","location":"101280100","lowSalary":"10","highSalary":"20"}'
+    r = client.put(
+        "/api/collection/config",
+        json={
+            "max_pages": 3,
+            "use_search": True,
+            "expect_kind": "temp_expect",
+            "encrypt_expect_id": "",
+            "mix_expect_type": "",
+            "expect_info": info,
+            "expect_name": "临时期望：python",
+        },
+    )
+    assert r.status_code == 200
+    cfg = r.json()["collection"]
+    assert cfg["expect_kind"] == "temp_expect"
+    assert cfg["expect_info"] == info
+    assert cfg["expect_name"] == "临时期望：python"
+    # 临时期望不带 encryptExpectId
+    assert cfg["encrypt_expect_id"] == ""
+
+    r2 = client.get("/api/collection/config")
+    assert r2.json()["collection"]["expect_info"] == info
+
+
+def test_collection_config_旧字段缺省不启用期望流(client: TestClient):
+    """旧库/旧客户端没这几把 key → 空串，不启用期望流（走搜索流）。
+
+    旧「推荐页」配置（use_search=false）被归一成搜索流——该档已移除。
+    """
+    r = client.put(
+        "/api/collection/config",
+        json={"max_pages": 5, "use_search": False},
+    )
+    assert r.status_code == 200
+    cfg = r.json()["collection"]
+    assert cfg["expect_kind"] == ""
+    assert cfg["encrypt_expect_id"] == ""
+    assert cfg["use_search"] is True
+
+
+def test_collection_expects_桩响应解析(client: TestClient, monkeypatch):
+    """GET /api/collection/expects 把三类期望摊成前端下拉要的行。"""
+    from boss_jobs.models import ExpectItem, ExpectList
+
+    class StubClient:
+        def fetch_expect_list(self):
+            return ExpectList(
+                mix=ExpectItem(
+                    kind="mix",
+                    encrypt_expect_id="MIX1",
+                    position_name="前端开发工程师",
+                    location_name="佛山",
+                    mix_expect_type="2",
+                ),
+                expects=(
+                    ExpectItem(kind="expect", encrypt_expect_id="E1", position_name="Python", location_name="广州"),
+                ),
+                part_time=(
+                    ExpectItem(kind="part_time", encrypt_expect_id="PT1", position_name="派单", location_name="佛山"),
+                ),
+            )
+
+    monkeypatch.setattr("boss_jobs.create_client", lambda *a, **k: StubClient())
+    r = client.get("/api/collection/expects")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mix"]["encryptExpectId"] == "MIX1"
+    assert body["mix"]["mixExpectType"] == "2"
+    assert body["mix"]["label"] == "前端开发工程师(佛山)"
+    assert [row["encryptExpectId"] for row in body["expects"]] == ["E1"]
+    assert [row["encryptExpectId"] for row in body["partTime"]] == ["PT1"]
+    assert body["expects"][0]["kind"] == "expect"
+
+
+def test_collection_expects_上游失败转成人话(client: TestClient, monkeypatch):
+    from boss_jobs.errors import JobError
+
+    class BoomClient:
+        def fetch_expect_list(self):
+            raise JobError("没登录")
+
+    monkeypatch.setattr("boss_jobs.create_client", lambda *a, **k: BoomClient())
+    r = client.get("/api/collection/expects")
+    assert r.status_code >= 400
+    assert "求职期望" in r.text or "没登录" in r.text
+
+
 def test_crawl_status_idle(client: TestClient):
     r = client.get("/api/crawl/status")
     assert r.status_code == 200

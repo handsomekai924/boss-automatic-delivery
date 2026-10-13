@@ -122,8 +122,24 @@ class RecordingContext:
         return [h["action"] for h in self.hits if h["job_id"] == job_id]
 
 
-def run_crawl(tmp_path, responses, *, context=None, enrich_details=False, max_pages=1, events=None):
-    """跑一轮 crawl，回 ``(store, report, http)``。**不关库**——调用方自己收尾。"""
+class _StubFilter:
+    """最小 search_filter 桩——推荐页 special/zone 已移除，crawl 必须给一条流。"""
+
+    def __init__(self, params=None):
+        self._params = dict(params or {"query": "python", "page": "1"})
+
+    def to_params(self):
+        return dict(self._params)
+
+    def for_page(self, page):
+        return _StubFilter({**self._params, "page": str(page)})
+
+
+def run_crawl(tmp_path, responses, *, context=None, enrich_details=False, max_pages=1, events=None, expect_filter=None, search_filter=None):
+    """跑一轮 crawl，回 ``(store, report, http)``。**不关库**——调用方自己收尾。
+
+    黑名单行为与路由无关；不显式给流就走最小搜索流桩。
+    """
     http = FakeHttp(responses)
     client = JobClient(http=http, sleeper=lambda _s: None)
     store = JobStore(tmp_path / "jobs.db")
@@ -135,6 +151,10 @@ def run_crawl(tmp_path, responses, *, context=None, enrich_details=False, max_pa
         enrich_details=enrich_details,
         blacklist_context=context,
         on_progress=(events.append if events is not None else None),
+        expect_filter=expect_filter,
+        search_filter=search_filter if search_filter is not None else (
+            None if expect_filter is not None else _StubFilter()
+        ),
     )
     return store, report, http
 
@@ -446,3 +466,36 @@ def test_重抓会刷新旧的安全状态(tmp_path):
         assert all(s.get("rule_type") != "jd_keyword" for s in job.matched_rule_snapshot)
     finally:
         store2.close()
+
+
+# --------------------------------------------------------------------------- #
+# 期望流路径：黑名单钩子照常触发
+# --------------------------------------------------------------------------- #
+
+
+def test_期望流路径下公司命中照常跳过(tmp_path):
+    """第三条检索路径（recommend/job/list）不能绕过黑名单——钩子在 crawl 里，不在路由上。"""
+    from boss_filter.expect import JobExpectFilter
+
+    rec = RecordingContext(
+        store_blacklisted=False,
+        company_matches=company_matcher("甲公司"),
+    )
+    expect = JobExpectFilter(kind="expect", encrypt_expect_id="E1")
+    store, report, http = run_crawl(
+        tmp_path,
+        [ok_page([api_item("j1", brand_name="甲公司"), api_item("j2", brand_name="正常公司")]),
+         detail_ok("正常公司的 JD")],
+        context=rec.ctx,
+        enrich_details=True,
+        expect_filter=expect,
+    )
+    try:
+        assert "recommend/job/list" in http.calls[0]["url"]
+        assert store.get_job("j1") is None
+        assert store.get_job("j2") is not None
+        assert report.stats.company_hits == 1
+        assert report.stats.skipped == 1
+        assert rec.actions_for("j1") == ["skipped"]
+    finally:
+        store.close()

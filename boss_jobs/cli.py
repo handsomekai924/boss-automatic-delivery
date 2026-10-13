@@ -4,15 +4,25 @@
     python -m boss_jobs fetch --max-pages 3        # 只翻 3 页
     python -m boss_jobs fetch --interval 2.0       # 页间睡 2 秒（更保守）
     python -m boss_jobs fetch --db my.db           # 指定状态库路径
+    python -m boss_jobs fetch --filter my.json     # 搜索流：用这份 JSON 条件
+    python -m boss_jobs fetch --expect part_time   # 期望流：兼职期望
+    python -m boss_jobs fetch --expect recommend   # 期望流：推荐（混合）期望
+    python -m boss_jobs fetch --expect expect:<id> # 期望流：指定期望
+    python -m boss_jobs fetch --expect temp:<file> # 期望流：临时期望（expectInfo JSON）
     python -m boss_jobs stats                      # 看库里的汇总
     python -m boss_jobs list --city 广州 --limit 20
     python -m boss_jobs list --json                # 职位按 JSON 输出
 
 登录态默认读状态库 ``data/boss.db`` 的 ``doc('session')``（``boss_login`` 落的那份）。
 
-搜索流还会**自动**补 ``__zp_stoken__``：每次抓搜索页前判一次过期，过期了就
+搜索流 / 期望流还会**自动**补 ``__zp_stoken__``：每次抓页前判一次过期，过期了就
 拉起一台 Chrome（CDP）让站点自己算一枚、落到 ``doc('stoken')``、再镜像进
 ``doc('session')``，下次直接用（令牌约 64 小时）。没有单独的「取令牌」命令。
+
+``--expect``（期望流）与 ``--filter``（搜索流）**互斥**——两者都在选「这次走哪条
+检索流」。期望流可以用库里的共享筛选维度（城市/薪资/经验/…，经
+``JobExpectFilter.from_search`` 搬过去），但**永远不带关键词**（站点点期望 tab 时
+就把 ``query`` 删了）。要「期望 + 关键词」就走搜索流（库里配好 ``encryptExpectId``）。
 """
 
 from __future__ import annotations
@@ -21,6 +31,8 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import replace
+from pathlib import Path
 
 from . import __version__
 from .cdp_stoken import CHROME_BIN_ENV
@@ -39,10 +51,19 @@ from .store import open_store
 
 # 筛选条件：不传 --filter 就用状态库里那份；传了就只读那份 JSON（不写库）
 from boss_filter import JobSearchFilter, load_search_filter, search_filter_from_file
+from boss_filter.expect import JobExpectFilter
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
+
+#: ``--expect`` 认的取值（写进 help，跟解析规则同一处维护）。
+EXPECT_SPECS: tuple[str, ...] = (
+    "recommend",
+    "part_time",
+    "expect:<encryptExpectId>",
+    "temp:<expectInfo.json>",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,8 +104,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--filter",
         default=None,
         help=(
-            "本次抓取用这份 JSON 条件（只读，不写库）。"
-            "不传则用状态库里存的条件；都没有 = 全部「不限」，走推荐流"
+            "本次抓取用这份 JSON 条件（只读，不写库），走搜索流 search/joblist。"
+            "不传则用状态库里存的条件。条件至少要有一个维度——旧「推荐页」"
+            "（全部不限，special/zone）已下线，全空会报错。"
+            "与 --expect 互斥"
+        ),
+    )
+    fetch.add_argument(
+        "--expect",
+        default=None,
+        metavar="SPEC",
+        help=(
+            "走求职期望流 recommend/job/list.json。取值："
+            + " / ".join(EXPECT_SPECS)
+            + "。recommend/part_time 不带 id 时在线拉期望列表取默认条目；"
+            "筛选维度沿用库里的搜索条件（不含关键词）。与 --filter 互斥"
         ),
     )
     fetch.add_argument("--json", action="store_true", help="抓完把统计按 JSON 输出")
@@ -103,8 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     _setup_logging(args.verbose)
+
+    if getattr(args, "expect", None) and getattr(args, "filter", None):
+        parser.error(
+            "--expect（期望流 recommend/job/list）与 --filter（搜索流 search/joblist）互斥："
+            "一次抓取只能走一条检索流。要「期望 + 关键词」就只用 --filter"
+            "（库里配好 encryptExpectId），要「期望 + 筛选」就只用 --expect"
+        )
 
     try:
         if args.command == "fetch":
@@ -170,18 +212,30 @@ def main(argv: list[str] | None = None) -> int:
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
     client = _build_client(args)
-    # --filter 是「这次就用这份」的只读入参；不传则用库里的条件。
-    # 两边都没有 = 全空 = 不限（走推荐流，不搜关键词）。
-    if args.filter:
+    expect_filter: JobExpectFilter | None = None
+    search_filter: JobSearchFilter | None = None
+
+    if args.expect:
+        # 期望流：主参数按 --expect 装配，共享筛选维度从库里的搜索条件搬
+        # （经 JobExpectFilter.from_search），但**不搬 query**——期望流永远不带关键词。
+        expect_filter = _assemble_expect_filter(args.expect, client=client, db=args.db)
+        source_note = f"期望流 recommend/job/list（{args.expect}）"
+    elif args.filter:
         search_filter = search_filter_from_file(args.filter)
         source_note = f"搜索流 search/joblist（条件文件 {args.filter}）"
     else:
+        # --filter 是「这次就用这份」的只读入参；不传则用库里的条件。
         search_filter = load_search_filter(args.db)
         source_note = "搜索流 search/joblist（库里的搜索条件）"
 
-    if search_filter.is_blank:
-        search_filter = None          # 空条件没有筛选语义，走推荐流
-        source_note = "推荐流 special/zone（无筛选条件）"
+    # 推荐页 special/zone 已下线（2026-10-13），「全部不限」没有检索语义了
+    if expect_filter is None and search_filter is not None and search_filter.is_blank:
+        raise ValueError(
+            "搜索条件全空（关键词和筛选维度都没选）。"
+            "旧「推荐页」special/zone 检索流已下线，不再支持「全部不限」抓取："
+            "请在 --filter 条件文件或采集配置里至少填一个维度（关键词 / 城市 / 薪资…），"
+            "或用 --expect 走求职期望流"
+        )
 
     with open_store(args.db) as store:
         report = client.crawl(
@@ -190,6 +244,7 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
             page_interval=args.interval,
             start_page=args.start_page,
             search_filter=search_filter,
+            expect_filter=expect_filter,
         )
         stats = report.stats
         summary = {
@@ -210,10 +265,100 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:
         print(f"抓取来源  {source_note}")
+        if expect_filter is not None:
+            for line in expect_filter.summary_lines():
+                print(line)
         for line in stats.summary_lines():
             print(line)
         print(f"库内总数  {summary['jobs_in_db']} → {summary['db_path']}")
     return EXIT_OK
+
+
+def _parse_expect_spec(spec: str) -> tuple[str, str, str]:
+    """把 ``--expect`` 的取值拆成 ``(kind, encrypt_id, file_path)``。
+
+    认的取值见 :data:`EXPECT_SPECS`。``recommend`` / ``part_time`` 不带 id 时
+    留空、由 :meth:`JobExpectFilter.from_expects` 取列表默认条目；
+    ``expect:<id>`` 显式点名；``temp:<file>`` 读临时期望的 expectInfo JSON。
+    """
+    text = (spec or "").strip()
+    if text in ("recommend", "part_time"):
+        return text, "", ""
+    if text == "expect":
+        return "expect", "", ""
+    if text.startswith("expect:"):
+        return "expect", text.split(":", 1)[1].strip(), ""
+    if text == "temp" or text.startswith("temp:"):
+        path = text.split(":", 1)[1].strip() if ":" in text else ""
+        return "temp_expect", "", path
+    raise ValueError(
+        f"--expect 取值不认识：{spec!r}（可选：{' / '.join(EXPECT_SPECS)}）"
+    )
+
+
+def _assemble_expect_filter(spec: str, *, client: JobClient, db: str | None) -> JobExpectFilter:
+    """按 ``--expect`` 装配一次期望流检索。
+
+    共享筛选维度（城市/薪资/经验/学历/行业/规模，兼职态 payType/partTime）从
+    库里的搜索条件搬过来——**一份筛选条件两用**，只是期望流换上 ``encryptExpectId``。
+    ``query`` 不搬（见模块头）。
+    """
+    kind, explicit_id, temp_file = _parse_expect_spec(spec)
+    base = load_search_filter(db)
+
+    if kind == "temp_expect":
+        if not temp_file:
+            raise ValueError("临时期望要给文件：--expect temp:<expectInfo.json>")
+        path = Path(temp_file)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise ValueError(f"临时期望文件 {path} 不存在") from None
+        except OSError as exc:
+            raise ValueError(f"读不了临时期望文件 {path}：{exc}") from exc
+        try:
+            data = json.loads(text) if text.strip() else {}
+        except ValueError as exc:
+            raise ValueError(f"临时期望文件 {path} 不是合法 JSON：{exc}") from exc
+        # 已经是序列化好的 expectInfo 串就原样透传；是对象则按前端形状序列化
+        expect_info = data if isinstance(data, str) else json.dumps(
+            {
+                "expectType": (data or {}).get("expectType", ""),
+                "position": (data or {}).get("position", ""),
+                "location": (data or {}).get("location", ""),
+                "lowSalary": (data or {}).get("lowSalary", ""),
+                "highSalary": (data or {}).get("highSalary", ""),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return JobExpectFilter.from_search(
+            base, kind="temp_expect", expect_info=expect_info
+        )
+
+    mix_expect_type = ""
+    if explicit_id:
+        encrypt_expect_id = explicit_id
+        # 推荐 tab 还要 mixExpectType；id 对得上列表里的混合期望才带得出来
+        if kind == "recommend":
+            mix = client.fetch_expect_list().mix
+            if mix is not None and mix.encrypt_expect_id == explicit_id:
+                mix_expect_type = mix.mix_expect_type
+    else:
+        # 默认取哪个的规则在 from_expects：partTimeExpectList[0] / expectList[0] / mix
+        picked = JobExpectFilter.from_expects(client.fetch_expect_list(), kind)
+        encrypt_expect_id = picked.encrypt_expect_id
+        mix_expect_type = picked.mix_expect_type
+        if kind == "recommend" and picked.city:
+            # 前端 getFormData().city = mixLocation || defaultCity：混合期望优先
+            base = replace(base, city=picked.city)
+
+    return JobExpectFilter.from_search(
+        base,
+        kind=kind,
+        encrypt_expect_id=encrypt_expect_id,
+        mix_expect_type=mix_expect_type,
+    )
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:

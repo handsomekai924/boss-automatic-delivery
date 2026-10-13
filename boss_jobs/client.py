@@ -32,7 +32,7 @@ from .errors import (
     dig_chat_remind,
     format_api_message,
 )
-from .models import PageResult, clean_page, extract_job_desc
+from .models import ExpectList, PageResult, clean_expects, clean_page, extract_job_desc
 from .store import JobStore, SaveOutcome, open_store
 
 logger = logging.getLogger(__name__)
@@ -286,29 +286,12 @@ class JobClient:
             self._default_headers = merged
 
 
-    def fetch_page(self, page: int = 1) -> dict[str, Any]:
-        """打一页职位列表，返回完整响应体（未清洗）。
-
-        :param page: 页码，**从 1 开始**（接口认 page=0，但回空列表）
-        """
-        if page < 1:
-            raise ValueError(f"页码从 1 开始，收到 {page}")
-        path = self.endpoints["job_list"]
-        params = {**C.REQUEST_PARAMS, "page": page}
-        return self._get_json(path, params=params, action=f"职位列表第 {page} 页")
-
-    def fetch_page_clean(self, page: int = 1) -> PageResult:
-        """抓一页并**立刻清洗**（不落库）。"""
-        payload = self.fetch_page(page)
-        return clean_page(payload, page=page)
-
-
     def fetch_search_page(self, search_filter: Any, *, page: int | None = None) -> PageResult:
         """按 :class:`~boss_filter.search.JobSearchFilter` 抓**一页搜索结果**并清洗。
 
-        打的是 ``/wapi/zpgeek/search/joblist.json``（见 :data:`config.ENDPOINTS`）。
-        与 :meth:`fetch_page` 的区别：这条是**关键词 + 筛选条件**的搜索流，
-        而 ``fetch_page`` 走的是推荐页那条 ``special/zone`` 流。
+        打的是 ``/wapi/zpgeek/search/joblist.json``（见 :data:`config.ENDPOINTS`）——
+        **关键词 + 筛选条件**的搜索流。与之相对的是
+        :meth:`fetch_expect_page` 那条求职期望流（同一批筛选维度，但不带关键词）。
 
         每次进来都先让 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`
         **判一次 ``__zp_stoken__`` 过期**：没过期直接用，过期了自动拉 Chrome
@@ -326,6 +309,50 @@ class JobClient:
         path = self.endpoints["job_search"]
         action = f"搜索第 {params.get('page', '?')} 页"
         payload = self._get_json_with_stoken_retry(path, params=params, action=action)
+        return clean_page(payload, page=int(params.get("page", 1)))
+
+    def fetch_expect_list(self) -> ExpectList:
+        """拉当前账号的求职期望列表（推荐 / 兼职 / 我的期望）。
+
+        打的是 ``/wapi/zpgeek/pc/recommend/expect/list.json``（元数据接口，
+        不返回职位）。前端是 GET（``ZV``）。**实测（2026-10-13）**：把
+        ``__zp_stoken__`` 从 cookie 里摘掉也回 code 0——**只要登录 Cookie**，
+        所以这里刻意走裸 :meth:`_get_json`，不换
+        :meth:`_get_json_with_stoken_retry`（换上去反而多拉一次 Chrome）。
+
+        响应字段名不对称（``expectList[].encryptId`` vs
+        ``partTimeExpectList[].encryptExpectId``），解析见
+        :func:`boss_jobs.models.clean_expects`。本账号期望列表是空的，
+        对称性没被真数据定案，解析侧双键名都认。
+        """
+        payload = self._get_json(
+            self.endpoints["job_expect_list"],
+            params={},
+            action="求职期望列表",
+        )
+        return clean_expects(payload)
+
+    def fetch_expect_page(self, expect_filter: Any, *, page: int | None = None) -> PageResult:
+        """期望流一页（``recommend/job/list.json``）。与 :meth:`fetch_search_page`
+        同级：**走 stoken 重试**（这条接口在安全网关后面，缺令牌回 code 37），
+        不能走裸 :meth:`_get_json`。
+
+        **实测（2026-10-13）**：GET 回 code 0 / 15 条 / ``hasMore=true``；
+        同参数 POST 回 code 10「未知请求方法」。所以这里是 GET，别照前端
+        ``hc`` 封装切 POST form。
+
+        :param expect_filter: :class:`boss_filter.expect.JobExpectFilter`；
+            只要能出 ``to_params()``/``for_page()`` 也行
+        :param page: 覆盖条件里的页码（翻页时省得自己改条件）
+        """
+        if page is not None:
+            expect_filter = expect_filter.for_page(page)
+        params = dict(expect_filter.to_params())
+        payload = self._get_json_with_stoken_retry(
+            self.endpoints["job_expect_flow"],
+            params=params,
+            action=f"期望流第 {params.get('page', '?')} 页",
+        )
         return clean_page(payload, page=int(params.get("page", 1)))
 
     def _get_json_with_stoken_retry(self, path: str, params: dict[str, Any], action: str) -> Any:
@@ -846,6 +873,7 @@ class JobClient:
         start_page: int = 1,
         db_path: Path | str | None = None,
         search_filter: Any | None = None,
+        expect_filter: Any | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
         enrich_details: bool = False,
@@ -859,9 +887,13 @@ class JobClient:
         :param page_interval: 覆盖构造时的翻页间隔（秒）
         :param start_page: 起始页码，续跑时用
         :param db_path: 不传 ``store`` 时的库路径
+        :param expect_filter: ``JobExpectFilter``（或任何能出 ``to_params()``/``for_page()``）。
+            **给了就走期望流** ``/wapi/zpgeek/pc/recommend/job/list.json``，
+            期望主参数 + 共享筛选维度照搬（**永远不带关键词**）。
         :param search_filter: ``JobSearchFilter``（或任何能出 ``to_params()``/``for_page()``）。
             **给了就走搜索流** ``/wapi/zpgeek/search/joblist.json``，条件照搬；
-            不给就走原来的推荐流 ``special/zone``（无筛选）。
+            现在还可以带 ``encrypt_expect_id``（期望 + 关键词组合，前端
+            ``onSearch`` 的 ``lastExpectId`` 行为），参数走 ``to_params()`` 自然带出。
             筛选条件一般从配置文件读，见 :func:`boss_filter.load_search_filter`。
         :param on_progress: 每页入库后回调 ``{page, raw_count, kept_count,
             inserted, updated, has_more, stopped_reason?}``；网页控制台用来推进度。
@@ -874,6 +906,17 @@ class JobClient:
         :param detail_interval: 补详情的条间隔（秒），默认 :data:`config.DETAIL_INTERVAL`
         :return: :class:`CrawlReport`（统计 + 每页明细）
 
+        **两条流二选一，优先级 expect > search**（调用方保证互斥，这里再兜一层）：
+
+        1. ``expect_filter`` 非空 → 期望流 ``recommend/job/list.json``
+        2. 否则 ``search_filter`` 非空 → 搜索流 ``search/joblist.json``
+        3. 两个都不给 → 抛 :class:`ValueError`
+
+        推荐页 ``special/zone`` 那条流 **2026-10-13 已移除**（实测回 code 7，
+        推荐 tab 场景改由期望流 ``kind=recommend`` 承担），不再有「无筛选抓全站」。
+
+        分页 / 清洗 / 入库 / 黑名单逻辑两条流**全部复用**。
+
         收手判据：接口回空页，或「**不满页**且 ``hasMore=false``」。
         ``hasMore`` 在 page=1 上不可靠（常回 ``false`` 却还有后续页），所以不单独
         信它。下一页若已被 ``max_pages`` 拦下，也不再多等那一个页间隔。
@@ -882,13 +925,20 @@ class JobClient:
         detail_gap = (
             C.DETAIL_INTERVAL if detail_interval is None else max(0.0, detail_interval)
         )
+        use_expect = expect_filter is not None
+        use_search = search_filter is not None
+        # 推荐页 special/zone 已移除，两个 filter 都不给就没有检索语义了
+        if not use_expect and not use_search:
+            raise ValueError(
+                "必须提供 expect_filter 或 search_filter："
+                "推荐页 special/zone 检索流已下线，「全部不限」抓取不再支持"
+            )
         own_store = store is None
         store = store or open_store(db_path)
         run_id = uuid.uuid4().hex[:12]
         stats = CrawlStats(run_id=run_id)
         report = CrawlReport(stats=stats)
         reason = "抓到空页"
-        use_search = search_filter is not None
 
         def _push(result: PageResult, outcome: SaveOutcome, extra: dict[str, Any] | None = None) -> None:
             if on_progress is None:
@@ -923,10 +973,11 @@ class JobClient:
                     reason = f"达到 max_pages={max_pages}"
                     break
 
-                if use_search:
-                    result = self.fetch_search_page(search_filter, page=page)
+                # 两条流二选一，优先级：expect > search
+                if use_expect:
+                    result = self.fetch_expect_page(expect_filter, page=page)
                 else:
-                    result = self.fetch_page_clean(page)
+                    result = self.fetch_search_page(search_filter, page=page)
                 if blacklist_context is None:
                     # Preserve the established ordinary crawl contract: persist
                     # the list page first, then enrich its already-stored rows.
@@ -1307,18 +1358,34 @@ class JobClient:
     def iter_pages(
         self,
         *,
+        search_filter: Any | None = None,
+        expect_filter: Any | None = None,
         max_pages: int = C.DEFAULT_MAX_PAGES,
         page_interval: float | None = None,
         start_page: int = 1,
     ) -> Iterator[PageResult]:
-        """只翻页不入库，页与页之间照样睡（离线分析/测试用）。"""
+        """只翻页不入库，页与页之间照样睡（离线分析/测试用）。
+
+        路由与 :meth:`crawl` 同款两分支：给了 ``expect_filter`` 走期望流，否则
+        走搜索流。两个都不给抛 :class:`ValueError`（推荐页 ``special/zone``
+        已移除，没有第三条流兜底）。
+        """
+        use_expect = expect_filter is not None
+        if not use_expect and search_filter is None:
+            raise ValueError(
+                "必须提供 expect_filter 或 search_filter："
+                "推荐页 special/zone 检索流已下线，「全部不限」抓取不再支持"
+            )
         interval = self.page_interval if page_interval is None else max(0.0, page_interval)
         page = start_page
         yielded = 0
         while True:
             if max_pages and yielded >= max_pages:
                 return
-            result = self.fetch_page_clean(page)
+            if use_expect:
+                result = self.fetch_expect_page(expect_filter, page=page)
+            else:
+                result = self.fetch_search_page(search_filter, page=page)
             yield result
             yielded += 1
             if result.is_empty:

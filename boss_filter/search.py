@@ -62,6 +62,8 @@ class JobSearchFilter:
     :param pay_type: 结算方式 code（多选，接口顺带回的辅助维度）
     :param part_time: 兼职类型 code（多选）
     :param stage: 融资阶段 code（多选）
+    :param encrypt_expect_id: 期望上下文 id（前端 ``lastExpectId``），空 = 不带。
+        它是**上下文标记不是检索维度**，见字段上的注释
     :param page: 页码，**从 1 开始**
     :param page_size: 每页条数（服务端默认 15）
     """
@@ -77,6 +79,16 @@ class JobSearchFilter:
     pay_type: tuple[str, ...] = ()
     part_time: tuple[str, ...] = ()
     stage: tuple[str, ...] = ()
+
+    #: 期望上下文（前端 ``lastExpectId``）。「期望 tab + 输入关键词」时前端会把
+    #: 最近一次选中的期望跟着关键词带进搜索流：``s.encryptExpectId = lastExpectId``。
+    #: 空 = 不带；非空 → :meth:`to_params` 输出 ``encryptExpectId``。
+    #: **不算检索维度**：:attr:`is_blank` 故意不把它算进去，免得「只带期望、
+    #: 没关键词」误判成搜索流，抢走本该走期望流的分支。
+    #: **实测（2026-10-13）**：带不带它结果集 9/10 重叠——是**个性化/排序
+    #: 信号**，不是范围限定。所以 UI 按「静默带出」处理（只写这个字段、
+    #: ``expect_kind`` 留空）是对的，别当成「限定在该期望内搜」。
+    encrypt_expect_id: str = ""
 
     page: int = 1
     page_size: int = 15
@@ -131,6 +143,11 @@ class JobSearchFilter:
             if joined:
                 params[key] = joined
 
+        # 期望上下文（前端 lastExpectId）：「期望 tab + 输入关键词」时跟着关键词走。
+        # 空了就不传——它是上下文标记，不是检索维度。
+        if self.encrypt_expect_id.strip():
+            params["encryptExpectId"] = self.encrypt_expect_id.strip()
+
         return params
 
     def for_page(self, page: int) -> "JobSearchFilter":
@@ -147,6 +164,7 @@ class JobSearchFilter:
             pay_type=self.pay_type,
             part_time=self.part_time,
             stage=self.stage,
+            encrypt_expect_id=self.encrypt_expect_id,
             page=page,
             page_size=self.page_size,
             scene=self.scene,
@@ -154,7 +172,13 @@ class JobSearchFilter:
 
     @property
     def is_blank(self) -> bool:
-        """True = 一个筛选维度都没选（关键词也没有），等于「不限」。"""
+        """True = 一个筛选维度都没选（关键词也没有），等于「不限」。
+
+        **不把** :attr:`encrypt_expect_id` **算进去**——它是上下文标记，不是
+        检索维度。前端只有关键词/筛选（Y 类键）才进搜索流；把期望算进
+        ``is_blank`` 会让「只带期望、没关键词」误判成搜索流，抢走本该走期望流
+        的分支。
+        """
         return not any(
             (
                 self.query.strip(),
@@ -190,6 +214,7 @@ class JobSearchFilter:
         pay_type: Iterable[str] = (),
         part_time: Iterable[str] = (),
         stage: Iterable[str] = (),
+        encrypt_expect_id: str = "",
         page: int = 1,
         page_size: int = 15,
     ) -> "JobSearchFilter":
@@ -206,6 +231,7 @@ class JobSearchFilter:
             pay_type=tuple(pay_type),
             part_time=tuple(part_time),
             stage=tuple(stage),
+            encrypt_expect_id=encrypt_expect_id,
             page=page,
             page_size=page_size,
         )
@@ -325,7 +351,8 @@ class ResolvedSearchFilter:
 
 #: 配置文件里认的键 → :class:`JobSearchFilter` 的字段。
 #: 单选维度收字符串，多选维度收数组（也兼容逗号串）。``page``/``scene``
-#: 是运行期的，不进配置。
+#: 是运行期的，不进配置。``encrypt_expect_id`` 是期望上下文（期望 + 关键词），
+#: **持久化要带上**，否则配置存一轮就丢。
 FILTER_FILE_FIELDS: tuple[tuple[str, str], ...] = (
     ("query", "query"),
     ("city", "city"),
@@ -341,12 +368,19 @@ FILTER_FILE_FIELDS: tuple[tuple[str, str], ...] = (
     ("part_time", "part_time"),
     ("partTime", "part_time"),
     ("stage", "stage"),
+    ("encrypt_expect_id", "encrypt_expect_id"),
+    ("encryptExpectId", "encrypt_expect_id"),
     ("page_size", "page_size"),
     ("pageSize", "page_size"),
 )
 
 #: 单选字段（其余按多选收）
-_SINGLE_FIELDS: frozenset[str] = frozenset({"query", "city", "job_type", "salary"})
+_SINGLE_FIELDS: frozenset[str] = frozenset(
+    {"query", "city", "job_type", "salary", "encrypt_expect_id"}
+)
+
+#: 当成「纯字符串、不做 code 归一」处理的字段
+_RAW_STR_FIELDS: frozenset[str] = frozenset({"query", "encrypt_expect_id"})
 
 #: 写模板时用的字段顺序（camelCase，跟站点查询串对齐）
 TEMPLATE_KEYS: tuple[str, ...] = (
@@ -361,6 +395,7 @@ TEMPLATE_KEYS: tuple[str, ...] = (
     "payType",
     "partTime",
     "stage",
+    "encryptExpectId",
     "pageSize",
 )
 
@@ -402,7 +437,10 @@ def search_filter_from_dict(data: Mapping[str, Any]) -> JobSearchFilter:
             continue
         value = data[key]
         if attr in _SINGLE_FIELDS:
-            fields[attr] = normalize_code(value).strip() if attr != "query" else str(value or "").strip()
+            if attr in _RAW_STR_FIELDS:
+                fields[attr] = str(value or "").strip()
+            else:
+                fields[attr] = normalize_code(value).strip()
         elif attr == "page_size":
             try:
                 fields[attr] = int(value)
@@ -495,6 +533,7 @@ def save_search_filter(
         "payType": list(search_filter.pay_type),
         "partTime": list(search_filter.part_time),
         "stage": list(search_filter.stage),
+        "encryptExpectId": search_filter.encrypt_expect_id,
         "pageSize": search_filter.page_size,
     }
     return boss_db.doc_set(boss_db.DOC_SEARCH_FILTER, data, path)

@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from ..errors import ConflictError, NotFoundError, ValidationWebError
+from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
 from ..services import blacklist
 from ..services.collection_config_store import (
     CollectionConfig,
@@ -38,10 +38,18 @@ class CollectionBody(BaseModel):
     max_pages: int = Field(5, ge=1, le=200)
     start_page: int = Field(1, ge=1)
     page_interval: float = Field(1.0, ge=0, le=30)
+    #: 兼容字段，恒为 True。旧 false = 已移除的「推荐页」special/zone。
     use_search: bool = True
     fetch_details: bool = True
     detail_interval: float = Field(1.0, ge=0, le=30)
     store_blacklisted: bool = True
+    # 期望流（空 = 不启用，走搜索流）
+    expect_kind: str = ""
+    encrypt_expect_id: str = ""
+    mix_expect_type: str = ""
+    expect_info: str = ""
+    #: 仅展示（jobs 页摘要用），不进请求参数
+    expect_name: str = ""
 
 
 class RuleBody(BaseModel):
@@ -75,6 +83,41 @@ def get_collection_config() -> dict[str, Any]:
     return {"search": _filter_payload(load_search_filter()), "collection": load_config().to_dict()}
 
 
+@router.get("/collection/expects")
+def get_collection_expects() -> dict[str, Any]:
+    """在线拉当前账号的求职期望列表，给前端下拉用。
+
+    期望 id 是**账号维度**的，不能写死在配置里，必须在线拉
+    （``GET /wapi/zpgeek/pc/recommend/expect/list.json``）。响应分三组，
+    与站点三个 tab 对应：``mix``（推荐）、``partTime``（兼职）、``expects``（我的期望）。
+    """
+    from boss_jobs import create_client
+    from boss_jobs.errors import JobError
+
+    client = create_client()
+    try:
+        expects = client.fetch_expect_list()
+    except JobError as exc:
+        raise UpstreamError(f"拉求职期望列表失败：{exc}") from exc
+
+    def _row(item: Any) -> dict[str, Any]:
+        return {
+            "kind": item.kind,
+            "encryptExpectId": item.encrypt_expect_id,
+            "positionName": item.position_name,
+            "locationName": item.location_name,
+            "tagName": item.tag_name,
+            "mixExpectType": item.mix_expect_type,
+            "label": item.label,
+        }
+
+    return {
+        "mix": _row(expects.mix) if expects.mix else None,
+        "expects": [_row(item) for item in expects.expects],
+        "partTime": [_row(item) for item in expects.part_time],
+    }
+
+
 @router.put("/collection/config")
 def put_collection_config(body: CollectionBody) -> dict[str, Any]:
     from boss_filter import save_search_filter
@@ -86,6 +129,10 @@ def put_collection_config(body: CollectionBody) -> dict[str, Any]:
         degree=tuple(data.pop("degree")), industry=tuple(data.pop("industry")),
         scale=tuple(data.pop("scale")), pay_type=tuple(data.pop("payType")),
         part_time=tuple(data.pop("partTime")), stage=tuple(data.pop("stage")),
+        # 期望 + 关键词：前端 onSearch 就把 lastExpectId 塞进搜索请求，
+        # 所以 encrypt_expect_id 期望流与搜索流**共用同一份**（不 pop，下面
+        # CollectionConfig 还要同值的那一份）
+        encrypt_expect_id=str(data.get("encrypt_expect_id") or "").strip(),
         page_size=int(data.pop("pageSize", 15) or 15),
     )
     save_search_filter(search)

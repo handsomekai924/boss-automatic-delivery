@@ -31,6 +31,8 @@ class SearchFilterBody(BaseModel):
     payType: list[str] = Field(default_factory=list)
     partTime: list[str] = Field(default_factory=list)
     stage: list[str] = Field(default_factory=list)
+    #: 期望上下文（期望 + 关键词）；空 = 不带
+    encryptExpectId: str = ""
     pageSize: int = Field(15, ge=1, le=50)
 
     model_config = {"populate_by_name": True}
@@ -66,6 +68,7 @@ def put_search(body: SearchFilterBody) -> dict[str, Any]:
         pay_type=tuple(body.payType),
         part_time=tuple(body.partTime),
         stage=tuple(body.stage),
+        encrypt_expect_id=body.encryptExpectId.strip(),
         page_size=body.pageSize,
     )
     path = save_search_filter(f)
@@ -92,6 +95,8 @@ def _filter_payload(f: JobSearchFilter) -> dict[str, Any]:
         "payType": list(f.pay_type),
         "partTime": list(f.part_time),
         "stage": list(f.stage),
+        # 期望上下文（期望 + 关键词）；is_blank 不算它
+        "encryptExpectId": f.encrypt_expect_id,
         "pageSize": f.page_size,
         "is_blank": f.is_blank,
         "summary": _summary(f),
@@ -114,4 +119,4 @@ def _summary(f: JobSearchFilter) -> str:
     ):
         if values:
             parts.append(f"{label} {'/'.join(values)}")
-    return " · ".join(parts) if parts else "不限（推荐流）"
+    return " · ".join(parts) if parts else "不限（未设置筛选维度）"

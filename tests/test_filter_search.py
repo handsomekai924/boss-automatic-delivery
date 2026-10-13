@@ -111,6 +111,36 @@ def test_to_params_scene_固定为搜索场景():
 
 
 # --------------------------------------------------------------------------- #
+# encrypt_expect_id（期望 + 关键词）
+# --------------------------------------------------------------------------- #
+
+
+def test_to_params_期望上下文非空才带encryptExpectId():
+    assert "encryptExpectId" not in JobSearchFilter().to_params()
+    params = JobSearchFilter(query="python", encrypt_expect_id="E1").to_params()
+    assert params["encryptExpectId"] == "E1"
+
+
+def test_to_params_期望上下文空白被掐掉():
+    params = JobSearchFilter(encrypt_expect_id="  ").to_params()
+    assert "encryptExpectId" not in params
+
+
+def test_is_blank_不算期望上下文():
+    """只带期望、没关键词 = 不是搜索流（走期望流），is_blank 不能把它当「有筛选」。"""
+    assert JobSearchFilter(encrypt_expect_id="E1").is_blank
+    assert not JobSearchFilter(query="python", encrypt_expect_id="E1").is_blank
+
+
+def test_for_page_带上期望上下文():
+    f = JobSearchFilter(query="python", encrypt_expect_id="E1", page=1)
+    f2 = f.for_page(3)
+    assert f2.encrypt_expect_id == "E1"
+    assert f2.to_params()["encryptExpectId"] == "E1"
+    assert f2.to_params()["page"] == "3"
+
+
+# --------------------------------------------------------------------------- #
 # 校验
 # --------------------------------------------------------------------------- #
 
@@ -223,3 +253,34 @@ def test_resolve_to_dict_结构齐整():
     assert data["experience"] == [{"code": "104", "name": "3-5年"}]
     assert data["degree"] == [{"code": "209", "name": "本科"}]
     assert data["page"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 存取往返（encrypt_expect_id 不能丢）
+# --------------------------------------------------------------------------- #
+
+
+def test_save_load_期望上下文往返(tmp_path):
+    from boss_filter.search import load_search_filter, save_search_filter
+
+    f = JobSearchFilter(query="python", city="101280100", encrypt_expect_id="E1")
+    save_search_filter(f, tmp_path / "boss.db")
+    back = load_search_filter(tmp_path / "boss.db")
+    assert back.encrypt_expect_id == "E1"
+    assert back.query == "python"
+    assert back.to_params()["encryptExpectId"] == "E1"
+
+
+def test_load_旧库没有期望键就留空(tmp_path):
+    """向后兼容：旧库没 encryptExpectId 这把 key → 空串，行为不变。"""
+    import boss_db
+    from boss_filter.search import load_search_filter
+
+    boss_db.doc_set(
+        boss_db.DOC_SEARCH_FILTER,
+        {"query": "go", "city": "101010100"},
+        tmp_path / "boss.db",
+    )
+    back = load_search_filter(tmp_path / "boss.db")
+    assert back.encrypt_expect_id == ""
+    assert "encryptExpectId" not in back.to_params()

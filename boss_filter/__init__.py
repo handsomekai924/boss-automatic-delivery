@@ -72,6 +72,7 @@ from .search import (
     search_filter_from_dict,
     search_filter_from_file,
 )
+from .expect import EXPECT_KINDS, PART_TIME_JOB_TYPE, JobExpectFilter
 
 __version__ = "0.1.0"
 
@@ -92,6 +93,10 @@ __all__ = [
     "save_search_filter",
     "search_filter_from_dict",
     "search_filter_from_file",
+    # 期望流（recommend/job/list.json）
+    "EXPECT_KINDS",
+    "PART_TIME_JOB_TYPE",
+    "JobExpectFilter",
     # 异常
     "FilterApiError",
     "FilterDataError",

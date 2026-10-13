@@ -7,7 +7,10 @@ import json
 import pytest
 
 from boss_jobs.models import (
+    ExpectItem,
+    ExpectList,
     Job,
+    clean_expects,
     clean_page,
     clean_pages,
     clean_salary,
@@ -248,3 +251,96 @@ def test_job_to_dict_includes_desc():
     data = job.to_dict()
     assert data["job_desc"] == ""
     assert data["detail_fetched_at"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# clean_expects：三类期望的字段映射
+# --------------------------------------------------------------------------- #
+
+
+def test_clean_expects_三类字段映射():
+    """字段名不对称是前端真实行为：expectList 用 encryptId，另两类用 encryptExpectId。"""
+    payload = {
+        "code": 0,
+        "zpData": {
+            "mixExpect": {
+                "encryptExpectId": "MIX1",
+                "mixExpectType": "2",
+                "positionName": "前端开发工程师",
+                "locationName": "佛山",
+                "location": "101280800",
+            },
+            "expectList": [
+                {"encryptId": "E1", "positionName": "Python", "locationName": "广州", "tagName": "全职"},
+            ],
+            "partTimeExpectList": [
+                {"encryptExpectId": "PT1", "positionName": "派单", "locationName": "佛山"},
+            ],
+        },
+    }
+    result = clean_expects(payload)
+    assert result.mix is not None
+    assert result.mix.kind == "mix"
+    assert result.mix.encrypt_expect_id == "MIX1"
+    assert result.mix.mix_expect_type == "2"
+    assert result.mix.location_code == "101280800"
+    assert result.mix.location_name == "佛山"
+    assert result.mix.label == "前端开发工程师(佛山)"
+
+    assert len(result.expects) == 1
+    assert result.expects[0].kind == "expect"
+    assert result.expects[0].encrypt_expect_id == "E1"  # 来自 encryptId
+    assert result.expects[0].label == "Python(广州)"
+
+    assert len(result.part_time) == 1
+    assert result.part_time[0].kind == "part_time"
+    assert result.part_time[0].encrypt_expect_id == "PT1"  # 来自 encryptExpectId
+
+
+def test_clean_expects_两个id键名都认():
+    """防御：接口侧字段名一变就整批丢不划算，两个键名都收。"""
+    payload = {
+        "code": 0,
+        "zpData": {
+            "expectList": [{"encryptExpectId": "E-BOTH", "positionName": "岗位"}],
+            "partTimeExpectList": [{"encryptId": "PT-BOTH", "positionName": "兼职"}],
+        },
+    }
+    result = clean_expects(payload)
+    assert result.expects[0].encrypt_expect_id == "E-BOTH"
+    assert result.part_time[0].encrypt_expect_id == "PT-BOTH"
+
+
+def test_clean_expects_缺字段按空处理不抛():
+    assert clean_expects({"code": 0, "zpData": {}}) == ExpectList()
+    assert clean_expects({"code": 0}) == ExpectList()
+    assert clean_expects({"code": 0, "zpData": None}) == ExpectList()
+    # 没 id 的条目直接丢
+    result = clean_expects({"code": 0, "zpData": {"expectList": [{"positionName": "没id"}]}})
+    assert result.expects == ()
+    # 非 dict 元素也丢
+    result = clean_expects({"code": 0, "zpData": {"partTimeExpectList": ["oops", None]}})
+    assert result.part_time == ()
+
+
+def test_expect_item_label_缺哪段跳过哪段():
+    assert ExpectItem(kind="expect", encrypt_expect_id="E1", position_name="Python").label == "Python"
+    assert ExpectItem(kind="expect", encrypt_expect_id="E1", position_name="", location_name="广州").label == "广州"
+    assert ExpectItem(kind="expect", encrypt_expect_id="E1", position_name="").label == "E1"
+
+
+def test_expect_list_pick_按kind取首条():
+    result = clean_expects(
+        {
+            "code": 0,
+            "zpData": {
+                "mixExpect": {"encryptExpectId": "MIX1", "positionName": "混合"},
+                "expectList": [{"encryptId": "E1"}, {"encryptId": "E2"}],
+                "partTimeExpectList": [{"encryptExpectId": "PT1"}],
+            },
+        }
+    )
+    assert result.pick("recommend").encrypt_expect_id == "MIX1"
+    assert result.pick("expect").encrypt_expect_id == "E1"
+    assert result.pick("part_time").encrypt_expect_id == "PT1"
+    assert result.pick("nope") is None

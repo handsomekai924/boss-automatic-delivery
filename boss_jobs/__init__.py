@@ -73,7 +73,17 @@ from .cdp_stoken import (
     connect_or_launch,
     find_chrome,
 )
-from .models import Job, PageResult, clean_page, clean_pages, clean_salary, clean_text
+from .models import (
+    ExpectItem,
+    ExpectList,
+    Job,
+    PageResult,
+    clean_expects,
+    clean_page,
+    clean_pages,
+    clean_salary,
+    clean_text,
+)
 from .stoken import (
     StokenChallenge,
     StokenError,
@@ -122,6 +132,9 @@ __all__ = [
     # 模型 / 清洗
     "Job",
     "PageResult",
+    "ExpectItem",
+    "ExpectList",
+    "clean_expects",
     "clean_page",
     "clean_pages",
     "clean_salary",

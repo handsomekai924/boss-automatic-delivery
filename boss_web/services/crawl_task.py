@@ -13,7 +13,7 @@ from boss_jobs import CrawlBlacklistContext, create_client
 from boss_jobs.store import JobStore
 
 from .. import config as C
-from ..errors import ConflictError, NotFoundError, UpstreamError
+from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
 from .blacklist import RuleMatch, evaluate_company, evaluate_jd, save_hit
 from .collection_config_store import CollectionSnapshot, load_snapshot
 from .troubleshoot import humanize
@@ -24,6 +24,40 @@ ST_RUNNING = "running"
 ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
+
+#: 搜索流条件全空时的报错（推荐页 special/zone 已下线，「全部不限」没有检索语义了）。
+#: ``start()`` 走 :class:`ValidationWebError` 快速失败；万一漏进线程，
+#: ``_run`` 抛 :class:`ValueError` 由 :func:`humanize` 原样透传。
+BLANK_SEARCH_MSG = (
+    "采集条件是空的：到「系统配置 → 采集配置」填关键词或筛选维度，或改用求职期望"
+)
+
+
+def _search_filter_from(
+    search: Mapping[str, Any], *, encrypt_expect_id: str = ""
+) -> "JobSearchFilter":
+    """从 snapshot 的 search payload 拼一次搜索流条件。
+
+    期望流分支也用它当基底（再交给 ``JobExpectFilter.from_search`` 搬维度），
+    免得两处各抄一份字段映射。
+    """
+    from boss_filter.search import JobSearchFilter
+
+    return JobSearchFilter(
+        query=search.get("query", ""),
+        city=search.get("city", ""),
+        job_type=search.get("jobType", ""),
+        salary=search.get("salary", ""),
+        experience=tuple(search.get("experience") or ()),
+        degree=tuple(search.get("degree") or ()),
+        industry=tuple(search.get("industry") or ()),
+        scale=tuple(search.get("scale") or ()),
+        pay_type=tuple(search.get("payType") or ()),
+        part_time=tuple(search.get("partTime") or ()),
+        stage=tuple(search.get("stage") or ()),
+        # 期望上下文跟着关键词走（前端 onSearch 的 lastExpectId）
+        encrypt_expect_id=encrypt_expect_id,
+    )
 
 
 class CrawlTask:
@@ -134,16 +168,24 @@ class CrawlTaskManager:
     ) -> CrawlTask:
         config_snapshot = load_snapshot()
         saved = config_snapshot.collection
+        # 旧「推荐页」（use_search=false）已移除：兼容字段一律当搜索流，
+        # 传 false 也归一成 true 并留一条警告。
+        if use_search is False:
+            logger.warning("旧「推荐页」配置已移除，改用关键词搜索")
         params = {
             "max_pages": int(saved["max_pages"] if max_pages is None else max_pages),
             "interval": float(saved["page_interval"] if interval is None else interval),
             "start_page": int(saved["start_page"] if start_page is None else start_page),
-            "use_search": bool(saved["use_search"] if use_search is None else use_search),
+            "use_search": True,
             "fetch_details": bool(saved["fetch_details"] if fetch_details is None else fetch_details),
             "detail_interval": float(saved["detail_interval"] if detail_interval is None else detail_interval),
             "store_blacklisted": bool(saved["store_blacklisted"] if store_blacklisted is None else store_blacklisted),
             "config_snapshot": config_snapshot.to_dict(),
         }
+        # 快速失败：搜索流条件全空就别开线程了（推荐页 special/zone 已下线）
+        if not str(saved.get("expect_kind") or "").strip():
+            if _search_filter_from(config_snapshot.search).is_blank:
+                raise ValidationWebError(BLANK_SEARCH_MSG)
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有抓取任务在跑，等它结束或先取消")
@@ -183,33 +225,49 @@ class CrawlTaskManager:
             task.phase = "client"
             client = create_client(page_interval=float(params["interval"]))
 
-            from boss_filter.search import JobSearchFilter
+            from boss_filter.expect import JobExpectFilter
 
             snapshot_data = params.get("config_snapshot") or {}
             search = snapshot_data.get("search") or {}
+            collection = snapshot_data.get("collection") or {}
+            expect_kind = str(collection.get("expect_kind") or "").strip()
+            # 期望 id 在 config_snapshot.search 里（search_payload() 写出），
+            # collection 上那份是同值的副本；两边都认，优先 collection。
+            encrypt_expect_id = str(
+                collection.get("encrypt_expect_id") or search.get("encryptExpectId") or ""
+            ).strip()
+            mix_expect_type = str(collection.get("mix_expect_type") or "").strip()
+            expect_info = str(collection.get("expect_info") or "").strip()
+
+            expect_filter = None
             search_filter = None
-            if params.get("use_search"):
+            if expect_kind:
                 task.phase = "filter"
-                search_filter = JobSearchFilter(
-                    query=search.get("query", ""),
-                    city=search.get("city", ""),
-                    job_type=search.get("jobType", ""),
-                    salary=search.get("salary", ""),
-                    experience=tuple(search.get("experience") or ()),
-                    degree=tuple(search.get("degree") or ()),
-                    industry=tuple(search.get("industry") or ()),
-                    scale=tuple(search.get("scale") or ()),
-                    pay_type=tuple(search.get("payType") or ()),
-                    part_time=tuple(search.get("partTime") or ()),
-                    stage=tuple(search.get("stage") or ()),
+                # 共享筛选维度直接从 search payload 搬（一份条件两用），
+                # 期望主参数单独给。from_search 不搬 query/scene——期望流永远
+                # 不带关键词；query 非空且 expect_kind 已选时以 expect_kind 为准
+                # （期望流优先），UI 上应提示「关键词在期望流下不生效」。
+                expect_filter = JobExpectFilter.from_search(
+                    _search_filter_from(search),
+                    kind=expect_kind,
+                    encrypt_expect_id=encrypt_expect_id,
+                    mix_expect_type=mix_expect_type,
+                    # temp_expect 时把 cfg.expect_info 塞进 expect_info（from_search 透传）
+                    expect_info=expect_info,
+                )
+            else:
+                # 两条流二选一：没选期望就走搜索（旧 use_search=false 的
+                # 推荐页 special/zone 已移除，不再有第三条流兜底）
+                task.phase = "filter"
+                search_filter = _search_filter_from(
+                    search, encrypt_expect_id=encrypt_expect_id
                 )
                 if search_filter.is_blank:
-                    search_filter = None
+                    raise ValueError(BLANK_SEARCH_MSG)
 
-            if search_filter is not None:
-                # 搜索流要 __zp_stoken__，可能拉真 Chrome，先把状态亮出来
-                task.phase = "stoken"
-                task.push({"event": "stoken", "message": "正在准备搜索令牌（可能拉起 Chrome）…"})
+            # 搜索流 / 期望流都要 __zp_stoken__，可能拉真 Chrome，先把状态亮出来
+            task.phase = "stoken"
+            task.push({"event": "stoken", "message": "正在准备搜索令牌（可能拉起 Chrome）…"})
 
             task.phase = "crawl"
             store = JobStore()
@@ -258,6 +316,7 @@ class CrawlTaskManager:
                     max_pages=int(params["max_pages"]),
                     start_page=int(params["start_page"]),
                     search_filter=search_filter,
+                    expect_filter=expect_filter,
                     on_progress=task.push,
                     should_stop=lambda: task.cancel_flag,
                     enrich_details=bool(params.get("fetch_details", True)),

@@ -16,6 +16,7 @@ class CrawlBody(BaseModel):
     max_pages: int | None = Field(None, ge=1, le=200)
     interval: float | None = Field(None, ge=0.0, le=30.0)
     start_page: int | None = Field(None, ge=1)
+    #: 兼容字段。旧 false = 已移除的「推荐页」；现在一律走搜索流。
     use_search: bool | None = None
     fetch_details: bool | None = None
     detail_interval: float | None = Field(None, ge=0.0, le=30.0)

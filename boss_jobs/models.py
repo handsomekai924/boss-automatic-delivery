@@ -351,6 +351,137 @@ def clean_pages(pages: Iterable[dict[str, Any]]) -> tuple[Job, ...]:
     return tuple(out)
 
 
+# --------------------------------------------------------------------------- #
+# 求职期望列表（recommend/expect/list.json）
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ExpectItem:
+    """一条求职期望。``encrypt_expect_id`` 是**统一出口**，底层键名不对称：
+
+    - ``expectList[]`` 用 ``encryptId``
+    - ``partTimeExpectList[]`` / ``mixExpect`` 用 ``encryptExpectId``
+
+    **实测（2026-10-13，本账号有期望后复测）**：``expectList[]`` 真的是
+    ``encryptId``（数字 id 叫 ``id``），``partTimeExpectList[]`` 真的是
+    ``encryptExpectId``（数字 id 叫 ``expectId``）——不对称**实锤**，不是猜的。
+    解析时两个键名都认（见 :func:`clean_expects`）：``mixExpect`` 本账号仍是
+    ``null``，那一侧的键名还没被真数据定案，双键兜底继续留着。
+    ``location_name`` 是显示名（「佛山」）；``location_code`` 是混合期望里的
+    ``location``——前端把它当 **city code** 送进 ``getFormData().city``（推荐
+    tab 定位混合期望用），两者不是一回事，别混。
+    """
+
+    kind: str                 # "mix" | "expect" | "part_time"
+    encrypt_expect_id: str    # 统一出口：mix/part_time 用 encryptExpectId，expect 用 encryptId
+    position_name: str
+    location_name: str = ""
+    tag_name: str = ""
+    mix_expect_type: str = ""  # 仅 mix 有
+    location_code: str = ""    # 仅 mix 用得上（= 前端 mixLocation → city）
+
+    @property
+    def label(self) -> str:
+        """人读名：「前端开发工程师(佛山)」这类组合，缺哪段跳过哪段。"""
+        if self.position_name and self.location_name:
+            return f"{self.position_name}({self.location_name})"
+        return self.position_name or self.location_name or self.encrypt_expect_id
+
+
+@dataclass(frozen=True)
+class ExpectList:
+    """账号的期望集合：混合期望（推荐 tab）+ 我的期望 + 兼职期望。"""
+
+    mix: ExpectItem | None = None
+    expects: tuple[ExpectItem, ...] = ()
+    part_time: tuple[ExpectItem, ...] = ()
+
+    def pick(self, kind: str) -> ExpectItem | None:
+        """按前端默认规则取一条：mix / expect / part_time 各取各的首条。"""
+        if kind == "recommend":
+            return self.mix
+        if kind == "expect":
+            return self.expects[0] if self.expects else None
+        if kind == "part_time":
+            return self.part_time[0] if self.part_time else None
+        return None
+
+
+def _expect_item(raw: Any, kind: str) -> ExpectItem | None:
+    """把一条原始期望对象洗成 :class:`ExpectItem`；认不出就丢。
+
+    **字段名不对称**是前端真实行为（chunk ``job~0.0c757050.js``
+    ``clickItemAction`` / ``partTimeExpectList``）：``expectList[]`` 的 id 叫
+    ``encryptId``，另两类叫 ``encryptExpectId``。**实测（2026-10-13，有期望后
+    复测）**：``expectList[]`` 响应里真的只有 ``encryptId``（数字 id 叫 ``id``），
+    ``partTimeExpectList[]`` 真的只有 ``encryptExpectId``（数字 id 叫
+    ``expectId``）。这里仍然两个键名都认——``mixExpect`` 那侧还没验到，免得
+    接口侧字段名一变就整批丢。地点也有两副面孔：``locationName``
+    是显示名（「佛山」），``location`` 是混合期望的 **city code**（前端
+    ``getFormData().city = mixLocation``）。
+    """
+    if not isinstance(raw, dict):
+        return None
+    encrypt_id = clean_text(raw.get("encryptExpectId") or raw.get("encryptId"))
+    position = clean_text(raw.get("positionName") or raw.get("position"))
+    location_name = clean_text(raw.get("locationName"))
+    location_code = clean_text(raw.get("location"))
+    tag = clean_text(raw.get("tagName"))
+    mix_type = clean_text(raw.get("mixExpectType"))
+    if not encrypt_id:
+        return None
+    return ExpectItem(
+        kind=kind,
+        encrypt_expect_id=encrypt_id,
+        position_name=position,
+        location_name=location_name,
+        tag_name=tag,
+        mix_expect_type=mix_type,
+        location_code=location_code,
+    )
+
+
+def clean_expects(payload: dict) -> ExpectList:
+    """把期望列表响应洗成 :class:`ExpectList`。
+
+    响应形状（**2026-10-13 本账号有期望后实测**：``expectList`` 1 条 /
+    ``partTimeExpectList`` 4 条 / ``mixExpect`` 仍 ``null``）::
+
+        {"code": 0, "zpData": {
+            "mixExpect": {"encryptExpectId": "...", "mixExpectType": "...",
+                          "positionName": "...", "locationName": "..."},
+            "expectList": [{"encryptId": "...", "id": 1098941709,
+                            "positionName": "...", "location": 101280800}],
+            "partTimeExpectList": [{"encryptExpectId": "...", "expectId": 1174275776,
+                                    "positionName": "...", "type": 0}]
+        }}
+
+    缺字段、类型不对一律按空处理，不抛——账号没配兼职期望是常态。
+    """
+    data = payload.get("zpData")
+    if data is None:
+        data = payload.get("data")
+    if not isinstance(data, dict):
+        return ExpectList()
+
+    mix_raw = data.get("mixExpect")
+    mix = _expect_item(mix_raw, "mix") if isinstance(mix_raw, dict) else None
+
+    def _collect(key: str, kind: str) -> tuple[ExpectItem, ...]:
+        items = data.get(key)
+        if not isinstance(items, list):
+            return ()
+        out = [item for item in (_expect_item(raw, kind) for raw in items) if item is not None]
+        return tuple(out)
+
+    return ExpectList(
+        mix=mix,
+        expects=_collect("expectList", "expect"),
+        part_time=_collect("partTimeExpectList", "part_time"),
+    )
+
+
 def extract_job_desc(payload: dict[str, Any]) -> str:
     """从详情响应里抠出 JD 正文并清洗。
 

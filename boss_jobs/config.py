@@ -1,18 +1,19 @@
 """职位获取相关接口地址、请求头、节流参数等常量。
 
-在用的列表路由是 ``GET /wapi/zpgeek/pc/special/zone/joblist.json``（推荐页
-``PageJobRecommend`` 用的也是它）：每页固定 15 条（pageSize 传了也不认），
-字段覆盖 todo.md 第四节的 8 项；page=1 起步，page=0 回空列表，翻到头那页不足
-15 条且 ``hasMore=false``。
+在用的列表路由是两条：``GET /wapi/zpgeek/search/joblist.json``（关键词搜索流）
+和 ``GET /wapi/zpgeek/pc/recommend/job/list.json``（求职期望流）。
+每页固定 15 条（pageSize 传了也不认），page=1 起步，page=0 回空列表，
+翻到头那页不足 15 条且 ``hasMore=false``。
 
-  - ``recommend/job/list.json``、``search/joblist.json`` 缺 ``__zp_stoken__``
-    就回 code 37「浏览器环境异常」；令牌按 :mod:`boss_jobs.stoken` 自动算
+  - 两条都站在安全网关后面，缺 ``__zp_stoken__`` 就回 code 37「浏览器环境异常」；
+    令牌按 :mod:`boss_jobs.stoken` 自动算
   - ``job/detail.json``（JD 正文）同样要登录 + ``__zp_stoken__``
   - ``friend/add.json`` **只建会话、不投递正文**（body 塞 ``greeting`` 会被忽略），
     真的招呼语走聊天通道 :mod:`boss_jobs.chat`
 
-路由出处是按需 chunk ``job-recommend-type.c303eca2.js``
-（``tb=(0,tc.iH)(v.zI)``）。
+**2026-10-13 移除**：``pc/special/zone/joblist.json``（推荐页，无筛选）那条流
+已下线——实测一律回 code 7「当前登录状态已失效」，且推荐 tab 的场景由期望流的
+``kind=recommend`` 承担。采集来源现在是二选一：搜索 / 期望。
 """
 
 from __future__ import annotations
@@ -24,16 +25,33 @@ import boss_db
 
 BASE_URL: Final[str] = "https://www.zhipin.com"
 
-#: 职位推荐页（``/web/geek/jobs``）的 Referer。接口不校验它，带上更像浏览器。
+#: 求职页（``/web/geek/jobs``）的 Referer。接口不校验它，带上更像浏览器。
+#: **所有**请求的默认 Referer（见 :data:`DEFAULT_HEADERS`），不是某条流专属。
 GEEK_JOBS_REFERER: Final[str] = f"{BASE_URL}/web/geek/jobs"
 
 ENDPOINTS: Final[dict[str, str]] = {
-    #: 唯一在用的分页职位列表（GET）。
-    "job_list": "/wapi/zpgeek/pc/special/zone/joblist.json",
     #: 职位搜索列表（GET）。要登录 **且** 要 ``__zp_stoken__``（缺了回 code 37）。
     #: 令牌由 :class:`boss_jobs.cdp_stoken.CdpStokenProvider` 全自动补（拉 Chrome
     #: 让站点自己算），见 :func:`boss_jobs.client.JobClient.fetch_search_page`。
     "job_search": "/wapi/zpgeek/search/joblist.json",
+    #: 求职期望流列表（GET，``recommend/job/list.json``）——推荐 / 兼职 / 指定期望
+    #: 三个 tab 共用的**第二条检索路径**，差异只在参数形态（见
+    #: :class:`boss_filter.expect.JobExpectFilter`）。要登录 **且** 要
+    #: ``__zp_stoken__``（缺了回 code 37），走
+    #: :func:`boss_jobs.client.JobClient.fetch_expect_page` 的 stoken 重试。
+    #: **实测（2026-10-13）**：GET 回 code 0 / 15 条 / ``hasMore=true``；POST 回
+    #: code 10「未知请求方法」——**只走 GET**，别照前端 ``hc`` 封装切 POST form。
+    "job_expect_flow": "/wapi/zpgeek/pc/recommend/job/list.json",
+    #: 当前账号的求职期望列表（GET，``recommend/expect/list.json``）——元数据，
+    #: 不返回职位。前端绑定 ``ZV``（GET）。**实测（2026-10-13）**：把
+    #: ``__zp_stoken__`` 从 cookie 里摘掉也回 code 0，**只要登录 Cookie**，
+    #: 裸 :meth:`~boss_jobs.client.JobClient._get_json` 就够，不用 stoken 重试。
+    #: 响应字段名不对称：``expectList[].encryptId``（数字 id 叫 ``id``）/
+    #: ``partTimeExpectList[].encryptExpectId``（数字 id 叫 ``expectId``）/
+    #: ``mixExpect.encryptExpectId``。**实测（2026-10-13，本账号配好期望后）**
+    #: 前两类的不对称是实锤；``mixExpect`` 仍是 ``null``，那一侧没验到，
+    #: 解析侧双键名都认。
+    "job_expect_list": "/wapi/zpgeek/pc/recommend/expect/list.json",
     #: 职位详情（JD 正文）。要登录 **且** 要 ``__zp_stoken__``（缺了回 code 37）；
     #: query 带 ``securityId`` + ``lid`` 两参就够。正文在
     #: ``zpData.jobInfo.postDescription``。
@@ -62,9 +80,6 @@ ENDPOINTS: Final[dict[str, str]] = {
     #: **要带 ``zp_token`` 头**（cookie ``bst``），缺了回 code 121「请求不合法」。
     "chatremind_log": "/wapi/zpCommon/actionLog/geek/chatremind.json",
 }
-
-#: 推荐页 ``pageType`` 10/45 → type=1（全职流），36 → type=2（兼职流）
-REQUEST_PARAMS: Final[dict[str, str]] = {"type": "1"}
 
 DEFAULT_HEADERS: Final[dict[str, str]] = {
     "User-Agent": (

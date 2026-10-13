@@ -129,11 +129,18 @@ export async function renderJobs(root) {
   function collectionSummary(data) {
     const search = data?.search || {};
     const collection = data?.collection || {};
+    // 采集来源二选一：expect_kind 非空 = 期望流，空 = 搜索流
+    const kind = (collection.expect_kind || "").trim();
+    const expectMode = !!kind;
+    const partTime = kind === "part_time";
     const parts = [];
-    if (search.query) parts.push(`关键词「${search.query}」`);
+    // 期望流只带筛选维度：from_search 不搬 query/stage/jobType，兼职态 salary
+    // 又被 payType/partTime 顶替——摘要只列这次真会进请求串的维度，别把
+    // 「配了但不生效」的也打上去，那会看成「期望 + 关键词」。
+    if (search.query && !expectMode) parts.push(`关键词「${search.query}」`);
     if (search.city) parts.push(`城市 ${search.city}`);
-    if (search.jobType) parts.push(`职位类型 ${search.jobType}`);
-    if (search.salary) parts.push(`薪资 ${search.salary}`);
+    if (search.jobType && !expectMode) parts.push(`职位类型 ${search.jobType}`);
+    if (search.salary && !partTime) parts.push(`薪资 ${search.salary}`);
     if (Array.isArray(search.experience) && search.experience.length) {
       parts.push(`经验 ${search.experience.join("、")}`);
     }
@@ -146,20 +153,37 @@ export async function renderJobs(root) {
     if (Array.isArray(search.scale) && search.scale.length) {
       parts.push(`规模 ${search.scale.join("、")}`);
     }
-    if (Array.isArray(search.payType) && search.payType.length) {
+    if (Array.isArray(search.payType) && search.payType.length && partTime) {
       parts.push(`薪资方式 ${search.payType.join("、")}`);
     }
-    if (Array.isArray(search.partTime) && search.partTime.length) {
+    if (Array.isArray(search.partTime) && search.partTime.length && partTime) {
       parts.push(`兼职 ${search.partTime.join("、")}`);
     }
-    if (Array.isArray(search.stage) && search.stage.length) {
+    if (Array.isArray(search.stage) && search.stage.length && !expectMode) {
       parts.push(`阶段 ${search.stage.join("、")}`);
     }
-    parts.push(collection.use_search === false ? "不使用搜索条件" : "使用搜索条件");
+    if (kind === "part_time") {
+      parts.push("兼职期望流");
+    } else if (kind === "expect") {
+      parts.push(`期望流「${collection.expect_name || collection.encrypt_expect_id || "未命名"}」`);
+    } else if (kind === "recommend") {
+      parts.push("推荐期望流");
+    } else if (kind === "temp_expect") {
+      parts.push(`临时期望流「${collection.expect_name || "未命名"}」`);
+    } else {
+      // 搜索流。选了期望 = 站点「期望 tab + 输入关键词」，
+      // encryptExpectId 会进请求串——摘要得点出来，别让人以为是纯关键词。
+      const ctx = collection.encrypt_expect_id || search.encryptExpectId || "";
+      if (ctx) {
+        parts.push(`使用搜索条件 · 期望上下文「${collection.expect_name || ctx}」`);
+      } else {
+        parts.push("使用搜索条件");
+      }
+    }
     parts.push(`最多 ${collection.max_pages ?? 5} 页`);
     parts.push(collection.fetch_details === false ? "不抓 JD" : "抓取 JD");
     parts.push(collection.store_blacklisted === false ? "不保存黑名单职位" : "保存并标记黑名单");
-    return parts.join(" · ") || "不限（推荐流）";
+    return parts.join(" · ") || "不限（未设置筛选维度）";
   }
 
   async function loadCollectionConfig() {

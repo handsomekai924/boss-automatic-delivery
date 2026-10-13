@@ -106,9 +106,55 @@ def test_规则弹窗说明匹配方式(settings_js: str):
 def test_采集配置含搜索维度与入库策略(settings_js: str):
     for field in ("s-query", "s-city", "s-pageSize", "s-salary", "s-experience"):
         assert field in settings_js, f"采集配置缺搜索维度 {field}"
-    for key in ("c-max-pages", "c-fetch-details", "c-store-blacklisted", "c-use-search"):
+    for key in ("c-max-pages", "c-fetch-details", "c-store-blacklisted", "c-source", "c-expect"):
         assert key in settings_js, f"采集配置缺参数 {key}"
     assert "/api/collection/config" in settings_js
+
+
+def test_采集来源是二选一(settings_js: str):
+    """关键词搜索 / 求职期望互斥二态。旧的 use_search 勾选框和「推荐页」档都已移除。"""
+    for value in ("search", "expect"):
+        assert f'value="{value}"' in settings_js, f"采集来源缺 {value}"
+    assert "special_zone" not in settings_js, "「推荐页」special/zone 已移除，不该再出现"
+    assert 'name="c-source"' in settings_js
+    assert "c-use-search" not in settings_js, "又把 use_search 勾选框加回来了"
+
+
+def test_求职期望下拉在线拉取(settings_js: str):
+    """期望 id 是账号维度的，必须在线拉，不能写死。"""
+    assert "/api/collection/expects" in settings_js
+    assert "loadExpects" in settings_js
+
+
+def test_期望流模式下关键词不生效(settings_js: str):
+    """站点点期望 tab 时会删掉 query，UI 要跟着置灰/隐藏并提示。"""
+    assert "updateSourceUI" in settings_js
+    assert "s-query" in settings_js
+    # 提示文案要说清「期望流不带关键词」
+    assert "不带关键词" in settings_js
+
+
+def test_兼职期望切换筛选面板(settings_js: str):
+    """兼职态 salary 让位给 payType/partTime（对齐站点 getConfigFields()）。"""
+    for field in ("f-salary", "f-payType", "f-partTime", "s-payType", "s-partTime"):
+        assert field in settings_js, f"兼职筛选面板缺 {field}"
+
+
+def test_临时期望发expectInfo不发encryptExpectId(settings_js: str):
+    """临时期望（temp_expect）主参数是 expectInfo JSON，键名是站点那五个。
+
+    对齐前端 ``getFormData()`` 的 temp-expect 分支：``JSON.stringify({expectType,
+    position, location, lowSalary, highSalary})``——``location`` 是城市 code，
+    **不是** ``locationName``。UI 下拉要有这一项，且写回 ``expect_info``。
+    """
+    assert 'temp.value = "temp"' in settings_js, "期望下拉缺「临时期望」项"
+    assert "临时期望（快速添加）" in settings_js
+    for key in ("expectType", "position", "location", "lowSalary", "highSalary"):
+        assert key in settings_js, f"临时期望 expectInfo 缺键 {key}"
+    assert "expect_info" in settings_js, "临时期望要写回 expect_info"
+    assert "tempExpectInfo" in settings_js
+    # 临时期望不是列表条目，不该被当成 encryptExpectId
+    assert "expect_kind: \"temp_expect\"" in settings_js
 
 
 def test_搜索条件提交的是code不是显示名(settings_js: str):
@@ -174,6 +220,28 @@ def test_职位页有前往采集配置入口(jobs_js: str):
 def test_职位页保留当前条件摘要(jobs_js: str):
     assert "采集配置" in jobs_js  # 摘要区
     assert "search" in jobs_js  # 读当前条件
+
+
+def test_职位页摘要说清采集来源(jobs_js: str):
+    """期望流要在摘要里点名是哪条流（兼职/推荐/我的期望），不能还写「使用搜索条件」。"""
+    assert "expect_kind" in jobs_js
+    assert "兼职期望流" in jobs_js
+    assert "推荐期望流" in jobs_js
+    assert "临时期望流" in jobs_js
+
+
+def test_职位页摘要不把期望流下的关键词算进去(jobs_js: str):
+    """期望流只带筛选维度（from_search 不搬 query），摘要打关键词会看成「期望 + 关键词」。"""
+    assert "if (search.query && !expectMode)" in jobs_js
+    # stage / jobType 同理，兼职态 salary 被 payType/partTime 顶替
+    assert "if (search.jobType && !expectMode)" in jobs_js
+    assert "if (search.salary && !partTime)" in jobs_js
+
+
+def test_职位页摘要点出期望上下文(jobs_js: str):
+    """搜索流 + 期望 = 站点「期望 tab + 输入关键词」，摘要不能只写「使用搜索条件」。"""
+    assert "期望上下文" in jobs_js
+    assert "search.encryptExpectId" in jobs_js
 
 
 def test_职位页有黑名单与JD状态标签及筛选(jobs_js: str):
