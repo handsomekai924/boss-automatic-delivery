@@ -9,6 +9,10 @@ const RECONNECT_MS = 1500;
 const WAIT_LIMIT_MS = 10 * 60 * 1000;
 /** 后台轻提示的轮询间隔。检测本身是后端每 5 分钟刷缓存，这里只管读 */
 const WATCHER_POLL_MS = 60 * 1000;
+/** 「更新完成」提示停留多久再刷新——够看清更新到了哪一版，又不至于干等 */
+const RELOAD_DELAY_MS = 1500;
+/** 记「这个标签页已经处理过更新回执」的键（必须跟着标签页活过刷新，所以用 sessionStorage） */
+const DONE_SEEN_KEY = "boss:update-done-seen";
 
 /** 已经 toast 过的版本号——同一个版本不许反复提醒 */
 let notifiedVersion = "";
@@ -31,6 +35,7 @@ export async function maybePromptUpdate() {
   }
   if (!status) return;
   if (status.update_done) {
+    // 更新完了：刷一下页面就回新版本，**不关标签页**（见 showUpdateDone）
     showUpdateDone(status.update_done);
     return;
   }
@@ -225,7 +230,7 @@ function showUpdateModal(status) {
     }
   });
 
-  /** 轮询同 host:port，等新进程回 `update_done`，然后关掉这个标签页 */
+  /** 轮询同 host:port，等新进程回 `update_done`，然后把这个标签页刷到新版本上 */
   async function watchForNewService() {
     const deadline = Date.now() + WAIT_LIMIT_MS;
     while (!stopped && applying && Date.now() < deadline) {
@@ -240,6 +245,7 @@ function showUpdateModal(status) {
         applying = false;
         stopped = true;
         try { box.close(); } catch { /* 已经被关了 */ }
+        // 只刷新，不关标签页
         showUpdateDone(done);
         return;
       }
@@ -257,34 +263,79 @@ function showUpdateModal(status) {
   }
 }
 
-/** 更新完成：显示回执版本，并尝试关掉当前标签页 */
+/**
+ * 更新完成：**只刷新页面**，绝不关标签页。
+ *
+ * 这里踩过三个坑，改回去之前先看清楚：
+ *
+ * - **绝不 ``window.close()``**。本应用的标签页是用户自己开出来的、没有历史记录
+ *   （``history.length === 1``），Chrome / Edge / Firefox 对这种情况**照关不误**
+ *   ——``try/catch`` 也兜不住（被拦时只打一条 console 警告，不抛异常）。旧版本
+ *   一句 ``window.close()`` 把页面直接干掉，而重启的 exe 带 ``--no-browser``，
+ *   不会自己再开一个，用户手上就一个页面都不剩了。刷新就没有这个问题。
+ * - **刷之前必须记住「这页处理过」**。回执在服务端是**进程内缓存**的
+ *   （见 ``services/updater.py`` 的 ``consume_done_marker``），同一个进程会一直回同一份；
+ *   不记标记就会「看到回执 → 刷新 → 又看到回执 → 再刷新」无限刷。
+ *   标记跟着标签页活过刷新，所以每个标签页最多刷一次。
+ * - **每个标签页都刷**（不只是发起更新的那个）。更新后重新打开的页面虽然本来就是
+ *   新服务发的，但这里不做区分：拿到回执就统一刷一遍，保证手上这页一定不跑旧代码。
+ */
 function showUpdateDone(done) {
   const version = String((done && (done.version || done.new_version)) || "").replace(/^v/i, "");
+  const key = version || "unknown";
+  if (doneAlreadyShown(key)) return;
+  // 标记存不进去（浏览器禁了存储）就当刷不动：宁可让用户手动按 F5，
+  // 也不能刷不完。所以「能不能刷」跟着「标没标上」走。
+  const canReload = rememberDone(key);
+
   const box = modal({
     title: "更新完成",
     body: `
       <div class="mb-16">
         ${version ? `<div class="mb-8">已更新到 <strong>v${escapeHtml(version)}</strong>。</div>` : ""}
-        <div class="muted">更新完成，可以关闭此标签页了。如果没自动关掉，手动点右上角 × 即可。</div>
+        <div class="muted">${
+          canReload
+            ? "页面正在重新加载，马上回到新版本。要是没动静，点下面的按钮或自己按 F5。"
+            : "请手动按 F5 刷新页面，回到新版本。"
+        }</div>
       </div>
       <div class="btn-row">
-        <button class="btn primary" type="button" data-act="close">知道了</button>
+        <button class="btn primary" type="button" data-act="reload">立即刷新</button>
       </div>
     `,
     onClose() {},
   });
+
+  const reloadNow = () => {
+    try {
+      location.reload();
+    } catch {
+      /* 刷不动就把页面留着，上面那句「手动按 F5」兜底 */
+    }
+  };
   box.bodyEl.addEventListener("click", (e) => {
-    if (e.target.closest('[data-act="close"]')) box.close();
+    if (e.target.closest('[data-act="reload"]')) reloadNow();
   });
-  tryCloseTab();
+
+  if (canReload) setTimeout(reloadNow, RELOAD_DELAY_MS);
 }
 
-/** 浏览器基本会拦掉脚本发起的 close，所以兜底文案一定会留在页面上 */
-function tryCloseTab() {
+/** 这个标签页是不是已经为这一版弹过「更新完成」了（sessionStorage 活着跨过刷新，见 showUpdateDone） */
+function doneAlreadyShown(key) {
   try {
-    window.close();
+    return sessionStorage.getItem(DONE_SEEN_KEY) === key;
   } catch {
-    /* 非脚本打开的窗口关不掉，正常 */
+    return false;
+  }
+}
+
+/** 记下「这版处理过了」。存不进去回 ``false``——调用方据此放弃自动刷新 */
+function rememberDone(key) {
+  try {
+    sessionStorage.setItem(DONE_SEEN_KEY, key);
+    return true;
+  } catch {
+    return false;
   }
 }
 
