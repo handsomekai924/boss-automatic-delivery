@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包定义：单文件 exe。
+"""PyInstaller 打包定义：onedir 目录包 + zip 发行。
 
 构建（在仓库根目录执行）::
 
     packaging\\build.bat
+
+产物：``dist\\BossAutoDelivery\\``（exe + ``_internal\\``）和
+``dist\\BossAutoDelivery-{version}.zip``（发到 Gitee Release 附件）。
 
 要点全在注释里，改之前先看 :mod:`boss_web.runtime` 的模块 docstring。
 """
@@ -109,12 +112,13 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# onedir：exe 与 _internal\\ 平级。自更新时 bat 只换 install 目录下的程序文件，
+# 旁边的 data\\（登录态/职位库）原样保留——所以不能用 onefile（那个解包到 %TEMP%）。
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="BossAutoDelivery",
     debug=False,
     bootloader_ignore_signals=False,
@@ -126,4 +130,13 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="BossAutoDelivery",
 )

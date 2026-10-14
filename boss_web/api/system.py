@@ -7,17 +7,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from .. import __version__ as APP_VERSION
 from .. import runtime
-from ..errors import EnvironmentWebError, ValidationWebError
+from ..errors import ConflictError, EnvironmentWebError, UpstreamError, ValidationWebError
 from ..services import app_settings_store, troubleshoot, update_check
+from ..services import updater
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ChromeModeBody(BaseModel):
@@ -28,6 +33,11 @@ class ChromeModeBody(BaseModel):
 class IgnoreUpdateBody(BaseModel):
     #: 要忽略的版本号（``v`` 前缀可有可无）；空串 = 撤销忽略
     version: str = Field("", description="要忽略的版本号，空串表示撤销")
+
+
+class ApplyUpdateBody(BaseModel):
+    #: 目标版本号（``v`` 前缀可有可无）；空串 = 接受服务端当下最新的那一版
+    version: str = Field("", description="要更新到的版本号，空串表示最新版")
 
 
 @router.get("/health")
@@ -120,3 +130,70 @@ def ignore_update(body: IgnoreUpdateBody) -> dict[str, Any]:
         "ignored": ignored or None,
         "message": f"已忽略 {ignored}。" if ignored else "已恢复版本提示。",
     }
+
+
+@router.post("/update/apply")
+def apply_update(body: ApplyUpdateBody) -> dict[str, Any]:
+    """点「立即更新」：确认 zip 能拿到后立刻返回，进度全走 WS。
+
+    **不做破坏性的事**：真删/真换交给 bat，而 bat 自己还会再验一次 zip。
+    这里只负责把「要更新到哪一版、包从哪下」交出去。
+    """
+    if not runtime.is_frozen():
+        raise ConflictError("开发/源码模式不支持自动更新，请用 git 拉最新代码。")
+    if runtime.is_temp_run():
+        raise ConflictError(
+            "当前是直接在压缩包里跑的，请先把程序解压到本地文件夹再更新。"
+        )
+
+    status = update_check.build_status(force=True)
+    if not status.get("latest") and status.get("error"):
+        raise UpstreamError(f"读不到 Gitee 发行版：{status['error']}")
+
+    zip_asset = status.get("zip_asset")
+    if not zip_asset or not zip_asset.get("url"):
+        raise ConflictError("这个发行版没附 zip 更新包，请到 Gitee 手动下载覆盖。")
+
+    latest = str(status.get("latest") or "")
+    target = (body.version or "").strip().lstrip("vV")
+    if target and update_check.compare_versions(target, latest) != 0:
+        raise ConflictError(f"版本已变化（现在最新是 v{latest}），请刷新页面后再试。")
+
+    try:
+        updater.start_update_job(
+            version=latest,
+            zip_url=str(zip_asset["url"]),
+            zip_name=str(zip_asset.get("name") or ""),
+        )
+    except updater.UpdateApplyError as exc:
+        raise EnvironmentWebError(str(exc)) from exc
+
+    return {
+        "ok": True,
+        "version": latest,
+        "zip_name": zip_asset.get("name") or "",
+        "message": "更新已开始，保持页面打开就能看到进度。",
+    }
+
+
+@router.websocket("/update/ws")
+async def update_ws(ws: WebSocket) -> None:
+    """推送自更新进度。连接先给一帧快照，之后只出不进。
+
+    swap 阶段这个连接**一定会断**（服务在换自己）；前端靠同端口重连 +
+    ``update_done`` 回执接着走，见 ``static/js/update.js``。
+    """
+    await ws.accept()
+    loop = asyncio.get_running_loop()
+    queue = updater.subscribe(loop)
+    try:
+        await ws.send_text(json.dumps(updater.snapshot_progress(), ensure_ascii=False))
+        while True:
+            event = await queue.get()
+            await ws.send_text(json.dumps(event.to_payload(), ensure_ascii=False))
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # noqa: BLE001 - 连接断得难看也不能把服务带崩
+        logger.debug("更新进度 WS 异常退出", exc_info=True)
+    finally:
+        updater.unsubscribe(queue)

@@ -37,7 +37,11 @@ def _release(tag: str, *, prerelease: bool = False, notes: str = "说明") -> di
             {
                 "name": "BossAutoDelivery.exe",
                 "browser_download_url": f"https://gitee.com/x/releases/download/{tag}/BossAutoDelivery.exe",
-            }
+            },
+            {
+                "name": f"BossAutoDelivery-{tag.lstrip('v')}.zip",
+                "browser_download_url": f"https://gitee.com/x/releases/download/{tag}/BossAutoDelivery-{tag.lstrip('v')}.zip",
+            },
         ],
     }
 
@@ -133,7 +137,55 @@ def test_pick_latest_发行说明截断():
 
 def test_pick_latest_带上资产链接():
     latest = update_check.pick_latest([_release("v1.1.0")])
-    assert any(u.endswith("BossAutoDelivery.exe") for u in latest.assets)
+    assert any(a.url.endswith("BossAutoDelivery.exe") for a in latest.assets)
+    assert any(a.name.endswith(".zip") for a in latest.assets)
+
+
+def test_pick_zip_asset_优先叫_BossAutoDelivery_的包():
+    assets = (
+        update_check.Asset(name="notes.txt", url="https://x/notes.txt"),
+        update_check.Asset(name="随便.zip", url="https://x/随便.zip"),
+        update_check.Asset(name="BossAutoDelivery-1.1.0.zip", url="https://x/BossAutoDelivery-1.1.0.zip"),
+    )
+    picked = update_check.pick_zip_asset(assets)
+    assert picked is not None
+    assert picked.name.startswith("BossAutoDelivery")
+
+
+def test_pick_zip_asset_名字空看_url_尾段():
+    assets = (update_check.Asset(name="", url="https://x/BossAutoDelivery-1.1.0.zip?token=1"),)
+    picked = update_check.pick_zip_asset(assets)
+    assert picked is not None
+    assert picked.url.startswith("https://x/BossAutoDelivery-1.1.0.zip")
+
+
+def test_pick_zip_asset_没有_zip_就回_None():
+    assert update_check.pick_zip_asset((update_check.Asset(name="a.exe", url="https://x/a.exe"),)) is None
+    assert update_check.pick_zip_asset(()) is None
+
+
+def test_can_self_update_源码跑为假(monkeypatch):
+    from boss_web import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: False)
+    assert update_check.can_self_update() is False
+
+
+def test_can_self_update_压缩包预览跑也为假(monkeypatch):
+    from boss_web import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: True)
+    assert update_check.can_self_update() is False
+
+
+def test_can_self_update_装在本地的_exe_为真(monkeypatch):
+    from boss_web import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: False)
+    assert update_check.can_self_update() is True
 
 
 # --------------------------------------------------------------------------- #
@@ -333,6 +385,94 @@ def test_api_update_检测失败也是_200(client, monkeypatch):
     body = resp.json()
     assert body["latest"] is None
     assert body["should_prompt"] is False
+
+
+def test_api_update_带上自更新所需字段(client, monkeypatch):
+    _fake_gitee(monkeypatch, [_release("v9.9.9")])
+    body = client.get("/api/system/update", params={"force": True}).json()
+
+    assert body["zip_asset"] and body["zip_asset"]["url"].endswith(".zip")
+    assert isinstance(body["assets"], list) and body["assets"]
+    assert "can_self_update" in body
+    assert "update_done" in body
+
+
+# --------------------------------------------------------------------------- #
+# 立即更新（POST /api/system/update/apply）
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_源码模式回_409(client, monkeypatch):
+    from boss_web import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: False)
+    _fake_gitee(monkeypatch, [_release("v9.9.9")])
+    r = client.post("/api/system/update/apply", json={"version": ""})
+    assert r.status_code == 409
+    assert "源码" in r.json()["message"] or "开发" in r.json()["message"]
+
+
+def test_apply_压缩包预览跑回_409(client, monkeypatch):
+    from boss_web import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: True)
+    _fake_gitee(monkeypatch, [_release("v9.9.9")])
+    r = client.post("/api/system/update/apply", json={"version": ""})
+    assert r.status_code == 409
+    assert "压缩包" in r.json()["message"]
+
+
+def test_apply_没有_zip_附件回_409(client, monkeypatch):
+    from boss_web import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: False)
+
+    def no_zip():
+        return update_check.Release(
+            version="9.9.9", notes="", assets=(update_check.Asset("a.exe", "https://x/a.exe"),)
+        )
+
+    monkeypatch.setattr(update_check, "fetch_latest_release", no_zip)
+    r = client.post("/api/system/update/apply", json={"version": ""})
+    assert r.status_code == 409
+    assert "zip" in r.json()["message"].lower()
+
+
+def test_apply_版本漂移回_409(client, monkeypatch):
+    from boss_web import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: False)
+    _fake_gitee(monkeypatch, [_release("v9.9.9")])
+    r = client.post("/api/system/update/apply", json={"version": "1.0.0"})
+    assert r.status_code == 409
+    assert "版本已变化" in r.json()["message"]
+
+
+def test_apply_正常情况启动更新任务(client, monkeypatch):
+    from boss_web import runtime
+    from boss_web.services import updater
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: False)
+    _fake_gitee(monkeypatch, [_release("v9.9.9")])
+
+    started: list[dict] = []
+    monkeypatch.setattr(
+        updater,
+        "start_update_job",
+        lambda **kw: started.append(kw),
+    )
+
+    r = client.post("/api/system/update/apply", json={"version": "9.9.9"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["version"] == "9.9.9"
+    assert started and started[0]["zip_url"].endswith(".zip")
+    assert started[0]["version"] == "9.9.9"
 
 
 def test_health_带上当前版本号(client):

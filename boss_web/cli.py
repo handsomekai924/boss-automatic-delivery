@@ -270,6 +270,14 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     server = uvicorn.Server(config)
+    # 自更新要能「从里往外」把 uvicorn 停掉：挂上这个引用，bat 那边触发
+    # request_exit 时才不会只能硬 os._exit（端口都来不及干净释放）。
+    try:
+        from .services.updater import bind_server
+
+        bind_server(server)
+    except Exception:  # noqa: BLE001 - 挂不上不该拦住启动
+        logging.getLogger(__name__).warning("挂载自更新退出钩子失败", exc_info=True)
     # 版本检测后台预热：开页面时就有结果，不用先卡 8 秒等 Gitee；
     # 测完把「当前 / 发行 / 要不要更新」补打在横幅下面。
     try:

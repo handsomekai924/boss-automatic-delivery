@@ -96,13 +96,21 @@ def _normalize(raw: Any) -> str:
 
 
 @dataclass(frozen=True)
+class Asset:
+    #: Gitee 上的附件名（``BossAutoDelivery-1.1.3.zip``），用来挑更新包
+    name: str
+    #: 下载直链
+    url: str
+
+
+@dataclass(frozen=True)
 class Release:
     #: 展示用版本号（去掉 ``v`` 前缀）
     version: str
     #: 发行说明开头一段（Markdown 原文，前端按纯文本摆）
     notes: str
-    #: Gitee 上的资产下载直链（可能为空列表）
-    assets: tuple[str, ...]
+    #: Gitee 上的资产（名字 + 直链，可能为空）
+    assets: tuple[Asset, ...]
 
 
 def pick_latest(releases: list[dict[str, Any]]) -> Release | None:
@@ -124,7 +132,10 @@ def pick_latest(releases: list[dict[str, Any]]) -> Release | None:
         if best is not None and compare_versions(tag, best.version) <= 0:
             continue
         assets = tuple(
-            str(a.get("browser_download_url") or "")
+            Asset(
+                name=str(a.get("name") or ""),
+                url=str(a.get("browser_download_url") or ""),
+            )
             for a in (item.get("assets") or [])
             if isinstance(a, dict) and a.get("browser_download_url")
         )
@@ -133,6 +144,39 @@ def pick_latest(releases: list[dict[str, Any]]) -> Release | None:
             body = body[:NOTES_LIMIT].rstrip() + "\n…"
         best = Release(version=_normalize(tag), notes=body, assets=assets)
     return best
+
+
+def pick_zip_asset(assets: Any) -> Asset | None:
+    """挑出更新用的 zip 附件：优先 ``BossAutoDelivery*.zip``，其次任意 ``*.zip``。
+
+    名字为空（老接口只给直链）就看 URL 的最后一段。大小写不敏感。
+    """
+    items: list[Asset] = []
+    for a in assets or []:
+        if isinstance(a, Asset):
+            items.append(a)
+        elif isinstance(a, dict):
+            items.append(Asset(name=str(a.get("name") or ""), url=str(a.get("url") or "")))
+
+    def _name_of(a: Asset) -> str:
+        if a.name:
+            return a.name
+        tail = (a.url or "").rstrip("/").rsplit("/", 1)[-1]
+        return tail.split("?")[0]
+
+    zips = [a for a in items if _name_of(a).lower().endswith(".zip")]
+    if not zips:
+        return None
+    preferred = [a for a in zips if _name_of(a).lower().startswith("bossautodelivery")]
+    return preferred[0] if preferred else zips[0]
+
+
+def can_self_update() -> bool:
+    """只有「装在本地目录里的 exe」能自更新：源码跑没有可替换的安装目录，
+    压缩包预览里跑（``is_temp_run``）解压目标是 %TEMP%，更新了也白搭。"""
+    from .. import runtime
+
+    return bool(runtime.is_frozen()) and not runtime.is_temp_run()
 
 
 def fetch_latest_release() -> Release:
@@ -276,6 +320,8 @@ def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
     """前端 ``GET /api/system/update`` 的完整载荷。
 
     ``should_prompt`` 是弹窗的唯一开关：有更新**且**没被忽略掉才为真。
+    ``can_self_update`` 决定「立即更新」按钮露不露；``update_done`` 是自更新
+    跑完后新进程给重连页面的一次性回执（见 :mod:`boss_web.services.updater`）。
     """
     snap = refresh(force=force)
     release: Release | None = snap["release"]
@@ -288,6 +334,13 @@ def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
     # 连续忽略多个版本只留下最高那一版（见 load_ignored_version）。
     suppressed = bool(ignored) and latest is not None and compare_versions(latest, ignored) <= 0
 
+    assets = list(release.assets) if release else []
+    zip_asset = pick_zip_asset(assets)
+    try:
+        update_done = _load_done_marker()
+    except Exception:  # noqa: BLE001 - 回执读不出来不该把状态接口搞挂
+        update_done = None
+
     return {
         "ok": True,
         "current": current,
@@ -298,10 +351,20 @@ def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
         "notes": release.notes if release else "",
         "gitee_url": GITEE_RELEASES_PAGE,
         "github_url": GITHUB_RELEASES_PAGE,
-        "assets": list(release.assets) if release else [],
+        "assets": [{"name": a.name, "url": a.url} for a in assets],
+        "zip_asset": {"name": zip_asset.name, "url": zip_asset.url} if zip_asset else None,
+        "can_self_update": can_self_update(),
+        "update_done": update_done,
         "checked_at": snap["checked_at"],
         "error": snap["error"],
     }
+
+
+def _load_done_marker() -> dict[str, Any] | None:
+    """更新完成回执（一次性）。import 放函数里避免 services 互相 import 成环。"""
+    from .updater import consume_done_marker
+
+    return consume_done_marker()
 
 
 def format_console_lines(status: dict[str, Any]) -> list[str]:

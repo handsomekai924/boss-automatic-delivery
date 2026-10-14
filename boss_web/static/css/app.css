@@ -1417,6 +1417,14 @@ details.acc .acc-body {
   max-height: 240px;
   overflow: auto;
 }
+/* 自更新进度：文案一行 + 进度条 */
+.update-progress {
+  margin: 0 0 var(--sp-3);
+}
+.update-progress [data-role="stage-text"] {
+  font-size: var(--fs-13, 13px);
+  color: var(--text-1);
+}
 
 .match-row {
   display: flex;

@@ -12,6 +12,12 @@
 可写数据      仓库 ``data/``                exe 同目录 ``data/``（便携）
 ============  ==========================  ================================
 
+打包是 **onedir**（``BossAutoDelivery.exe`` + ``_internal\\``）。onedir 下
+``sys._MEIPASS`` 就是 ``<安装目录>\\_internal``，所以 :func:`resource_root` /
+``STATIC_DIR`` 照常；:func:`executable_dir` 是安装目录，:func:`app_data_dir`
+是它旁边的 ``data\\``。自更新（:mod:`boss_web.services.updater`）只换程序文件，
+``data\\`` 原样保留——所以**不能**改回 onefile（那个解包到 ``%TEMP%``，换不动）。
+
 打包形态下**必须**调一次 :func:`bootstrap`（在任何 store / Chrome 调用之前），
 否则 ``boss_db`` 会把库建到 ``_MEIPASS`` 里——那个目录进程一退就被清空，
 用户的简历、登录态、职位全没。

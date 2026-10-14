@@ -8,13 +8,14 @@
 登录 ──► 找职位 ──► 简历匹配 ──► AI 写招呼语 ──► 一键投递
 ```
 
-> **不想碰命令行？** 直接下打包好的 `BossAutoDelivery.exe`，双击就能用——到 Releases 页面的
-> **Assets** 里下，无需 Python、无需 venv：
+> **不想碰命令行？** 直接下打包好的 zip，解压就能用——到 Releases 页面的
+> **Assets** 里下 `BossAutoDelivery-x.y.z.zip`，无需 Python、无需 venv：
 >
 > - **GitHub**：https://github.com/handsomekai924/boss-automatic-delivery/releases
 > - **Gitee**（国内下载更快）：https://gitee.com/w-kev/boss-automatic-delivery/releases
 >
-> 想自己打包见 [打包成 exe 分发](#打包成-exe-分发)。
+> 装好后有新版本会在网页里提示，点「立即更新」就地升级，不用再手动下一次。
+> 想自己打包见 [打包成 zip 分发](#打包成-zip-分发)。
 
 ---
 
@@ -116,55 +117,95 @@ pip install -r requirements.txt
 
 ---
 
-## 打包成 exe 分发
+## 打包成 zip 分发
 
-给**不用命令行的人**准备的：一个单文件 `BossAutoDelivery.exe`，双击就开浏览器，
+给**不用命令行的人**准备的：一个 zip，解压进哪个目录，哪个目录就是安装目录。
 目标机器上不需要 Python、不需要 venv、不需要 pip。
+
+用 **onedir**（`BossAutoDelivery.exe` + `_internal\`）而不是单文件 exe：启动快，
+而且**自己换得动自己**——单文件 exe 会把自己解到 `%TEMP%` 再跑，升级时没法就地
+替换，也没法让旁边的 `data\` 跟着安装目录走。
 
 ### 直接下载现成的
 
-不用自己打包，去 Releases 页面的 **Assets** 里下 `BossAutoDelivery.exe`：
+不用自己打包，去 Releases 页面的 **Assets** 里下 `BossAutoDelivery-x.y.z.zip`：
 
 | 来源 | 下载地址 | 说明 |
 |------|----------|------|
 | **GitHub** | https://github.com/handsomekai924/boss-automatic-delivery/releases | 最新版 |
 | **Gitee** | https://gitee.com/w-kev/boss-automatic-delivery/releases | 国内访问更快，版本与 GitHub 同步 |
 
-下载后先跑 `BossAutoDelivery.exe --self-check` 可核对完整性，确认没问题再双击启动。
+解压后先跑 `BossAutoDelivery\BossAutoDelivery.exe --self-check` 可核对完整性，确认没问题再双击启动。
 
 ### 自己打包
 
 ```bash
 pip install -r requirements.txt -r requirements-build.txt
 packaging\build.bat
-# 产物：dist\BossAutoDelivery.exe
+# 先清空 dist\，再产物：
+#   dist\BossAutoDelivery\                 安装目录（exe + _internal\）
+#   dist\BossAutoDelivery-1.2.3.zip        发到 Gitee Release 附件的那个包
 ```
 
-打包后**数据跟着 exe 走（便携）**，同目录下会生成：
+**每次打包都会先删掉整个 `dist\`**。旧布局残留（onefile 的 `BossAutoDelivery.exe`、
+跑过一次生成的 `data\`）混在产物里，很容易把错的东西发出去；要留档就先拷走。
+
+打包后**数据跟着安装目录走（便携）**，跑起来之后同目录下会生成：
 
 ```
-dist\
+BossAutoDelivery\                 ← 解压出来的安装目录
   BossAutoDelivery.exe
+  _internal\                      程序本体（库 / 资源），升级时整换
   data\
-    boss.db            # 简历 / 登录态 / 职位 / AI 配置，全在这一个文件里
-    chrome_profile\    # 取安全令牌用的 Chrome 工作目录
-    logs\boss.log      # 出问题时把日志发出来即可
+    boss.db                       # 简历 / 登录态 / 职位 / AI 配置，全在这一个文件里
+    chrome_profile\               # 取安全令牌用的 Chrome 工作目录
+    logs\boss.log                 # 出问题时把日志发出来即可
 ```
+
+**目录语义**：`_internal\` 和 `BossAutoDelivery.exe` 是**程序文件**，升级时整目录换掉；
+`data\` 是**用户数据**，升级时一个字节都不动。挪机器就整个文件夹拷走。
 
 几条要知道的事：
 
-- **挪机器就整个文件夹拷走**，别只拷 exe，否则简历和登录状态都丢了。
 - **别在压缩包里直接双击**。Windows 会先解压到临时目录再运行，数据会写进
   `%TEMP%` 并在退出时清掉；程序检测到这种情况会在首页顶部弹红条提醒你。
 - 放在 `C:\Program Files` 这类**写不进去**的目录时，数据会自动改存到
   `%LOCALAPPDATA%\BossAutoDelivery\data\`，首页会告诉你实际路径。
 - 想核对打包有没有缺东西，跑 `BossAutoDelivery.exe --self-check`，会打印
-  资源根 / 前端目录 / 状态库 / 日志目录 / Chrome 检测结果。
+  资源根 / 前端目录 / 状态库 / 日志目录 / Chrome 检测结果 / 当前版本。
 - 首次运行 Windows 可能弹「已保护你的电脑」（exe 没有代码签名）。点
   **更多信息 → 仍要运行**。这是无签名 exe 的通病，不是程序有问题。
 
 > 打包定义在 `packaging/boss_web.spec`，要点全写在注释里。改依赖后记得同步
-> `hiddenimports`——uvicorn 和 python-docx 都靠动态导入，漏一个就是「双击闪退」。
+> `hiddenimports`——uvicorn / python-docx / segno 都靠动态导入，漏一个就是
+> 「双击闪退」或「二维码裂图」。构建脚本会在打包前挡一道，缺什么直接报给你。
+
+### 应用内自动更新
+
+检测到新版本时网页会弹窗，点**「立即更新」**就地升级，不用再进 Gitee 手动下：
+
+1. 程序从 Gitee Release 附件下载 zip（弹窗上有下载百分比）。
+2. 校验 zip 能解开、里面有 `BossAutoDelivery.exe`，再生成一个 `%TEMP%` 下的
+   `apply_update.bat`（黑窗会短暂出现，是正常的）。
+3. bat **先验后删**：zip 不在 / 解压不出 exe 就直接退出，**安装目录一个文件都不动**；
+   确认无误才停掉当前服务、换掉程序文件（**保留 `data\`**）、按**原来的端口**重启。
+4. 全程 WebSocket 推进度；换文件那几秒页面会断开，新服务起来后自动接上，
+   显示「更新完成，可以关闭此标签页了」并尝试关掉当前标签页。
+5. 失败的话黑窗会停在原因上按任意键关闭，日志在
+   `%TEMP%\BossAutoDelivery-update\update.log`——把它发出来就能定位。
+
+更新只在「装在本地目录里的 exe」上提供：源码跑请用 `git pull`，在压缩包预览里
+跑请先解压——这两种情况弹窗里不会出现「立即更新」按钮。
+
+### 发版清单
+
+把新版本发成 Release 时，按这个来，否则用户的「立即更新」会挑不到包：
+
+1. `boss_web/__init__.py` 的 `__version__` 改成新号，和 git tag 保持一致。
+2. `packaging\build.bat` 打出 `dist\BossAutoDelivery-x.y.z.zip`。
+3. 在 **Gitee** 建 Release（版本判断只认 Gitee），tag 用 `vx.y.z` 或 `x.y.z` 都行。
+4. 把 zip **作为附件**挂上去，名字以 `BossAutoDelivery` 开头、`.zip` 结尾。
+5. **不要**勾选「预发布」——预发布会被跳过。发行说明写中文即可，弹窗只显示开头一段。
 
 ---
 
@@ -246,7 +287,7 @@ boss_filter/   筛选条件获取（真实 wapi + 内置兜底表）
 boss_jobs/     职位分页抓取 · __zp_stoken__ 计算 · 聊天通道（MQTT + protobuf）
 boss_db/       统一状态库（SQLite）：会话 / 搜索条件 / LLM 配置 / 简历 / 职位
 boss_web/      FastAPI 服务 + 原生前端工作台
-packaging/     PyInstaller 打包定义（单文件 exe）
+packaging/     PyInstaller 打包定义（onedir 目录包 + 发行 zip）
 tools/         开发辅助（mock server 等）
 tests/         pytest 测试套件
 ```
@@ -273,7 +314,7 @@ tests/         pytest 测试套件
 路径覆盖顺序：显式 `path` → 环境变量 `BOSS_DB` → `data/boss.db`。
 
 > `data/` 已在 `.gitignore` 里，不会被提交。想备份就把 `data/boss.db` 拷走。
-> 打包成 exe 后 `data/` 在 exe 同目录（见 [打包成 exe 分发](#打包成-exe-分发)）。
+> 打包成 zip 后 `data/` 在安装目录里（见 [打包成 zip 分发](#打包成-zip-分发)）。
 
 ---
 

@@ -397,6 +397,54 @@ def test_版本判断只查_gitee():
     assert "github_url" in update_js
 
 
+# --------------------------------------------------------------------------- #
+# 应用内自更新：立即更新按钮 / WS 进度 / 关标签页
+# --------------------------------------------------------------------------- #
+
+
+def test_立即更新按钮只在能自更新时露出():
+    update_js = _read("js/update.js")
+    assert "立即更新" in update_js
+    assert "can_self_update" in update_js
+    assert "zip_asset" in update_js
+
+
+def test_立即更新走_apply_接口():
+    update_js = _read("js/update.js")
+    assert "/api/system/update/apply" in update_js
+
+
+def test_更新进度走_ws():
+    update_js = _read("js/update.js")
+    assert "/api/system/update/ws" in update_js
+    assert "WebSocket" in update_js
+
+
+def test_更新完成后要关标签页并留兜底文案():
+    update_js = _read("js/update.js")
+    assert "window.close()" in update_js
+    # window.close 常被浏览器拦，兜底文案必须一直留着
+    assert "可以关闭此标签页" in update_js
+
+
+def test_换文件期要提醒别关电脑():
+    update_js = _read("js/update.js")
+    assert "请不要关闭电脑" in update_js
+
+
+def test_更新失败要能看见原因():
+    update_js = _read("js/update.js")
+    assert 'ev.stage === "error"' in update_js
+    assert "toast" in update_js
+
+
+def test_更新进度有进度条():
+    update_js = _read("js/update.js")
+    css = _read("css/app.css")
+    assert 'data-role="bar"' in update_js
+    assert ".update-progress" in css
+
+
 def test_首页环境卡显示当前版本():
     home = _read("js/views/home.js")
     assert "h.version" in home
