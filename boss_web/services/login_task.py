@@ -197,20 +197,34 @@ class LoginTaskManager:
         return task.snapshot() if task else {}
 
     def status_payload(self) -> dict[str, Any]:
-        """``GET /api/auth/status`` 用：本地会话 + 当前任务。"""
+        """``GET /api/auth/status`` 用：本地会话 + 当前任务 + 启动自检结论。
+
+        ``logged_in`` 以库里那份为准；启动自检说过期时**压成 False**——
+        清库偶尔会失败（文件锁），这时候不能再让界面谎报「已登录」。
+        """
         import boss_db
 
         from boss_login.session import load_session
 
+        from . import session_check
+
         path = boss_db.resolve_db_path(self._session_path)
         stored = load_session(path)
         task = self.current()
+        check = session_check.snapshot()
+        expired = str(check.get("state") or "") == session_check.ST_EXPIRED
         return {
-            "logged_in": bool(stored.cookies or stored.token),
+            "logged_in": (not expired) and bool(stored.cookies or stored.token),
             "phone_masked": stored.phone_masked,
             "user": stored.user,
             "saved_at": stored.saved_at,
             "session_path": str(path),
+            "check": {
+                "state": check.get("state") or "",
+                "checked_at": check.get("checked_at") or 0.0,
+                "message": check.get("message") or "",
+                "cleared": bool(check.get("cleared")),
+            },
             "task": task.snapshot() if task else None,
         }
 

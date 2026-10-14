@@ -69,6 +69,9 @@ export async function refreshBridge() {
   const label = document.getElementById("signal-session-label");
   try {
     const st = await api.get("/api/auth/status");
+    // 广播一份：首页「会话」卡片跟着舰桥一起刷新。以前它只在渲染时取一次，
+    // 首屏那次请求失败/被缓存成「未登录」后就一直停在「离线」，得手动刷新页面。
+    window.dispatchEvent(new CustomEvent("boss:session", { detail: st }));
     if (st.logged_in) {
       dot.className = "signal ok";
       label.textContent = st.phone_masked || "已登录";

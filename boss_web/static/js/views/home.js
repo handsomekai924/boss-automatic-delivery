@@ -115,8 +115,11 @@ export async function renderHome(root) {
 
   const $ = (id) => root.querySelector("#" + id);
 
-  // 会话
-  api.get("/api/auth/status").then((st) => {
+  // 会话：跟舰桥共用一份状态。只在渲染时取一次的话，首屏那次请求失败/被缓存
+  // 成「未登录」就会一直挂着「离线」，得手动刷新页面才恢复——所以订阅舰桥的
+  // boss:session 广播，它每 8 秒刷一次，卡片跟着走。
+  function paintSession(st) {
+    if (!st) return;
     const name = (st.user?.name || "").trim();
     $("sess-num").textContent = st.logged_in ? "在线" : "离线";
     $("sess-label").textContent = st.logged_in
@@ -137,7 +140,11 @@ export async function renderHome(root) {
       primary.textContent = "去登录";
       secondary.classList.add("hidden");
     }
-  }).catch(() => {});
+  }
+
+  const onSession = (e) => paintSession(e.detail);
+  window.addEventListener("boss:session", onSession);
+  api.get("/api/auth/status").then(paintSession).catch(() => {});
 
   // 职位
   api.get("/api/jobs/stats").then((s) => {
@@ -315,5 +322,8 @@ export async function renderHome(root) {
     } catch { /* ignore */ }
   }, 1500);
 
-  return () => clearInterval(timer);
+  return () => {
+    clearInterval(timer);
+    window.removeEventListener("boss:session", onSession);
+  };
 }

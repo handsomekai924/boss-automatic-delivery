@@ -181,3 +181,69 @@ def test_打印行格式固定三行(monkeypatch, capsys):
     assert "当前版本" in text and "v1.1.0" in text
     assert "发行版本" in text and "v1.2.0" in text
     assert "是否需要更新" in text and "有新版本" in text
+
+
+# --------------------------------------------------------------------------- #
+# 登录态自检：横幅占位 + 测完才开浏览器
+# --------------------------------------------------------------------------- #
+
+
+def test_横幅先打登录状态占位_测完再补真结果(monkeypatch, capsys):
+    """登录态自检也不能卡住启动：横幅先占位，后台打完 user_info 再补一行。"""
+    import threading
+
+    from boss_web.services import session_check
+
+    monkeypatch.setattr(cli, "_setup_logging", lambda *_a, **_k: None)
+    monkeypatch.setattr("uvicorn.Server.run", lambda self: None, raising=False)
+    monkeypatch.setattr(cli, "pick_port", lambda *_a, **_k: 8799)
+    monkeypatch.setattr(update_check, "schedule_startup_check", lambda on_done=None: None)
+
+    def fake_schedule(on_done=None, **_kwargs):
+        if on_done is not None:
+            on_done({"state": "absent", "message": "库里没有登录态", "error": None})
+        done = threading.Event()
+        done.set()
+        return done
+
+    monkeypatch.setattr(session_check, "schedule_startup_check", fake_schedule)
+
+    assert cli.main(["--no-browser"]) == 0
+    out = capsys.readouterr().out
+    assert "登录状态" in out
+    assert "正在校验" in out
+    assert "未登录" in out
+
+
+def test_开浏览器要等登录态自检出结果():
+    """首屏会话卡片不能先渲染一份没验过的状态——测完再开，用户不用刷新。"""
+    import threading
+    import time
+    import types
+
+    opened: list[str] = []
+    ready = threading.Event()
+
+    server = types.SimpleNamespace(started=True, should_exit=False)
+
+    def fake_open(url):
+        opened.append(url)
+
+    original = cli.webbrowser.open
+    cli.webbrowser.open = fake_open
+    try:
+        t = threading.Thread(
+            target=cli._open_browser_when_ready,
+            args=(server, "http://127.0.0.1:8787", ready),
+            daemon=True,
+        )
+        t.start()
+        # 自检还没出结果：浏览器不该开
+        time.sleep(0.3)
+        assert opened == []
+
+        ready.set()
+        t.join(timeout=2.0)
+        assert opened == ["http://127.0.0.1:8787"]
+    finally:
+        cli.webbrowser.open = original

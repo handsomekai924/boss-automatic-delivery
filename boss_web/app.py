@@ -89,6 +89,10 @@ def create_app() -> FastAPI:
             # JS/CSS 是 ES module 依赖图的一部分，缓存过期会造成跨文件版本错配
             if request.url.path.startswith("/static/") or request.url.path == "/":
                 response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            # 接口一律不进浏览器缓存：`/api/auth/status` 被缓存过一次「未登录」，
+            # 用户登录后再打开首页就还挂着旧状态，得手动刷新才正确（真机踩过）。
+            elif request.url.path.startswith("/api/"):
+                response.headers["Cache-Control"] = "no-store"
             return response
 
         @app.get("/", include_in_schema=False)

@@ -127,9 +127,19 @@ def _banner(url: str, info: dict[str, str]) -> None:
         print("  ⚠ 程序所在目录写不进去，数据已改存到上面这个目录")
     if info.get("warning") == "temp_run":
         print("  ⚠ 程序在临时目录里运行——请先把 exe 解压到桌面再打开，否则数据会丢")
+    print("  登录状态     正在校验…")
     print("  版本对比     正在查 Gitee 发行版…")
     print("  关掉这个窗口就是退出程序")
     print("=" * 60)
+
+
+def _print_session_status(result: dict) -> None:
+    """把登录态自检结果打到控制台。文案在 session_check.format_console_lines。"""
+    from .services.session_check import format_console_lines
+
+    for line in format_console_lines(result):
+        print(line)
+    sys.stdout.flush()
 
 
 def _print_version_status(status: dict) -> None:
@@ -190,17 +200,27 @@ def _self_check(info: dict[str, str]) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _open_browser_when_ready(server, url: str, timeout: float = 30.0) -> None:
-    """等 uvicorn 真的起来了再开浏览器。
+def _open_browser_when_ready(
+    server,
+    url: str,
+    ready: "threading.Event | None" = None,
+    timeout: float = 30.0,
+) -> None:
+    """等 uvicorn 真的起来、登录态自检出结果，再开浏览器。
 
     原来是在 ``uvicorn.run`` **之前**开，用户会先看到一个连接被拒的页面，
     得手动刷新——对不懂的人是「这软件坏了」。
+
+    ``ready`` 是登录态自检的完成信号（:func:`session_check.schedule_startup_check`
+    返回的那个）。默认**等它出结果再开**：否则首屏会话卡片会先渲染一份没验过的
+    状态，用户看到「离线」，刷新一次才正确。自检卡住（断网、接口慢）也不会
+    把浏览器无限期扣住——到点照样开。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if getattr(server, "should_exit", False):
             return
-        if getattr(server, "started", False):
+        if getattr(server, "started", False) and (ready is None or ready.is_set()):
             break
         time.sleep(0.15)
     else:
@@ -259,9 +279,23 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:  # noqa: BLE001 - 预热失败绝不拦住启动
         logging.getLogger(__name__).warning("版本检测预热失败", exc_info=True)
 
+    # 登录态自检：启动时拿库里的凭证打一次用户信息接口，过期就把库里的清掉。
+    # 开浏览器之前等它出结果——否则首屏会话状态没验过，用户看到「离线」，
+    # 得刷新一次才对（见 _open_browser_when_ready 的 ready 参数）。
+    session_ready = threading.Event()
+    try:
+        from .services.session_check import schedule_startup_check as schedule_session_check
+
+        session_ready = schedule_session_check(on_done=_print_session_status)
+    except Exception:  # noqa: BLE001 - 自检失败绝不拦住启动
+        session_ready.set()
+        logging.getLogger(__name__).warning("登录态自检预热失败", exc_info=True)
+
     if not args.no_browser:
         threading.Thread(
-            target=_open_browser_when_ready, args=(server, url), daemon=True
+            target=_open_browser_when_ready,
+            args=(server, url, session_ready),
+            daemon=True,
         ).start()
 
     _banner(url, info)
