@@ -7,6 +7,7 @@ bat 的正文断言是**回归护栏**：有人把「验 zip」挪到「删文�
 from __future__ import annotations
 
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -44,11 +45,29 @@ def test_bat_护栏顺序_先验_zip_再动文件():
     list_ok = body.index('tar -tf "%ZIP_PATH%"')
     extract = body.index('tar -xf "%ZIP_PATH%"')
     exe_check = body.index('if not exist "%EXTRACT_DIR%\\%EXE_NAME%"')
+    lib_check = body.index('if not exist "%EXTRACT_DIR%\\_internal\\base_library.zip"')
     wipe = body.index('if /I not "%%D"=="data"')
 
-    assert guard < list_ok < extract < exe_check < wipe, (
-        "zip 守卫必须排在删文件之前——zip 不在/解压不出 exe 就绝不能碰安装目录"
+    assert guard < list_ok < extract < exe_check < lib_check < wipe, (
+        "zip 守卫必须排在删文件之前——zip 不在 / 解压不出 exe / 缺 base_library.zip，"
+        "任何一种都绝不能碰安装目录"
     )
+
+
+def test_bat_缺_base_library_就停在原地不换():
+    """残缺包换上去 exe 根本起不来，比不更新还糟。
+
+    真踩过：``base_library.zip``（PyInstaller 的整个 stdlib）被漏掉，更新「成功」
+    之后程序再也打不开。所以护栏必须在 ``:wipe`` 之前，且报错要停住不往下走。
+    """
+    body = _bat()
+    check = body.index('if not exist "%EXTRACT_DIR%\\_internal\\base_library.zip"')
+    wipe = body.index('if /I not "%%D"=="data"')
+    assert check < wipe, "缺文件必须在删安装目录之前拦住"
+
+    block = body[check:wipe]
+    assert ":fail" in block, "要报错给人看，不能静默跳过"
+    assert "exit /b 1" in block, "报错之后不许继续往下换"
 
 
 def test_bat_保留_data_目录():
@@ -291,6 +310,10 @@ def test_spawn_bat_把路径塞进环境变量(tmp_path, monkeypatch):
     assert env["APP_PORT"] == "8765"
     # 路径里有中文/空格也没写进 bat 命令行，全靠 env
     assert "带空格" not in " ".join(calls[0]["args"])
+    # 回归：曾经的 DETACHED_PROCESS 让 cmd 没有控制台，bat 第一句管道就永久挂死
+    flags = calls[0]["creationflags"]
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert not flags & getattr(subprocess, "DETACHED_PROCESS", 0)
 
 
 def test_request_exit_设_should_exit_并硬退(monkeypatch):

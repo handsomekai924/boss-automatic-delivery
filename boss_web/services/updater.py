@@ -468,6 +468,16 @@ if not exist "%EXTRACT_DIR%\%EXE_NAME%" (
   call :fail "BossAutoDelivery.exe missing after extract"
   exit /b 1
 )
+
+rem ---- guard 3: onedir package must carry _internal\base_library.zip ----
+rem PyInstaller keeps the whole stdlib (encodings, codecs...) in that zip.
+rem Without it the swapped-in exe dies at startup with
+rem "No module named 'encodings'", leaving the user with an app that cannot
+rem open. Refuse the package BEFORE the wipe - an old app beats no app.
+if not exist "%EXTRACT_DIR%\_internal\base_library.zip" (
+  call :fail "package is incomplete: _internal\base_library.zip missing"
+  exit /b 1
+)
 call :progress ready 80 "package extracted"
 
 rem ---- step 4: signal stopping, wait for old process ----
@@ -572,14 +582,21 @@ def write_bat(dest_dir: Path | None = None) -> Path:
 
 
 def spawn_bat(bat_path: Path, *, env_extra: dict[str, str]) -> None:
-    """分离启动 bat。**留可见黑窗**——失败时要让人看见 ``pause`` 留下的原因。"""
+    """分离启动 bat。**必须给它一个真实存在（但没窗口）的控制台**。
+
+    不能用 ``DETACHED_PROCESS``：那样 cmd 完全没有控制台，bat 里**任何管道都会
+    永久挂死**——``tasklist ... | findstr ...`` 正好是停止等待循环的第一句，更新
+    会一声不响地停在 85%；同一环境里 ``tasklist`` 重定向到文件也是空输出、
+    ``pause`` 也会挂住。``CREATE_NO_WINDOW`` 给的是真控制台、只是没窗口，
+    管道 / ``tasklist`` / ``pause`` 全部正常；失败原因看 ``update.log``（页面能看）。
+    """
     if sys.platform != "win32":
         raise UpdateApplyError("自动更新目前仅支持 Windows")
     env = os.environ.copy()
     env.update({k: str(v) for k, v in env_extra.items()})
     creationflags = 0
-    if hasattr(subprocess, "DETACHED_PROCESS"):
-        creationflags |= subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        creationflags |= subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
     if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
         creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     try:
