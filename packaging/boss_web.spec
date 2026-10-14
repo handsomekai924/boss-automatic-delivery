@@ -8,9 +8,19 @@
 要点全在注释里，改之前先看 :mod:`boss_web.runtime` 的模块 docstring。
 """
 
+import importlib.util
 import os
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+#: segno 只在 boss_login.qrcode 的函数体里 try/except 着延迟导入，静态分析标成
+#: 「delayed, optional」，venv 漏装也照样出 exe——用户那边就是二维码裂图、黑窗
+#: 一点报错都没有（真机踩过）。构建期主动挡一道，别把「能跑但出不了图」的包发出去。
+if importlib.util.find_spec("segno") is None:
+    raise SystemExit(
+        "构建环境缺少 segno，先装再打包：\n"
+        '  .venv\\Scripts\\python.exe -m pip install "segno>=1.6.0"'
+    )
 
 #: spec 文件所在目录由 PyInstaller 注入；仓库根是它的上一级。
 #: 用绝对路径而不是相对路径，免得受构建时 cwd / --workpath 影响。
@@ -47,6 +57,9 @@ hiddenimports = [
     "python_multipart",
     "python_docx",  # Word 简历解析
     "pypdf",  # PDF 简历解析
+    # 画二维码 PNG。boss_login.qrcode 是函数内 try 导入，PyInstaller 标 optional
+    # 就会漏；没进包 = 扫码登录永远裂图（响应 502 的 JSON 被 <img> 当坏图显示）。
+    "segno",
     # 这两个包的子模块是靠 python-docx 内部结构间接导入的，静态分析容易漏；
     # lxml 是 python-docx 的 C 扩展后端，漏了 Word 上传会在运行时才炸。
     "lxml",

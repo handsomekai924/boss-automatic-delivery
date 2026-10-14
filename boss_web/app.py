@@ -32,7 +32,17 @@ def create_app() -> FastAPI:
     app.include_router(api_router, prefix="/api")
 
     @app.exception_handler(WebError)
-    async def _web_error(_: Request, exc: WebError) -> JSONResponse:  # noqa: ANN202
+    async def _web_error(request: Request, exc: WebError) -> JSONResponse:  # noqa: ANN202
+        # 以前只回 JSON 不留痕，浏览器 <img> 裂图这类失败完全无迹可循（exe 漏打
+        # segno 就是这么瞎了很久）。至少落一行日志，5xx 当场醒目，4xx 记线索。
+        level = logger.warning if exc.status_code >= 500 else logger.info
+        level(
+            "业务错误：%s %s -> %s %s",
+            request.method,
+            request.url.path,
+            exc.status_code,
+            exc.message,
+        )
         return JSONResponse(status_code=exc.status_code, content=exc.payload())
 
     @app.exception_handler(StokenError)

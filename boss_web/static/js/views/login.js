@@ -96,6 +96,7 @@ export async function renderLogin(root) {
           <div id="qr-wait" class="hidden" style="text-align:center">
             <div id="qr-status" class="muted mb-8">二维码已生成，请用 BOSS APP 扫码</div>
             <img id="qr-img" alt="登录二维码" style="width:220px;height:220px;border-radius:12px;background:#fff;padding:10px;box-sizing:content-box">
+            <div id="qr-img-error" class="banner warn hidden" style="text-align:left;max-width:300px;margin:8px auto 0"></div>
             <div class="muted mt-8" id="qr-payload" style="font-size:11px;word-break:break-all"></div>
             <div class="btn-row" style="justify-content:center">
               <button class="btn ghost" id="btn-qr-refresh">刷新二维码</button>
@@ -178,13 +179,35 @@ export async function renderLogin(root) {
     }
   }
 
+  /** 图挂了（502/404）浏览器只给裂图，这里把响应里的 message 接住摆出来。 */
+  async function onQrImgError(img) {
+    img.onerror = null; // 同一张图别反复重试
+    img.classList.add("hidden");
+    let msg = "二维码图片加载失败，请点「刷新二维码」重试";
+    try {
+      const res = await fetch(img.src);
+      const data = await res.json();
+      if (data && data.message) msg = data.message;
+    } catch { /* 非 JSON（网络断了/被顶成页面）就用兜底文案 */ }
+    const box = $("qr-img-error");
+    box.textContent = msg;
+    box.classList.remove("hidden");
+    toast(msg, "bad");
+  }
+
   function applyQr(task) {
     const qr = task.qr || {};
     if (!qr.payload) return;
     if (qr.revision !== qrRevision) {
       qrRevision = qr.revision;
       // ?v= 破缓存：票据换发后内容变了，旧图不能再留着
-      $("qr-img").src = `${qr.image_url || `/api/auth/qr/${task.task_id}/image`}`;
+      const img = $("qr-img");
+      const err = $("qr-img-error");
+      err.classList.add("hidden");
+      err.textContent = "";
+      img.classList.remove("hidden");
+      img.onerror = () => onQrImgError(img);
+      img.src = `${qr.image_url || `/api/auth/qr/${task.task_id}/image`}`;
       $("qr-payload").textContent = qr.payload;
     }
     if (qr.head_img) $("qr-head").src = qr.head_img;
