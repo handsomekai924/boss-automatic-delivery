@@ -1426,6 +1426,43 @@ details.acc .acc-body {
   color: var(--text-1);
 }
 
+/* ---------- 15.6 系统设置 → 版本更新 ---------- */
+
+/* 页签上的「有新版」小圆点，跟 rule-dot 同一套语义 */
+.settings-tab .settings-tab-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px oklch(0.78 0.14 155 / 0.55);
+}
+.update-summary {
+  padding: 4px 0 12px;
+}
+/* 过程日志：等宽 + 自己滚，别把整页撑长 */
+.update-log-view {
+  margin: 0 0 var(--sp-3);
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono);
+  font-size: var(--fs-13, 13px);
+  line-height: 1.6;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-s);
+}
+.update-log-view.empty {
+  color: var(--muted);
+  white-space: normal;
+}
+
 .match-row {
   display: flex;
   gap: var(--sp-4);

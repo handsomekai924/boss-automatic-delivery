@@ -286,6 +286,13 @@ def main(argv: list[str] | None = None) -> int:
         schedule_startup_check(on_done=_print_version_status)
     except Exception:  # noqa: BLE001 - 预热失败绝不拦住启动
         logging.getLogger(__name__).warning("版本检测预热失败", exc_info=True)
+    # 之后每 5 分钟再测一次：挂机也能发现新版（前端只做轻提示，不弹窗）。
+    try:
+        from .services.update_check import schedule_periodic_check
+
+        schedule_periodic_check(interval=300.0)
+    except Exception:  # noqa: BLE001 - 周期检测起不来也不该拦住启动
+        logging.getLogger(__name__).warning("版本周期检测启动失败", exc_info=True)
 
     # 登录态自检：启动时拿库里的凭证打一次用户信息接口，过期就把库里的清掉。
     # 开浏览器之前等它出结果——否则首屏会话状态没验过，用户看到「离线」，

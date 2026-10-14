@@ -132,6 +132,58 @@ def ignore_update(body: IgnoreUpdateBody) -> dict[str, Any]:
     }
 
 
+@router.get("/update/log")
+def update_log(tail: int = updater.LOG_TAIL_BYTES) -> dict[str, Any]:
+    """更新过程日志 + 诊断信息，给「系统设置 → 版本更新」就地看。
+
+    用户不会开 ``%TEMP%``，出错时要能在页面上直接看到原因、截图发给开发者。
+    **永远 200**：文件不存在 / 被 bat 锁着都是数据，不是接口错误。
+
+    ``diagnostics`` 只读缓存（:func:`update_check.cached_snapshot`），不打 Gitee——
+    诊断页不能卡 8 秒等网络。
+    """
+    limit = max(1, min(int(tail or updater.LOG_TAIL_BYTES), updater.LOG_TAIL_MAX))
+    files, hint = updater.read_update_logs(tail_bytes=limit)
+    snap = update_check.cached_snapshot()
+
+    frozen = runtime.is_frozen()
+    temp_run = runtime.is_temp_run()
+    if not frozen:
+        install_mode, label = "source", "源码运行（不支持自动更新）"
+    elif temp_run:
+        install_mode, label = "temp_zip", "压缩包临时运行（请先解压）"
+    else:
+        install_mode, label = "installed", "安装版（可自动更新）"
+
+    progress = updater.peek_progress()
+    return {
+        "ok": True,
+        "work_dir": str(updater.work_dir()),
+        "tail_bytes": limit,
+        "files": files,
+        "hint": hint,
+        "diagnostics": {
+            "current": snap["current"],
+            "latest": snap["latest"],
+            "has_update": snap["has_update"],
+            "should_prompt": snap["should_prompt"],
+            "ignored": snap["ignored"],
+            "error": snap["error"],
+            "checked_at": snap["checked_at"],
+            "frozen": frozen,
+            "temp_run": temp_run,
+            "install_mode": install_mode,
+            "install_mode_label": label,
+            "install_dir": str(runtime.executable_dir()),
+            "data_dir": str(runtime.app_data_dir()),
+            "can_self_update": snap["can_self_update"],
+            "zip_asset": snap["zip_asset"],
+            "last_stage": progress.get("stage") or "",
+            "last_stage_text": progress.get("text") or "",
+        },
+    }
+
+
 @router.post("/update/apply")
 def apply_update(body: ApplyUpdateBody) -> dict[str, Any]:
     """点「立即更新」：确认 zip 能拿到后立刻返回，进度全走 WS。

@@ -7,6 +7,11 @@ import { modal, escapeHtml, toast } from "./ui.js";
 const RECONNECT_MS = 1500;
 /** 等新服务起来的总时长上限。超过就当更新没跑完，让用户自己看日志 */
 const WAIT_LIMIT_MS = 10 * 60 * 1000;
+/** 后台轻提示的轮询间隔。检测本身是后端每 5 分钟刷缓存，这里只管读 */
+const WATCHER_POLL_MS = 60 * 1000;
+
+/** 已经 toast 过的版本号——同一个版本不许反复提醒 */
+let notifiedVersion = "";
 
 /**
  * 有新版本就弹「发现新版本」窗口。出口：
@@ -30,6 +35,50 @@ export async function maybePromptUpdate() {
     return;
   }
   if (!status.should_prompt) return;
+  // 弹窗马上要展示这一版了，后台 watcher 别再 toast 一次
+  markNotified(status.latest);
+  showUpdateModal(status);
+}
+
+/** 记下「这版已经提醒过了」，同版本不再 toast */
+function markNotified(version) {
+  if (version) notifiedVersion = String(version);
+}
+
+/**
+ * 后台轻提示：每隔一阵读一次检测结果，发现**没提醒过**的新版就 toast 一下。
+ *
+ * 跟首屏弹窗的分工：弹窗只在打开页面时出现一次；挂机靠这里。**绝不弹窗**，
+ * 也**不重复 toast 同一版**。忽略水位线由 ``should_prompt`` 天然压住——被
+ * 忽略的版本连 toast 都不会有。
+ *
+ * 每次拿到状态都会广播 ``boss:update``，系统设置的「版本更新」页签跟着刷。
+ */
+export function startUpdateWatcher(options) {
+  const intervalMs = (options && options.intervalMs) || WATCHER_POLL_MS;
+  const poll = async () => {
+    let status;
+    try {
+      status = await api.get("/api/system/update");
+    } catch {
+      return;
+    }
+    if (!status) return;
+    window.dispatchEvent(new CustomEvent("boss:update", { detail: status }));
+    if (status.should_prompt && status.latest && status.latest !== notifiedVersion) {
+      markNotified(status.latest);
+      toast(`发现新版本 v${status.latest}，到「系统设置 → 版本更新」看看`, "ok", 6000);
+    }
+  };
+  setInterval(poll, Math.max(5000, intervalMs));
+  // 立刻对一次，免得刚打开页面要干等一整轮
+  poll();
+}
+
+/** 系统设置里「打开更新窗口 / 立即更新」用的入口，复用同一套弹窗 */
+export function openUpdateDialog(status) {
+  if (!status) return;
+  markNotified(status.latest);
   showUpdateModal(status);
 }
 
@@ -199,7 +248,7 @@ function showUpdateModal(status) {
     if (!stopped && applying) {
       applying = false;
       setStage(
-        "等了很久也没等到新服务起来。请看程序黑窗里的提示，或打开 %TEMP%\\BossAutoDelivery-update\\update.log 排查。",
+        "等了很久也没等到新服务起来。请到「系统设置 → 版本更新」看更新日志，或把诊断信息复制给开发者。",
         100,
         "bad",
       );

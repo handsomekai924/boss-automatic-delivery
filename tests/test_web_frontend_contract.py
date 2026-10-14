@@ -451,6 +451,60 @@ def test_首页环境卡显示当前版本():
 
 
 # --------------------------------------------------------------------------- #
+# 系统设置 → 版本更新：手动检测 / 就地看日志 / 复制诊断
+# --------------------------------------------------------------------------- #
+
+
+def test_系统配置多了版本更新页签(settings_js: str):
+    assert 'data-tab="update"' in settings_js
+    assert "版本更新" in settings_js
+    assert "settings-tab-dot" in settings_js, "有新版时要在页签上点个小圆点"
+    assert "renderSettingsUpdate" in settings_js
+
+
+def test_版本更新页签有日志接口和复制诊断():
+    src = _read("js/views/settings_update.js")
+    assert "/api/system/update/log" in src
+    assert "复制诊断信息" in src
+    assert "navigator.clipboard" in src
+    assert "update.log" in src and "progress.log" in src
+    assert "install_mode" in src
+    assert "escapeHtml" in src, "日志/诊断文本进 HTML 前必须转义"
+    assert "检查更新" in src
+    assert "刷新日志" in src
+
+
+def test_版本更新页签可开更新窗口():
+    src = _read("js/views/settings_update.js")
+    assert "openUpdateDialog" in src
+    assert "立即更新" in src
+
+
+def test_后台轻提示不重复弹窗():
+    """挂机检测只 toast + 圆点，绝不叠 modal。"""
+    update_js = _read("js/update.js")
+    body = _fn_body(update_js, "startUpdateWatcher")
+    assert "toast" in body
+    assert "发现新版本" in body
+    assert "boss:update" in body
+    assert "should_prompt" in body, "忽略水位线要压住 toast"
+    assert "showUpdateModal(" not in body, "watcher 不许再弹窗"
+    assert "openUpdateDialog(" not in body, "watcher 不许再弹窗"
+
+
+def test_首屏弹窗保留且只弹一次():
+    update_js = _read("js/update.js")
+    body = _fn_body(update_js, "maybePromptUpdate")
+    assert "showUpdateModal" in body
+    assert "should_prompt" in body
+    assert "markNotified" in body, "弹过之后要记一笔，watcher 别再 toast 一遍"
+
+
+def test_app启动后台轻提示(app_js: str):
+    assert "startUpdateWatcher" in app_js
+
+
+# --------------------------------------------------------------------------- #
 # 登录页：短信与扫码两条流互不串台
 # --------------------------------------------------------------------------- #
 

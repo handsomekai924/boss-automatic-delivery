@@ -139,6 +139,19 @@ def snapshot_progress() -> dict[str, Any]:
     return payload
 
 
+def peek_progress() -> dict[str, Any]:
+    """只看最近一次进度事件，**不动** ``done.json``。
+
+    给「系统设置 → 版本更新」的诊断面板用：看一眼日志不该把更新完成的回执
+    吃掉（那是 :func:`snapshot_progress` 的活，一次性）。回执字段一律置空——
+    这里是「偷看」，不是消费。
+    """
+    with _lock:
+        payload = _last_event.to_payload()
+    payload["update_done"] = None
+    return payload
+
+
 def parse_progress_line(line: str) -> ProgressEvent | None:
     """``stage|percent|text`` → 事件；认不出回 ``None``。"""
     text = (line or "").strip()
@@ -172,6 +185,81 @@ def work_dir() -> Path:
 
 def done_marker_path() -> Path:
     return work_dir() / "done.json"
+
+
+#: 诊断页默认读的尾部字节数；用户可在接口上再要大一点
+LOG_TAIL_BYTES = 64 * 1024
+LOG_TAIL_MAX = 256 * 1024
+#: 要展示的过程日志（bat 用 ``>>`` 追加写，永不截断）
+LOG_FILE_NAMES = ("update.log", "progress.log")
+
+
+def read_update_logs(*, tail_bytes: int = LOG_TAIL_BYTES) -> tuple[list[dict[str, Any]], str | None]:
+    """读 ``%TEMP%\\BossAutoDelivery-update\\`` 下的过程日志**尾部**，给网页直接看。
+
+    用户不会开这个目录，所以日志要能就地看、出错也要能截图。约定：
+
+    * **文件不存在不是错误**——源码跑 / 从没更新过就是没有，回 ``exists: False``
+    * **读不出来也不报 500**——bat 正在写时文件可能被锁，塞进 ``read_error``
+    * 超长只取尾部并丢掉残行（bat 是 ``>>`` 追加，越积越长）
+
+    :return: ``(files, hint)``；``hint`` 是给空态的一句话，没有就 ``None``。
+    """
+    limit = max(1, int(tail_bytes or LOG_TAIL_BYTES))
+    root = work_dir()
+    files: list[dict[str, Any]] = []
+    any_exists = False
+
+    for name in LOG_FILE_NAMES:
+        path = root / name
+        item: dict[str, Any] = {
+            "name": name,
+            "path": str(path),
+            "exists": False,
+            "size": 0,
+            "mtime": None,
+            "truncated": False,
+            "content": "",
+            "read_error": None,
+        }
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            files.append(item)
+            continue
+        except OSError as exc:  # noqa: PERF203 - 目录都进不去也算「读不到」
+            item["exists"] = True
+            item["read_error"] = str(exc)
+            files.append(item)
+            any_exists = True
+            continue
+
+        item["exists"] = True
+        item["size"] = int(stat.st_size)
+        item["mtime"] = float(stat.st_mtime)
+        any_exists = True
+
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            item["read_error"] = str(exc)
+            files.append(item)
+            continue
+
+        if len(raw) > limit:
+            raw = raw[-limit:]
+            item["truncated"] = True
+            # 砍掉开头的半行，免得日志第一行是半截乱码
+            nl = raw.find(b"\n")
+            if 0 <= nl < len(raw) - 1:
+                raw = raw[nl + 1 :]
+        item["content"] = raw.decode("utf-8", errors="replace")
+        files.append(item)
+
+    hint = None
+    if not any_exists:
+        hint = "还没有更新日志。只有点过「立即更新」之后才会生成。"
+    return files, hint
 
 
 def consume_done_marker() -> dict[str, Any] | None:

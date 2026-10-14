@@ -532,3 +532,122 @@ def test_控制台按行打印_检测失败也要打出当前版本():
     assert "v1.1.0" in text, "报问题时第一句就是「我这是哪一版」，不能因为网络挂了就不打"
     assert "——" in text
     assert "没测到" in text and "连不上 Gitee" in text
+
+
+# --------------------------------------------------------------------------- #
+# 日志接口 + 周期检测
+# --------------------------------------------------------------------------- #
+
+
+def test_日志接口_没有文件也_200_并带诊断(client, monkeypatch):
+    """用户不会开 %TEMP%；接口要能就地看，缺文件是数据不是错误。"""
+    from boss_web.services import updater
+
+    monkeypatch.setattr(updater, "work_dir", lambda: __import__("pathlib").Path("/no/such/dir-xyz"))
+    resp = client.get("/api/system/update/log")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    names = [f["name"] for f in body["files"]]
+    assert names == ["update.log", "progress.log"]
+    assert all(f["exists"] is False for f in body["files"])
+    assert body["hint"], "空态要有一句话"
+    d = body["diagnostics"]
+    for key in (
+        "current",
+        "frozen",
+        "temp_run",
+        "install_mode",
+        "install_mode_label",
+        "install_dir",
+        "data_dir",
+        "checked_at",
+        "error",
+        "can_self_update",
+        "last_stage",
+        "last_stage_text",
+    ):
+        assert key in d, f"diagnostics 缺 {key}"
+    assert d["current"] == APP_VERSION.lstrip("vV")
+
+
+def test_日志接口_有文件就带回正文(client, monkeypatch, tmp_path):
+    from boss_web.services import updater
+
+    monkeypatch.setattr(updater, "work_dir", lambda: tmp_path)
+    (tmp_path / "update.log").write_text("=== update start ===\nFAIL extract failed\n", encoding="utf-8")
+    resp = client.get("/api/system/update/log")
+    assert resp.status_code == 200
+    files = {f["name"]: f for f in resp.json()["files"]}
+    assert "FAIL extract failed" in files["update.log"]["content"]
+
+
+def test_日志接口_安装方式三种映射(client, monkeypatch):
+    from boss_web import runtime
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: False)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: False)
+    assert client.get("/api/system/update/log").json()["diagnostics"]["install_mode"] == "source"
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: True)
+    assert client.get("/api/system/update/log").json()["diagnostics"]["install_mode"] == "temp_zip"
+
+    monkeypatch.setattr(runtime, "is_frozen", lambda: True)
+    monkeypatch.setattr(runtime, "is_temp_run", lambda: False)
+    body = client.get("/api/system/update/log").json()["diagnostics"]
+    assert body["install_mode"] == "installed"
+    assert "可自动更新" in body["install_mode_label"]
+
+
+def test_日志接口_诊断不许打_Gitee(client, monkeypatch):
+    """诊断页不能卡 8 秒等网络——`cached_snapshot` 只读缓存。"""
+    def boom():
+        raise AssertionError("诊断接口不许打 Gitee")
+
+    monkeypatch.setattr(update_check, "fetch_latest_release", boom)
+    resp = client.get("/api/system/update/log")
+    assert resp.status_code == 200
+    assert resp.json()["diagnostics"]["latest"] is None
+
+
+def test_cached_snapshot_只读缓存(monkeypatch):
+    def boom():
+        raise AssertionError("cached_snapshot 不许打网络")
+
+    monkeypatch.setattr(update_check, "fetch_latest_release", boom)
+    snap = update_check.cached_snapshot()
+    assert snap["ok"] is True
+    assert snap["latest"] is None
+    assert snap["current"] == APP_VERSION.lstrip("vV")
+
+
+def test_周期检测_force_绕过缓存且每轮一次(monkeypatch):
+    """后端每 5 分钟刷一次：`force=True` 必须真打 Gitee，不能被 30 分钟 TTL 挡住。"""
+    calls = []
+
+    def fake():
+        calls.append(1)
+        return update_check.pick_latest([_release("v1.9.9")])
+
+    monkeypatch.setattr(update_check, "fetch_latest_release", fake)
+    update_check.refresh(force=True)
+    update_check.refresh(force=True)
+    assert len(calls) == 2, "周期检测每轮都要真测一次，不许吃缓存"
+
+
+def test_周期检测_起的是守护线程(monkeypatch):
+    """守护线程 + 起不来也不许抛：版本检测永远不该拦住服务。"""
+    import threading
+
+    seen = {}
+    real_thread = threading.Thread
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_thread(target=lambda: None, daemon=True)
+
+    monkeypatch.setattr(threading, "Thread", spy)
+    update_check.schedule_periodic_check(interval=0.01)
+    assert seen.get("name") == "update-check-periodic"
+    assert seen.get("daemon") is True

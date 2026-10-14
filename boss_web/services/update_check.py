@@ -287,6 +287,66 @@ def schedule_startup_check(on_done: Any = None) -> None:
     threading.Thread(target=_run, name="update-check", daemon=True).start()
 
 
+def schedule_periodic_check(interval: float = 300.0) -> None:
+    """每 ``interval`` 秒**后台**刷一次 Gitee 发行版，默认 5 分钟。
+
+    为什么放后端而不是让前端轮询：``CACHE_TTL`` 是 30 分钟，前端不带 ``force``
+    问到的是旧缓存；带 ``force`` 则开几个标签页就打几次 Gitee。这里一个进程
+    只打一次，前端只管读缓存。
+
+    每一 tick 独立吞异常——Gitee 挂一轮不该把循环带走。守护线程 + 不返回句柄：
+    跟 :func:`schedule_startup_check` 一样，版本检测永远不该拦住服务。
+    """
+
+    def _run() -> None:
+        while True:
+            try:
+                time.sleep(max(5.0, float(interval)))
+            except Exception:  # noqa: BLE001 - 睡不醒就退出，别空转
+                logger.debug("版本周期检测的 sleep 中断", exc_info=True)
+                return
+            try:
+                refresh(force=True)
+            except Exception:  # noqa: BLE001 - 连不上就等下一 tick
+                logger.debug("版本周期检测失败", exc_info=True)
+
+    threading.Thread(target=_run, name="update-check-periodic", daemon=True).start()
+
+
+def cached_snapshot(*, path: Any = None) -> dict[str, Any]:
+    """读**缓存里**的检测结论，绝不打网络。
+
+    诊断页（系统设置 → 版本更新）用它：页面上还挂着更新日志，不能因为缓存
+    冷就卡 8 秒等 Gitee。要立刻测请走 ``GET /api/system/update?force=true``。
+    """
+    snap = _snapshot()
+    release: Release | None = snap["release"]
+    ignored = load_ignored_version(path)
+
+    current = _normalize(APP_VERSION)
+    latest = release.version if release else None
+    has_update = bool(latest) and compare_versions(latest, current) > 0
+    suppressed = bool(ignored) and latest is not None and compare_versions(latest, ignored) <= 0
+
+    assets = list(release.assets) if release else []
+    zip_asset = pick_zip_asset(assets)
+
+    return {
+        "ok": True,
+        "current": current,
+        "latest": latest,
+        "has_update": has_update,
+        "should_prompt": has_update and not suppressed,
+        "ignored": ignored or None,
+        "notes": release.notes if release else "",
+        "assets": [{"name": a.name, "url": a.url} for a in assets],
+        "zip_asset": {"name": zip_asset.name, "url": zip_asset.url} if zip_asset else None,
+        "can_self_update": can_self_update(),
+        "checked_at": snap["checked_at"],
+        "error": snap["error"],
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 组装给前端的状态
 # --------------------------------------------------------------------------- #

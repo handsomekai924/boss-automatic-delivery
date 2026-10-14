@@ -402,3 +402,73 @@ def test_端口从_bind_server_带到_bat(monkeypatch, tmp_path):
         time.sleep(0.02)
 
     assert seen and seen[0]["APP_PORT"] == "8765"
+
+
+# --------------------------------------------------------------------------- #
+# 过程日志读取：给「系统设置 → 版本更新」就地看
+# --------------------------------------------------------------------------- #
+
+
+def test_读日志_文件都不存在不是错误(tmp_path, monkeypatch):
+    """源码跑 / 从没更新过就没有日志，回空 + 一句话提示，**不许报错**。"""
+    monkeypatch.setattr(updater, "work_dir", lambda: tmp_path)
+    files, hint = updater.read_update_logs()
+    assert [f["name"] for f in files] == ["update.log", "progress.log"]
+    assert all(f["exists"] is False for f in files)
+    assert all(f["content"] == "" for f in files)
+    assert all(f["read_error"] is None for f in files)
+    assert hint and "还没有更新日志" in hint
+
+
+def test_读日志_小文件原样回(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "work_dir", lambda: tmp_path)
+    (tmp_path / "update.log").write_bytes(b"line1\nline2\n")
+    files, hint = updater.read_update_logs()
+    assert hint is None, "有日志就不该再给空态提示"
+    item = files[0]
+    assert item["exists"] is True
+    assert item["truncated"] is False
+    assert item["content"] == "line1\nline2\n"
+    assert item["size"] > 0
+    assert item["mtime"] is not None
+
+
+def test_读日志_超长只取尾部并丢掉残行(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "work_dir", lambda: tmp_path)
+    # 前面半行 + 完整两行，砍完必须只剩完整的那两行
+    (tmp_path / "update.log").write_bytes(b"PARTIAL" + b"\nFULL-A\n" + b"FULL-B\n")
+    files, _ = updater.read_update_logs(tail_bytes=len(b"PARTIAL\nFULL-A\nFULL-B\n") - 5)
+    item = files[0]
+    assert item["truncated"] is True
+    assert item["content"].startswith("FULL-A\n"), f"残行没丢干净：{item['content']!r}"
+    assert "FULL-B" in item["content"]
+    assert "PARTIAL" not in item["content"]
+
+
+def test_读日志_读失败不抛且回原因(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "work_dir", lambda: tmp_path)
+    (tmp_path / "update.log").write_text("x", encoding="utf-8")
+
+    def boom(self):
+        raise PermissionError("being used by another process")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    files, _ = updater.read_update_logs()
+    item = files[0]
+    assert item["exists"] is True
+    assert item["content"] == ""
+    assert item["read_error"] and "another process" in item["read_error"]
+
+
+def test_peek_progress_不许吃掉_done_json(tmp_path, monkeypatch):
+    """看一眼诊断不该把「更新完成」的回执吞掉——那是 snapshot_progress 的活。"""
+    monkeypatch.setattr(updater, "work_dir", lambda: tmp_path)
+    monkeypatch.setattr(updater, "done_marker_path", lambda: tmp_path / "done.json")
+    (tmp_path / "done.json").write_text(
+        json.dumps({"ok": True, "version": "1.2.0"}), encoding="utf-8"
+    )
+    updater.reset_done_marker_cache()
+
+    payload = updater.peek_progress()
+    assert payload.get("update_done") is None, "peek 不许给出完成回执"
+    assert (tmp_path / "done.json").is_file(), "done.json 必须还在，等真正的消费方来拿"

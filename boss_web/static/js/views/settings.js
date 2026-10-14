@@ -1,8 +1,9 @@
-/** 系统配置：AI、采集参数、搜索条件和黑名单规则。 */
+/** 系统配置：AI、采集参数、搜索条件、黑名单规则和版本更新。 */
 
 import { api } from "../api.js";
 import { toast, escapeHtml, modal, multiSelect, cascader } from "../ui.js";
 import { renderLLM } from "./llm.js";
+import { renderSettingsUpdate } from "./settings_update.js";
 
 export async function renderSettings(root) {
   root.innerHTML = `
@@ -16,6 +17,7 @@ export async function renderSettings(root) {
       <aside class="card settings-nav" aria-label="系统配置目录">
         <button class="settings-tab active" data-tab="ai" type="button">AI 设置</button>
         <button class="settings-tab" data-tab="collection" type="button">采集配置</button>
+        <button class="settings-tab" data-tab="update" type="button">版本更新<span class="settings-tab-dot" hidden></span></button>
       </aside>
       <section class="card settings-pane" id="settings-pane"></section>
     </div>
@@ -24,6 +26,7 @@ export async function renderSettings(root) {
   const tabs = [...root.querySelectorAll(".settings-tab")];
   let active = "ai";
   let dirty = false;
+  let paneDispose = null;
 
   function setDirty(value) {
     dirty = Boolean(value);
@@ -47,13 +50,30 @@ export async function renderSettings(root) {
     if (dirty && !window.confirm("当前目录有未保存修改，确定放弃并切换吗？")) return;
     setDirty(false);
     setActive(name);
+    if (typeof paneDispose === "function") {
+      try { paneDispose(); } catch { /* 卸干净就行 */ }
+    }
+    paneDispose = null;
     pane.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>加载中…</p></div>`;
     if (name === "ai") {
       await renderLLM(pane, setDirty);
       return;
     }
+    if (name === "update") {
+      paneDispose = await renderSettingsUpdate(pane);
+      return;
+    }
     await renderCollection(pane, setDirty);
   }
+
+  /** 有新版时在「版本更新」页签上点个小圆点；不弹窗（弹窗归首屏/update.js） */
+  function onUpdateDot(e) {
+    const dot = root.querySelector(".settings-tab-dot");
+    if (!dot) return;
+    const should = Boolean(e && e.detail && e.detail.should_prompt);
+    dot.hidden = !should;
+  }
+  window.addEventListener("boss:update", onUpdateDot);
 
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => show(tab.dataset.tab));
@@ -65,7 +85,12 @@ export async function renderSettings(root) {
     });
   });
   await show("ai");
-  return () => {};
+  return () => {
+    window.removeEventListener("boss:update", onUpdateDot);
+    if (typeof paneDispose === "function") {
+      try { paneDispose(); } catch { /* 卸干净就行 */ }
+    }
+  };
 }
 
 async function renderCollection(root, markDirty) {
