@@ -94,11 +94,18 @@ def get_collection_expects() -> dict[str, Any]:
     from boss_jobs import create_client
     from boss_jobs.errors import JobError
 
-    client = create_client()
+    from ..services.troubleshoot import humanize
+
     try:
+        # ``create_client()`` 也在这儿炸：本地没登录态是它先抛 ``JobApiError``
+        # （``http_from_session`` 里那句），不是 ``fetch_expect_list``。早先只包了
+        # 后者，没登录的用户一开「系统配置 → 采集配置」就 500。
+        client = create_client()
         expects = client.fetch_expect_list()
     except JobError as exc:
-        raise UpstreamError(f"拉求职期望列表失败：{exc}") from exc
+        # 只给「为什么」：前端自己会加「期望列表拉取失败：」那截前缀，
+        # 这边再加一句就是「…失败：拉…失败：…」的复读。
+        raise UpstreamError(humanize(exc)) from exc
 
     def _row(item: Any) -> dict[str, Any]:
         return {

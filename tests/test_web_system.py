@@ -67,6 +67,23 @@ def test_humanize_is_case_sensitive_for_env_names():
     assert "chrome" in troubleshoot.humanize("找不到 Chrome：xxx").lower()
 
 
+def test_humanize_本地没登录态指向登录页():
+    """``http_from_session`` 的原文末尾叫人「先跑 python -m boss_login login」。
+
+    那是命令行的说法。网页用户该被指到「登录」页，而不是被支去开终端。
+    """
+    raw = (
+        "本地没有登录态：状态库 F:\\boss\\data\\boss.db 里没有，"
+        "或 token/Cookie 都没有。先跑 `python -m boss_login login` 落一份。"
+    )
+    out = troubleshoot.humanize(raw)
+
+    assert out != raw
+    assert "「登录」页" in out
+    assert "python -m boss_login" not in out
+    assert "boss.db" not in out, "状态库路径对用户没意义，不该露出来"
+
+
 # --------------------------------------------------------------------------- #
 # /api/system/*
 # --------------------------------------------------------------------------- #

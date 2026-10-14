@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 #: 排在后面的话永远轮不到它，用户拿到的提示会变成让他去设环境变量。
 _RULES: tuple[tuple[str, str], ...] = (
     (
+        # boss_jobs.http_from_session 抛的原文末尾是「先跑 `python -m boss_login
+        # login`」——那是命令行的说法。网页用户该去「登录」页，别把他支去终端。
+        "本地没有登录态",
+        "还没登录。先去「登录」页登录一次再回来。",
+    ),
+    (
         "找不到 Chrome",
         "没找到 Google Chrome 浏览器。搜「Chrome 下载」装一个（第一条就是官网），"
         "装完回到「首页」点一下「重新检测」，不用重启程序。",

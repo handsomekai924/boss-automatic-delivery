@@ -323,6 +323,61 @@ def test_collection_expects_上游失败转成人话(client: TestClient, monkeyp
     assert "求职期望" in r.text or "没登录" in r.text
 
 
+def test_collection_expects_没登录不炸500(client: TestClient, monkeypatch):
+    """没登录时是 ``create_client()`` 先炸，不是 ``fetch_expect_list``。
+
+    ``http_from_session`` 那句「本地没有登录态」是 ``JobApiError``。早先 try
+    只包了 ``fetch_expect_list``，这道异常就漏到兜底 handler，网页拿到的是
+    「程序内部出了点问题」+ 500（web.log 里那条 GET /api/collection/expects）。
+    """
+    from boss_jobs.errors import JobApiError
+
+    def boom(*_a, **_k):
+        raise JobApiError(
+            7,
+            "本地没有登录态：状态库 F:\\boss\\data\\boss.db 里没有，"
+            "或 token/Cookie 都没有。先跑 `python -m boss_login login` 落一份。",
+        )
+
+    monkeypatch.setattr("boss_jobs.create_client", boom)
+    r = client.get("/api/collection/expects")
+    body = r.json()
+    # 不是兜底那个「程序内部出了点问题」
+    assert body["code"] != "internal", body
+    assert r.status_code != 500
+    # 要指到「登录」页，不能把网页用户支去敲命令行
+    assert "「登录」页" in body["message"]
+    assert "python -m boss_login" not in body["message"]
+
+
+def test_未处理的JobError有安全网(client: TestClient):
+    """路由层漏 catch 的 JobError 也不许掉进兜底 500。
+
+    这是本轮那个 bug 的根因类别：``JobError`` 一路冒到 ASGI，用户只看到
+    「程序内部出了点问题」。app 层兜一层，翻成人话再回。
+    """
+    from fastapi.testclient import TestClient as TC
+
+    from boss_jobs.errors import JobError
+    from boss_web.app import create_app
+
+    app = create_app()
+
+    def _boom():
+        raise JobError("本地没有登录态：状态库 boss.db 里没有")
+
+    app.add_api_route("/api/__boom__", _boom, methods=["GET"], include_in_schema=False)
+    # 排到 SPA 兜底（/{full_path:path}）前面，否则那条先吃掉就回 200 了
+    app.router.routes.insert(0, app.router.routes.pop())
+
+    r = TC(app).get("/api/__boom__")
+    assert r.status_code == 502
+    body = r.json()
+    assert body["code"] == "upstream", body
+    assert body["code"] != "internal", body
+    assert "「登录」页" in body["message"]
+
+
 def test_crawl_status_idle(client: TestClient):
     r = client.get("/api/crawl/status")
     assert r.status_code == 200

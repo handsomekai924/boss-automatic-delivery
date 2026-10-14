@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from boss_jobs.cdp_stoken import StokenError
+from boss_jobs.errors import JobError
 
 from . import config as C
 from .api import api_router
@@ -45,6 +46,20 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=503,
             content={"ok": False, "code": "environment", "message": humanize(exc)},
+        )
+
+    @app.exception_handler(JobError)
+    async def _job_error(_: Request, exc: JobError) -> JSONResponse:  # noqa: ANN202
+        """``boss_jobs`` 的异常一律翻成人话，不许掉进兜底那个 500。
+
+        这是**安全网**：路由层自己 catch 转 ``UpstreamError`` 是正路，漏一个
+        就会像 ``GET /api/collection/expects`` 那样，没登录的用户拿到
+        「程序内部出了点问题」——话没错，但完全指不到「去登录」这一步。
+        """
+        logger.warning("职位/采集调用失败：%s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "code": "upstream", "message": humanize(exc)},
         )
 
     @app.exception_handler(Exception)
