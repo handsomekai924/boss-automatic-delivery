@@ -360,26 +360,23 @@ export async function renderLogin(root) {
   }
 
   /** APP 扫码登录：只推进扫码那几块面板，绝不碰短信的步骤条。 */
+  //
+  // 也**绝不切页签**。poll 每 900ms 打一发，只要这里调过一次 setMode("qr")，
+  // 用户点「短信登录」就会在一秒内被拽回来，表现成「点了没反应」。页签只听
+  // 用户的（生成二维码 / 页内切回），任务状态只管自己那几块面板。
   function applyQrTask(task) {
     const st = task.status;
     lastStatus = st;
-    // 二维码一出来就该让人看见它（后端可能刚从短信页签切过来）
-    if (task.qr && (task.qr.payload || task.qr.scanned)) {
-      if (mode !== "qr") setMode("qr");
-      applyQr(task);
-    }
+    if (task.qr && (task.qr.payload || task.qr.scanned)) applyQr(task);
 
     if (st === "pending") {
       // 刚起线程，二维码还没出：留在「生成中」，别去动短信轨
       if (mode === "qr") showQrPane("qr-idle");
     } else if (st === "need_scan") {
-      setMode("qr");
       showQrPane("qr-wait");
     } else if (st === "logging_in") {
-      setMode("qr");
       showQrPane("qr-scanned");
     } else if (st === "done") {
-      setMode("qr");
       showQrPane("qr-done");
       toast("登录成功，会话已保存", "ok");
       refreshSession();
@@ -470,8 +467,23 @@ export async function renderLogin(root) {
   $("btn-qr-cancel").addEventListener("click", () => cancelQr("已放弃本次扫码登录"));
   $("btn-qr-cancel-2").addEventListener("click", () => cancelQr("已放弃本次扫码登录"));
 
-  $("mode-sms").addEventListener("click", () => setMode("sms"));
-  $("mode-qr").addEventListener("click", () => setMode("qr"));
+  // 切页签 = 换一条登录流。同一时刻只跑一条，旧的那条当场作废：
+  // 二维码留着也只会挡住「发送验证码」（后端 409），不如废掉，想扫再生成。
+  async function switchFlow(next) {
+    setMode(next);
+    const alive = taskId && currentTask && !["done", "error", "cancelled"].includes(currentTask.status);
+    if (!alive) return;
+    const wasQr = currentTask.kind === "qr";
+    await abandonLogin(
+      wasQr ? "已放弃本次扫码登录，要扫码请重新生成二维码" : "已放弃短信登录，请重新发送验证码"
+    );
+    // 归位：把**对方**那条流的界面也清干净，免得残留半截状态
+    showQrPane("qr-idle");
+    goStep(1);
+    qrRevision = -1; // 旧码作废，下次生成必须重取图
+  }
+  $("mode-sms").addEventListener("click", () => switchFlow("sms"));
+  $("mode-qr").addEventListener("click", () => switchFlow("qr"));
 
   $("btn-login").addEventListener("click", async () => {
     if (!taskId) return toast("请先发送验证码", "warn");
@@ -529,7 +541,10 @@ export async function renderLogin(root) {
         taskId = st.task.task_id;
         await abandonLogin("页面已刷新，上一次登录已放弃。");
       } else {
+        // 页内切回：接上进行中的任务，并把页签摆到那条流上（这里才是该切的时机，
+        // 轮询里不许切——否则用户点页签会被拽回去）。
         applyTask(st.task);
+        setMode(st.task.kind === "qr" ? "qr" : "sms");
         pollTimer = setInterval(poll, 900);
       }
     }

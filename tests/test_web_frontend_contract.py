@@ -440,3 +440,29 @@ def test_后端任务快照带kind():
     src = (STATIC.parents[1] / "boss_web" / "services" / "login_task.py").read_text(encoding="utf-8")
     assert '"kind": self.kind' in src
     assert 'kind="qr"' in src
+
+
+def test_轮询处理不许抢页签():
+    """applyTask / applyQrTask 里调 setMode，页签就会被 900ms 的轮询拽回去。
+
+    点「短信登录」看起来没反应，就是这么来的：处理函数每秒强制切回扫码页签。
+    页签只听用户的（生成二维码 / 页签点击 / 页内切回接任务），状态机只管面板内容。
+    """
+    login = _read("js/views/login.js")
+    for fn in ("applyTask", "applyQrTask", "applySmsTask"):
+        body = _fn_body(login, fn)
+        assert "setMode(" not in body, f"{fn} 不许切页签，页签归用户"
+
+
+def test_切到短信就放弃扫码():
+    """切页签 = 换一条登录流，旧的当场作废——同一时刻只跑一条。
+
+    二维码留着只会挡住「发送验证码」（后端 409），用户得能重新生成一张。
+    """
+    login = _read("js/views/login.js")
+    body = _fn_body(login, "switchFlow")
+    assert "abandonLogin" in body, "切页签必须作废旧的那条登录流"
+    assert "setMode(" in body
+    assert "qr-idle" in body, "作废后二维码面板要归位，逼用户重新生成"
+    # 旧码作废，下次生成必须重取图
+    assert "qrRevision" in body
