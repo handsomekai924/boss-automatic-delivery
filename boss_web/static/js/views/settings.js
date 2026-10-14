@@ -536,8 +536,8 @@ async function renderCollection(root, markDirty) {
     const data = await api.get("/api/blacklist/rules");
     $("rules-list").innerHTML = (data.items || []).map((r) => `
       <div class="settings-rule flex between center gap-8 wrap" data-rule="${escapeHtml(r.rule_id)}">
-        <div><strong>${escapeHtml(r.pattern)}</strong> <span class="pill static">${escapeHtml(r.rule_type)} / ${escapeHtml(r.match_mode)}</span>
-          <div class="muted" style="font-size:12px">${escapeHtml(r.description || "无描述")} · 命中 ${r.hit_count || 0} 次${r.last_error ? ` · 规则错误：${escapeHtml(r.last_error)}` : ""}</div></div>
+        <div class="flex center gap-8 wrap" style="min-width:0"><i class="rule-dot" data-state="${r.enabled ? "on" : "off"}" title="${r.enabled ? "已启用" : "已停用"}"></i><div style="min-width:0"><strong>${escapeHtml(r.pattern)}</strong> <span class="pill static">${escapeHtml(r.rule_type)} / ${escapeHtml(r.match_mode)}</span>
+          <div class="muted" style="font-size:12px">${escapeHtml(r.description || "无描述")} · 命中 ${r.hit_count || 0} 次${r.last_error ? ` · 规则错误：${escapeHtml(r.last_error)}` : ""}</div></div></div>
         <div class="btn-row"><button class="btn sm ghost rule-test">测试</button><button class="btn sm ghost rule-hits">命中详情</button><button class="btn sm ghost rule-edit">编辑</button><button class="btn sm ghost rule-toggle">${r.enabled ? "停用" : "启用"}</button><button class="btn sm danger rule-delete">删除</button></div>
       </div>`).join("") || `<div class="muted">还没有黑名单规则</div>`;
     $("rules-list").querySelectorAll(".settings-rule").forEach((row) => {
