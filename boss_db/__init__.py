@@ -140,7 +140,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     matched_rule_ids   TEXT NOT NULL DEFAULT '[]',
     matched_rule_snapshot TEXT NOT NULL DEFAULT '[]',
     blacklist_checked_at TEXT NOT NULL DEFAULT '',
-    auto_delivery_blocked INTEGER NOT NULL DEFAULT 1
+    auto_delivery_blocked INTEGER NOT NULL DEFAULT 1,
+    -- 最近一次「发招呼语」成功时间（%Y-%m-%d %H:%M:%S）；30 天发送冷却的唯一依据。
+    -- 抓取 UPSERT 故意不覆盖这一列——重抓不该改写发送史。
+    last_greeted_at  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_brand  ON jobs(brand_name);
@@ -158,7 +161,9 @@ CREATE TABLE IF NOT EXISTS fetch_pages (
     updated_count  INTEGER NOT NULL DEFAULT 0,
     has_more       INTEGER NOT NULL DEFAULT 0,
     note           TEXT NOT NULL DEFAULT '',
-    fetched_at     TEXT NOT NULL
+    fetched_at     TEXT NOT NULL,
+    -- 归属哪一次抓取任务；空串 = 上线前的旧流水（不回填）
+    task_id        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_fetch_pages_page ON fetch_pages(page);
@@ -200,6 +205,38 @@ CREATE TABLE IF NOT EXISTS blacklist_hits (
 CREATE INDEX IF NOT EXISTS idx_blacklist_hits_rule ON blacklist_hits(rule_id);
 CREATE INDEX IF NOT EXISTS idx_blacklist_hits_job ON blacklist_hits(job_id);
 CREATE INDEX IF NOT EXISTS idx_blacklist_hits_task ON blacklist_hits(task_id);
+
+-- 抓取任务档案：每次 start() 插一行，结束时回写状态与统计。
+-- 只读追溯流水，不提供删除/编辑；旧数据不回填（上线前的抓取没有档案）。
+CREATE TABLE IF NOT EXISTS crawl_tasks (
+    task_id        TEXT PRIMARY KEY,
+    source         TEXT NOT NULL DEFAULT 'search',   -- search | expect
+    status         TEXT NOT NULL DEFAULT 'running',  -- running | done | error | cancelled
+    created_at     REAL NOT NULL,
+    started_at     REAL NOT NULL,
+    ended_at       REAL NOT NULL DEFAULT 0,
+    params_json    TEXT NOT NULL DEFAULT '{}',       -- 启动时配置快照（筛选条件、页数、间隔…）
+    stats_json     TEXT NOT NULL DEFAULT '{}',       -- 页数 / 插入 / 更新 / 描述 / 黑名单命中…
+    job_count      INTEGER NOT NULL DEFAULT 0,       -- 本批去重后职位数
+    inserted_count INTEGER NOT NULL DEFAULT 0,
+    updated_count  INTEGER NOT NULL DEFAULT 0,
+    error          TEXT NOT NULL DEFAULT '',
+    stopped_reason TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawl_tasks_created ON crawl_tasks(created_at);
+
+-- 任务 ↔ 岗位归属：一次抓取「带回」了哪些职位（含更新已有职位）。
+-- 用关联表而不是给 jobs 加一列：同一职位会被多次抓到，挂在 jobs 上后一次
+-- 会把归属顶掉，历史任务的「本批岗位」就残缺了。
+CREATE TABLE IF NOT EXISTS crawl_task_jobs (
+    task_id        TEXT NOT NULL,
+    encrypt_job_id TEXT NOT NULL,
+    action         TEXT NOT NULL DEFAULT 'inserted', -- inserted | updated
+    PRIMARY KEY (task_id, encrypt_job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawl_task_jobs_job ON crawl_task_jobs(encrypt_job_id);
 """
 
 
@@ -309,6 +346,10 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "matched_rule_snapshot": "TEXT NOT NULL DEFAULT '[]'",
         "blacklist_checked_at": "TEXT NOT NULL DEFAULT ''",
         "auto_delivery_blocked": "INTEGER NOT NULL DEFAULT 1",
+        "last_greeted_at": "TEXT NOT NULL DEFAULT ''",
+    },
+    "fetch_pages": {
+        "task_id": "TEXT NOT NULL DEFAULT ''",
     },
 }
 

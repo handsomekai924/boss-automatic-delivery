@@ -25,7 +25,11 @@ from boss_web.services.deliver_config_store import (
     save_config,
     update_config,
 )
-from boss_web.services.deliver_task import DeliverTaskManager
+from boss_web.services.deliver_task import (
+    GREET_COOLDOWN_SECONDS,
+    DeliverTaskManager,
+    greet_cooldown_state,
+)
 from boss_web.services.resume_store import load_analysis, save_analysis
 
 
@@ -142,6 +146,33 @@ def _match(jid: str, **overrides) -> dict:
     return item
 
 
+def _seed_job(jid: str) -> None:
+    """把这条职位写进 ``jobs``（``last_greeted_at`` 的权威落点）。"""
+    from boss_jobs.models import Job, PageResult
+
+    job = Job(
+        job_name=f"岗位 {jid}",
+        brand_name="示例科技",
+        location="广州",
+        salary_desc="15-25K",
+        job_experience="3-5年",
+        job_degree="本科",
+        brand_industry="互联网",
+        brand_scale_name="100-499人",
+        encrypt_job_id=jid,
+        raw_json="{}",
+        city_name="广州",
+        area_district="",
+        business_district="",
+        job_labels=(),
+        skills=(),
+        welfare_list=(),
+        page=1,
+    )
+    with JobStore() as store:
+        store.save_page(PageResult(page=1, jobs=(job,), has_more=False, raw_count=1, dropped=()))
+
+
 def _seed_analysis(matches, analysis_id: str = "an_t1") -> str:
     return save_analysis(
         {
@@ -201,27 +232,102 @@ def test_deliver_happy_path_sends_and_writes_back():
     assert row["deliver_error"] == ""
 
 
-def test_deliver_skips_already_delivered():
-    """已成功的不重发：delivered_at 有值直接跳过，也不打请求。"""
+def test_deliver_skips_within_30_day_cooldown():
+    """30 天内发过（``delivered_at`` 是最近）→ 跳过、不打请求，原因写清楚。
+
+    规则：``可发送 ⇔ now - last_greeted_at(job) ≥ 30 天``。跳过原因
+    ``30 天内已发送（MM-DD）``。
+    """
     client = FakeGreetClient()
-    matches = [_match("j1", delivered_at=123.0), _match("j2")]
+    recent = time.time() - 3600  # 1 小时前，远在 30 天内
+    matches = [_match("j1", delivered_at=recent), _match("j2")]
     snap, aid = _run_deliver(matches, ["j1", "j2"], client)
 
     assert snap["status"] == "done"
     assert snap["skipped"] == 1
     assert (snap["total"], snap["ok"]) == (1, 1)
     assert [c["encrypt_job_id"] for c in client.calls] == ["j2"]
-    assert [i["status"] for i in snap["items"] if i["encrypt_job_id"] == "j1"] == ["skipped"]
-    assert _match_of(aid, "j1")["delivered_at"] == 123.0
+    items = [i for i in snap["items"] if i["encrypt_job_id"] == "j1"]
+    assert items and items[0]["status"] == "skipped"
+    assert "30 天内已发送" in (items[0].get("error") or "")
+    assert _match_of(aid, "j1")["delivered_at"] == recent
 
 
-def test_deliver_all_skipped_is_done_not_error():
-    """一整个清单都发过了 → 空跑一场，照样算 done，不算错。"""
+def test_deliver_all_in_cooldown_is_done_not_error():
+    """一整个清单都在冷却里 → 空跑一场，照样算 done，不算错。"""
     client = FakeGreetClient()
-    snap, _ = _run_deliver([_match("j1", delivered_at=1.0)], ["j1"], client)
+    snap, _ = _run_deliver([_match("j1", delivered_at=time.time())], ["j1"], client)
     assert snap["status"] == "done"
     assert (snap["total"], snap["skipped"]) == (0, 1)
     assert client.calls == []
+
+
+def test_deliver_resends_after_cooldown_expired():
+    """超过 30 天 → 允许再发（恰好 30 天整也算过）。
+
+    ``delivered_at=123.0`` 是 1970 年，远超 30 天，按规则必须放行。
+    """
+    client = FakeGreetClient()
+    snap, aid = _run_deliver([_match("j1", delivered_at=123.0)], ["j1"], client)
+    assert snap["status"] == "done"
+    assert (snap["total"], snap["ok"], snap["skipped"]) == (1, 1, 0)
+    assert len(client.calls) == 1
+    assert _match_of(aid, "j1")["deliver_status"] == "ok"
+
+
+def test_deliver_respects_job_level_last_greeted_at():
+    """``jobs.last_greeted_at`` 是跨分析的权威：快照没写 ``delivered_at`` 也照样拦。"""
+    client = FakeGreetClient()
+    _seed_job("j1")
+    _seed_job("j2")
+    with JobStore() as store:
+        assert store.update_last_greeted_at("j1") is True  # 刚发过 → 30 天内
+    snap, _ = _run_deliver([_match("j1"), _match("j2")], ["j1", "j2"], client)
+
+    assert snap["status"] == "done"
+    assert snap["skipped"] == 1
+    assert [c["encrypt_job_id"] for c in client.calls] == ["j2"]
+
+
+def test_deliver_success_writes_job_level_last_greeted_at():
+    """发送成功 → 双写 ``jobs.last_greeted_at`` + ``item.delivered_at``（跨分析冷却依据）。"""
+    client = FakeGreetClient()
+    _seed_job("j1")
+    with JobStore() as store:
+        assert store.get_last_greeted_at("j1") == ""
+    snap, aid = _run_deliver([_match("j1")], ["j1"], client)
+
+    assert snap["status"] == "done"
+    assert (snap["ok"], snap["skipped"]) == (1, 0)
+    with JobStore() as store:
+        assert store.get_last_greeted_at("j1") != ""
+    assert _match_of(aid, "j1")["delivered_at"] > 0
+
+
+def test_deliver_failure_does_not_start_cooldown():
+    """失败**不**开冷却：``jobs.last_greeted_at`` 不写，下次还能重试。"""
+    client = FakeGreetClient([JobApiError(5, "网络打了个盹")])
+    _seed_job("j1")
+    snap, aid = _run_deliver([_match("j1")], ["j1"], client)
+
+    assert snap["status"] == "done"
+    assert snap["failed"] == 1
+    with JobStore() as store:
+        assert store.get_last_greeted_at("j1") == ""
+    row = _match_of(aid, "j1")
+    assert row["deliver_status"] == "failed"
+    assert not row.get("delivered_at")
+
+
+def test_greet_cooldown_state_boundary():
+    """恰好 30 天整 → 放行；差一秒 → 仍在冷却。"""
+    now = 1_700_000_000.0
+    just = now - (GREET_COOLDOWN_SECONDS - 1)
+    exact = now - GREET_COOLDOWN_SECONDS
+    assert greet_cooldown_state(just, now=now)["in_cooldown"] is True
+    assert greet_cooldown_state(exact, now=now)["in_cooldown"] is False
+    assert greet_cooldown_state(123.0, now=now)["in_cooldown"] is False
+    assert greet_cooldown_state("", now=now)["in_cooldown"] is False
 
 
 def test_deliver_code36_stops_whole_batch():

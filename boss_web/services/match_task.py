@@ -113,10 +113,18 @@ GREETING_USER_TEMPLATE = """# 简历（结构化摘要）
 
 
 class MatchTask:
-    def __init__(self, resume_id: str, job_ids: Sequence[str]) -> None:
+    def __init__(
+        self,
+        resume_id: str,
+        job_ids: Sequence[str],
+        *,
+        crawl_task_id: str = "",
+    ) -> None:
         self.task_id = "mt_" + uuid.uuid4().hex[:10]
         self.resume_id = resume_id
         self.job_ids = list(job_ids)
+        #: 非空 = 只跑该抓取任务的岗位（优先级高于 job_ids）
+        self.crawl_task_id = str(crawl_task_id or "")
         self.status = STATUS_RUNNING
         self.created_at = time.time()
         self.ended_at: float | None = None
@@ -134,6 +142,18 @@ class MatchTask:
         with self.lock:
             self.events.append({"at": time.time(), "name": name, "payload": payload or {}})
 
+    def scope_info(self) -> dict[str, Any]:
+        """范围条要的形状：``all`` / ``jobs`` / ``crawl_task``。"""
+        if self.crawl_task_id:
+            return {
+                "type": "crawl_task",
+                "crawl_task_id": self.crawl_task_id,
+                "job_count": self.total,
+            }
+        if self.job_ids:
+            return {"type": "jobs", "job_count": self.total, "requested": len(self.job_ids)}
+        return {"type": "all", "job_count": self.total}
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             return {
@@ -141,6 +161,8 @@ class MatchTask:
                 "analysis_id": self.analysis_id,
                 "status": self.status,
                 "resume_id": self.resume_id,
+                "crawl_task_id": self.crawl_task_id,
+                "scope": self.scope_info(),
                 "created_at": self.created_at,
                 "ended_at": self.ended_at,
                 "error": self.error,
@@ -171,11 +193,17 @@ class MatchTaskManager:
             raise NotFoundError(f"匹配任务不存在：{task_id}")
         return task.snapshot()
 
-    def start(self, *, resume_id: str, job_ids: Sequence[str] | None = None) -> MatchTask:
+    def start(
+        self,
+        *,
+        resume_id: str,
+        job_ids: Sequence[str] | None = None,
+        crawl_task_id: str = "",
+    ) -> MatchTask:
         with self._lock:
             if self._task is not None and self._task.status == STATUS_RUNNING:
                 raise ConflictError("已有匹配任务在跑")
-            task = MatchTask(resume_id, job_ids or [])
+            task = MatchTask(resume_id, job_ids or [], crawl_task_id=crawl_task_id)
             self._task = task
 
         try:
@@ -191,7 +219,10 @@ class MatchTaskManager:
             task.total = len(jobs)
             if not jobs:
                 task.status = STATUS_ERROR
-                task.error = "没有可匹配的职位，请先抓取或指定 job_ids"
+                if task.crawl_task_id:
+                    task.error = "本批职位已不在库中，无法匹配"
+                else:
+                    task.error = "没有可匹配的职位，请先抓取或指定 job_ids"
                 task.ended_at = time.time()
                 return task
 
@@ -301,6 +332,9 @@ class MatchTaskManager:
             # 发送要用的（C6），顺手带上，免得到时候再翻 raw_json
             "security_id": job.security_id,
             "lid": job.lid,
+            # 岗位维度的发送史（30 天冷却依据）。快照只记「匹配时」的值；
+            # 读接口会按 jobs 表当前值刷新冷却状态。
+            "last_greeted_at": job.last_greeted_at or "",
             # Match-time blacklist/JD state is an immutable decision snapshot.
             # Delivery must use these fields rather than rereading mutable rules.
             **_blacklist_snapshot(job),
@@ -329,9 +363,22 @@ def _collect(future: Any) -> None:
 
 
 def _pick_jobs(task: MatchTask) -> list[Job]:
+    """范围解析优先级：``crawl_task_id`` > ``job_ids`` > 全库。
+
+    抓取任务范围由 ``crawl_task_jobs`` 解析（与库中仍存在的职位取交集），
+    前端不用传全量 id。
+    """
     from boss_jobs.store import JobStore
 
     with JobStore() as store:
+        if task.crawl_task_id:
+            ids = store.crawl_task_job_ids(task.crawl_task_id, only_existing=True)
+            jobs = []
+            for jid in ids:
+                job = store.get_job(jid)
+                if job is not None:
+                    jobs.append(job)
+            return jobs
         if task.job_ids:
             jobs = []
             for jid in task.job_ids:

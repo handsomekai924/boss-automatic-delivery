@@ -85,6 +85,7 @@ export async function renderJobs(root) {
   const $ = (id) => root.querySelector("#" + id);
   const selected = new Set();
   let offset = 0;
+  let totalJobs = 0;
   const limit = 24;
   let pollTimer = null;
   let crawlTaskId = null;
@@ -285,8 +286,13 @@ export async function renderJobs(root) {
     });
     try {
       const data = await api.get("/api/jobs?" + qs.toString());
+      totalJobs = Number(data.total) || 0;
       $("total-label").textContent = `共 ${data.total} 条`;
-      $("page-label").textContent = `${offset + 1} - ${Math.min(offset + limit, data.total)} / ${data.total}`;
+      $("page-label").textContent = `${offset + 1} - ${Math.min(offset + limit, totalJobs)} / ${totalJobs}`;
+      const prevBtn = $("btn-prev");
+      const nextBtn = $("btn-next");
+      if (prevBtn) prevBtn.disabled = offset <= 0;
+      if (nextBtn) nextBtn.disabled = offset + limit >= totalJobs;
       renderGrid(data.items || []);
     } catch (err) {
       toast("读职位失败：" + err.message, "bad");
@@ -569,12 +575,16 @@ export async function renderJobs(root) {
   });
 
   $("btn-prev").addEventListener("click", () => {
-    offset = Math.max(0, offset - limit);
-    loadJobs();
+    if (offset > 0) {
+      offset = Math.max(0, offset - limit);
+      loadJobs();
+    }
   });
   $("btn-next").addEventListener("click", () => {
-    offset += limit;
-    loadJobs();
+    if (offset + limit < totalJobs) {
+      offset += limit;
+      loadJobs();
+    }
   });
 
   await loadCollectionConfig();

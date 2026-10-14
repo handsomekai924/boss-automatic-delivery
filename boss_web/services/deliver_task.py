@@ -33,7 +33,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from boss_jobs import create_client
 from boss_jobs.config import (
@@ -61,6 +61,125 @@ ST_RUNNING = "running"
 ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
+
+#: 30 天发送冷却窗（秒）。**写死常量**，不进配置——以后要调再进 ``deliver_config``。
+#: 判定：``可发送 ⇔ now - last_greeted_at(job) ≥ 30 天``；恰好 30 天整 → 允许再发。
+GREET_COOLDOWN_DAYS = 30
+GREET_COOLDOWN_SECONDS = GREET_COOLDOWN_DAYS * 86400
+
+#: 跳过原因模板；日期 MM-DD 由调用方填
+GREET_COOLDOWN_SKIP_FMT = "30 天内已发送（{date}）"
+
+
+def parse_greet_time(value: Any) -> float | None:
+    """``jobs.last_greeted_at`` / ``item.delivered_at`` → ``time.time()`` 同口径的秒。
+
+    - 数字（含数字字符串）= Unix 时间戳，原样用；
+    - ``%Y-%m-%d %H:%M:%S`` / ``%Y-%m-%dT%H:%M:%S``（ISO 风格，与 ``fetched_at`` 同格式）
+      按服务器本地时钟解析，**不做时区换算**；
+    - 读不到 / 解析失败 → ``None``（按「从未发送」处理，放行——宁可多一次确认弹窗，
+      不静默吞掉可发对象）。
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            ts = float(value)
+        except (TypeError, ValueError):
+            return None
+        return ts if ts > 0 else None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        ts = float(text)
+    except ValueError:
+        ts = 0.0
+    if ts > 0:
+        return ts
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(text, fmt))
+        except ValueError:
+            continue
+    return None
+
+
+def greet_cooldown_state(
+    last_greeted_at: Any,
+    delivered_at: Any = None,
+    *,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """30 天冷却判定（单一口径）。
+
+    ``last_greeted_at``（岗位维度）与 ``delivered_at``（本条分析的即时状态）**取较晚者**，
+    再套 30 天窗——兼容上线前已发出的岗位（只有 ``delivered_at``）与上线后的新发送。
+
+    :return: ``{last_greeted_ts, last_greeted_at, cooldown_until, in_cooldown, cooldown_days_left}``
+    """
+    stamps = [ts for ts in (parse_greet_time(last_greeted_at), parse_greet_time(delivered_at)) if ts is not None]
+    last_ts = max(stamps) if stamps else None
+    if last_ts is None:
+        return {
+            "last_greeted_ts": None,
+            "last_greeted_at": "",
+            "cooldown_until": None,
+            "in_cooldown": False,
+            "cooldown_days_left": 0,
+        }
+    now_ts = time.time() if now is None else float(now)
+    cooldown_until = last_ts + GREET_COOLDOWN_SECONDS
+    remaining = cooldown_until - now_ts
+    in_cooldown = remaining > 0  # 恰好 30 天整 → 允许再发
+    return {
+        "last_greeted_ts": last_ts,
+        "last_greeted_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_ts)),
+        "cooldown_until": cooldown_until,
+        "in_cooldown": in_cooldown,
+        "cooldown_days_left": max(0, int((remaining + 86399) // 86400)) if in_cooldown else 0,
+    }
+
+
+def greet_cooldown_reason(state: Mapping[str, Any]) -> str:
+    """冷却中 → 跳过原因 ``30 天内已发送（MM-DD）``；否则空串。"""
+    if not state.get("in_cooldown"):
+        return ""
+    ts = parse_greet_time(state.get("last_greeted_ts") or state.get("last_greeted_at"))
+    date = time.strftime("%m-%d", time.localtime(ts)) if ts else "??-??"
+    return GREET_COOLDOWN_SKIP_FMT.format(date=date)
+
+
+def enrich_match_greet_state(items: list[dict[str, Any]], *, now: float | None = None) -> None:
+    """读接口出门前给 match 条目补**当前**发送史与冷却状态（就地改）。
+
+    分析快照里的 ``last_greeted_at`` 是匹配那一刻的值；真正算冷却要看
+    ``jobs`` 表现在的 ``last_greeted_at`` 与 ``item.delivered_at`` 取较晚者。
+    读不到就按「从未发送」放行。
+    """
+    from boss_jobs.store import JobStore
+
+    if not items:
+        return
+    ids = [str(it.get("encrypt_job_id") or "") for it in items if it.get("encrypt_job_id")]
+    fresh: dict[str, str] = {}
+    if ids:
+        try:
+            with JobStore() as store:
+                fresh = store.last_greeted_map(ids)
+        except Exception:  # noqa: BLE001 - 读不到就用快照值
+            logger.debug("批量读发送史失败，退回快照", exc_info=True)
+    now_ts = time.time() if now is None else float(now)
+    for item in items:
+        jid = str(item.get("encrypt_job_id") or "")
+        snapshot = item.get("last_greeted_at") or ""
+        current = fresh.get(jid, "") or snapshot
+        state = greet_cooldown_state(current, item.get("delivered_at"), now=now_ts)
+        item["last_greeted_at"] = state["last_greeted_at"] or current or ""
+        item["greet_in_cooldown"] = bool(state["in_cooldown"])
+        item["greet_cooldown_until"] = state["cooldown_until"]
+        item["greet_cooldown_days_left"] = state["cooldown_days_left"]
+
 
 #: Any safety field marks a current-format match snapshot.
 _SAFETY_FIELDS = (
@@ -252,6 +371,23 @@ class DeliverTaskManager:
         task.push("cancel_requested")
         return task
 
+    @staticmethod
+    def _cooldown_for(item: dict[str, Any], store: JobStore) -> dict[str, Any]:
+        """一条 match 的冷却判定：``jobs.last_greeted_at``（权威）与 ``item.delivered_at`` 取较晚者。
+
+        快照里的 ``last_greeted_at`` 只当补充——库里的才是跨分析的真依据；
+        两边读不到就按「从未发送」放行。
+        """
+        jid = str(item.get("encrypt_job_id") or "")
+        raw_job = ""
+        if store is not None and jid:
+            try:
+                raw_job = store.get_last_greeted_at(jid)
+            except Exception:  # noqa: BLE001 - 读不到就放行
+                logger.debug("读不到职位 %s 的发送史", jid, exc_info=True)
+        snapshot = item.get("last_greeted_at") or ""
+        return greet_cooldown_state(raw_job or snapshot, item.get("delivered_at"))
+
 
     def _run(self, task: DeliverTask) -> None:
         """串行发送：已成功的跳过；单条失败记 ``deliver_error`` 继续，不重试。
@@ -278,33 +414,45 @@ class DeliverTaskManager:
         candidate_ids = list(index) if task.mode == "all" else task.job_ids
         todo: list[dict[str, Any]] = []
         restricted: list[dict[str, Any]] = []
-        for jid in candidate_ids:
-            item = index.get(jid)
-            if item is None:
-                logger.warning("分析 %s 里没有职位 %s，跳过", task.analysis_id, jid)
-                continue
-            if item.get("delivered_at"):
-                self._record(
-                    task,
-                    item,
-                    status=ITEM_SKIPPED,
-                    error="已发送",
-                    delivered_at=float(item.get("delivered_at") or 0.0),
-                )
-                task.push("skipped", {"encrypt_job_id": jid, "reason": "已发送"})
-                continue
-            restriction = _delivery_restriction(item)
-            if task.mode == "all":
-                restriction = _all_restriction(item)
-                if not restriction and minimum is not None and (item.get("match_score") or 0) < minimum:
-                    restriction = f"匹配分低于一键发送阈值 {minimum}"
-                if restriction:
-                    self._record(task, item, status=ITEM_SKIPPED, error=restriction)
-                    task.push("skipped", {"encrypt_job_id": jid, "reason": restriction})
+        # 发送前统一开库：冷却判定以 jobs.last_greeted_at 为准（权威），成功后也写回这里
+        try:
+            store = JobStore()
+        except Exception as exc:  # noqa: BLE001 - 库起不来就整批失败
+            self._fail(task, humanize(exc))
+            return
+        try:
+            for jid in candidate_ids:
+                item = index.get(jid)
+                if item is None:
+                    logger.warning("分析 %s 里没有职位 %s，跳过", task.analysis_id, jid)
                     continue
-            elif restriction:
-                restricted.append(item)
-            todo.append(item)
+                cooldown = self._cooldown_for(item, store)
+                if cooldown.get("in_cooldown"):
+                    reason = greet_cooldown_reason(cooldown)
+                    self._record(
+                        task,
+                        item,
+                        status=ITEM_SKIPPED,
+                        error=reason,
+                        delivered_at=cooldown.get("last_greeted_ts"),
+                    )
+                    task.push("skipped", {"encrypt_job_id": jid, "reason": reason})
+                    continue
+                restriction = _delivery_restriction(item)
+                if task.mode == "all":
+                    restriction = _all_restriction(item)
+                    if not restriction and minimum is not None and (item.get("match_score") or 0) < minimum:
+                        restriction = f"匹配分低于一键发送阈值 {minimum}"
+                    if restriction:
+                        self._record(task, item, status=ITEM_SKIPPED, error=restriction)
+                        task.push("skipped", {"encrypt_job_id": jid, "reason": restriction})
+                        continue
+                elif restriction:
+                    restricted.append(item)
+                todo.append(item)
+        except Exception:
+            store.close()
+            raise
 
         if restricted and (not task.confirmed or (task.mode == "manual" and not task.confirmation_token.strip())):
             reasons = sorted({
@@ -332,6 +480,7 @@ class DeliverTaskManager:
                 task.error = message
                 task.ended_at = time.time()
             task.push("confirmation_required", {"message": message, "count": len(restricted)})
+            store.close()
             return
 
         task.total = len(todo)
@@ -340,12 +489,13 @@ class DeliverTaskManager:
                 task.status = ST_DONE
                 task.ended_at = time.time()
             task.push("finished", {"sent": 0, "skipped": task.skipped})
+            store.close()
             return
 
         try:
             client = self._client_factory()
-            store = JobStore()
-        except Exception as exc:  # noqa: BLE001 - 客户端/库起不来就整批失败
+        except Exception as exc:  # noqa: BLE001 - 客户端起不来就整批失败
+            store.close()
             self._fail(task, humanize(exc))
             return
 
@@ -419,7 +569,13 @@ class DeliverTaskManager:
                     consecutive_37 = 0
                 else:
                     consecutive_37 = 0
-                    self._record(task, item, status=DELIVER_OK, delivered_at=time.time())
+                    sent_at = time.time()
+                    # 双写：岗位维度 last_greeted_at（跨分析冷却依据）+ item.delivered_at（本次即时状态）
+                    try:
+                        store.update_last_greeted_at(jid)
+                    except Exception:  # noqa: BLE001 - 冷却史写失败不该把成功当失败
+                        logger.warning("职位 %s 的发送史未保存", jid, exc_info=True)
+                    self._record(task, item, status=DELIVER_OK, delivered_at=sent_at)
                     task.push("sent", {"encrypt_job_id": jid, "job_name": name})
 
                 task.done += 1

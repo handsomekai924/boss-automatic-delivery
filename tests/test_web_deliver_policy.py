@@ -213,7 +213,8 @@ def test_all_快照缺一个字段也不算完整():
     assert "安全快照" in _items_by_id(snap)["j1"]["error"]
 
 
-def test_all_跳过已发送的():
+def test_all_跳过30天内已发送的():
+    """一键发送也走 30 天冷却：``delivered_at`` 是最近 → 跳过、不打客户端。"""
     snap, fake, _ = _run(
         [_safe("j1", delivered_at=time.time() - 10), _safe("j2")],
         mode="all",
@@ -222,7 +223,7 @@ def test_all_跳过已发送的():
     assert snap["skipped"] == 1
     assert snap["failed"] == 0
     assert len(fake.calls) == 1
-    assert _items_by_id(snap)["j1"]["error"] == "已发送"
+    assert "30 天内已发送" in _items_by_id(snap)["j1"]["error"]
 
 
 def test_all_全部受限时零发送且任务done():

@@ -441,7 +441,7 @@ def list_analyses() -> list[dict[str, Any]]:
     conn = boss_db.acquire()
     rows = conn.execute(
         "SELECT analysis_id, resume_id, resume_title, created_at, job_count, "
-        "top_score, status FROM analysis ORDER BY created_at DESC"
+        "top_score, status, model FROM analysis ORDER BY created_at DESC"
     ).fetchall()
     return [
         {
@@ -452,6 +452,7 @@ def list_analyses() -> list[dict[str, Any]]:
             "job_count": int(row["job_count"] or 0),
             "top_score": float(row["top_score"] or 0.0),
             "status": row["status"],
+            "model": str(row["model"] or ""),
         }
         for row in rows
     ]

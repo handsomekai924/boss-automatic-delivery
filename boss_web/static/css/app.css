@@ -1512,7 +1512,7 @@ details.acc .acc-body {
   gap: var(--sp-4);
   align-items: start;
 }
-.settings-nav { display: flex; flex-direction: column; gap: 6px; padding: 12px; position: sticky; top: 18px; }
+.settings-nav { display: flex; flex-direction: column; gap: 6px; padding: 12px; position: sticky; top: 80px; }
 .settings-tab { border: 0; background: transparent; color: var(--muted); border-radius: var(--r-s); padding: 11px 12px; text-align: left; cursor: pointer; font: inherit; }
 .settings-tab:hover, .settings-tab:focus-visible, .settings-tab.active { color: var(--text-1); background: var(--surface-2); outline: none; }
 .settings-tip { font-size: 11px; line-height: 1.6; margin: 14px 8px 4px; }

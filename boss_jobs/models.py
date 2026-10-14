@@ -178,6 +178,9 @@ class Job:
     matched_rule_snapshot: tuple[dict[str, Any], ...] = ()
     blacklist_checked_at: str = ""
     auto_delivery_blocked: bool = True
+    #: 最近一次「发招呼语」成功时间（``%Y-%m-%d %H:%M:%S``）；空串 = 从未发送。
+    #: 30 天发送冷却的唯一岗位级依据；抓取 UPSERT 不覆盖这一列。
+    last_greeted_at: str = ""
 
     @classmethod
     def from_api(cls, item: dict[str, Any], *, page: int = 0) -> "Job":

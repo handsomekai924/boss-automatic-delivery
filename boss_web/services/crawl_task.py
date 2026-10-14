@@ -1,4 +1,10 @@
-"""后台抓取任务：线程跑 ``JobClient.crawl``，网页轮询进度。"""
+"""后台抓取任务：线程跑 ``JobClient.crawl``，网页轮询进度。
+
+除了内存里的「当前任务」，每次 ``start()`` 还会落一行 ``crawl_tasks`` 档案，
+每页入库时把本批职位写进 ``crawl_task_jobs``——历史抓取可回看条件与结果，
+也能「对本批岗位一键发起匹配」。落库失败**不中断抓取**（任务本体优先），
+只在日志里告警「历史记录未保存」。
+"""
 
 from __future__ import annotations
 
@@ -58,6 +64,74 @@ def _search_filter_from(
         # 期望上下文跟着关键词走（前端 onSearch 的 lastExpectId）
         encrypt_expect_id=encrypt_expect_id,
     )
+
+
+def _archive_start(
+    task_id: str,
+    *,
+    source: str,
+    created_at: float,
+    params: Mapping[str, Any],
+) -> bool:
+    """启动时插一行 ``crawl_tasks``。落库失败只告警，不挡抓取本体。"""
+    try:
+        with JobStore() as store:
+            store.create_crawl_task(
+                task_id,
+                source=source,
+                created_at=created_at,
+                started_at=created_at,
+                params=dict(params),
+            )
+        return True
+    except Exception:  # noqa: BLE001 - 历史记录未保存不该拖垮抓取
+        logger.warning("抓取任务 %s 的历史记录未保存（启动落库失败）", task_id, exc_info=True)
+        return False
+
+
+def _archive_finish(
+    task: "CrawlTask",
+    *,
+    status: str,
+    error: str = "",
+) -> None:
+    """结束时回写状态与统计。落库失败只告警。"""
+    try:
+        progress = dict(task.progress)
+        with JobStore() as store:
+            store.finish_crawl_task(
+                task.task_id,
+                status=status,
+                ended_at=task.ended_at or time.time(),
+                stats=progress,
+                error=error or "",
+                stopped_reason=task.stopped_reason or "",
+                job_count=int(progress.get("kept_count") or 0),
+                inserted_count=int(progress.get("inserted") or 0),
+                updated_count=int(progress.get("updated") or 0),
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("抓取任务 %s 的历史记录未保存（结束落库失败）", task.task_id, exc_info=True)
+
+
+def _archive_stats(task: "CrawlTask") -> None:
+    """进行中任务的中间统计落库（描述补抓 / 黑名单继续累进）。"""
+    try:
+        with JobStore() as store:
+            store.touch_crawl_task_stats(task.task_id, dict(task.progress))
+    except Exception:  # noqa: BLE001
+        logger.debug("抓取任务 %s 中间统计落库失败", task.task_id, exc_info=True)
+
+
+def _progress_with_archive(task: "CrawlTask"):
+    """包一层 ``task.push``：每页入库后顺手把中间统计落库。"""
+
+    def _on_progress(payload: dict[str, Any]) -> None:
+        task.push(payload)
+        if payload.get("page") is not None:
+            _archive_stats(task)
+
+    return _on_progress
 
 
 class CrawlTask:
@@ -186,6 +260,7 @@ class CrawlTaskManager:
         if not str(saved.get("expect_kind") or "").strip():
             if _search_filter_from(config_snapshot.search).is_blank:
                 raise ValidationWebError(BLANK_SEARCH_MSG)
+        source = "expect" if str(saved.get("expect_kind") or "").strip() else "search"
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有抓取任务在跑，等它结束或先取消")
@@ -202,6 +277,9 @@ class CrawlTaskManager:
                 "jd_rules": sum(1 for r in config_snapshot.rules if r.get("rule_type") == "jd_keyword"),
             })
             self._task = task
+
+        # 历史档案：启动就落一行，后面每页归属 / 结束回写都在这行上累进
+        _archive_start(task.task_id, source=source, created_at=task.created_at, params=params)
 
         thread = threading.Thread(
             target=self._run, args=(task,), daemon=True, name=f"crawl-{task.task_id}"
@@ -317,11 +395,12 @@ class CrawlTaskManager:
                     start_page=int(params["start_page"]),
                     search_filter=search_filter,
                     expect_filter=expect_filter,
-                    on_progress=task.push,
+                    on_progress=_progress_with_archive(task),
                     should_stop=lambda: task.cancel_flag,
                     enrich_details=bool(params.get("fetch_details", True)),
                     detail_interval=float(params.get("detail_interval", 1.0)),
                     blacklist_context=context,
+                    task_id=task.task_id,
                 )
             finally:
                 store.close()
@@ -334,6 +413,7 @@ class CrawlTaskManager:
                        "company_hits": report.stats.company_hits, "jd_hits": report.stats.jd_hits,
                        "skipped": report.stats.skipped, "inserted": report.stats.inserted,
                        "updated": report.stats.updated})
+            _archive_finish(task, status=task.status)
         except Exception as exc:  # noqa: BLE001 - 线程里兜住，状态给前端
             logger.exception("抓取任务 %s 失败", task.task_id)
             with task.lock:
@@ -342,6 +422,7 @@ class CrawlTaskManager:
                 task.error = humanize(exc)
                 task.ended_at = time.time()
             task.push({"event": "error", "message": task.error})
+            _archive_finish(task, status=ST_ERROR, error=task.error or "")
 
 
 crawl_tasks = CrawlTaskManager()

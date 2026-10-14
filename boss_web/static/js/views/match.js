@@ -1,13 +1,15 @@
-/** 看匹配：全库 / 勾选岗位匹配 · 优缺点 · 招呼语手改 · 三种发送范围（都要先确认） */
+/** 职位匹配：目录壳 + 页面级状态 + 四个子目录（工作台 / 批量发送 / 抓取任务 / 分析历史） */
 
 import { api } from "../api.js";
-import { toast, modal, escapeHtml, scoreRing, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
+import { toast, modal, escapeHtml, scoreRing, fmtTime, taskPanel, renderEvents } from "../ui.js";
+import { renderWorkbench } from "./match_workbench.js";
+import { renderDeliver } from "./match_deliver.js";
+import { renderCrawls } from "./match_crawls.js";
+import { renderHistory } from "./match_history.js";
 
 const PAGE_SIZE = 20;
-
-//: 「一键发送全部」的评分阈值兜底值（读不到 /api/deliver/config 时用它，
-//: 正常情况以落库的 doc('deliver_config') 为准）
 const MIN_SCORE_DEFAULT = 70;
+const GREET_COOLDOWN_DAYS = 30;
 
 export async function renderMatch(root) {
   root.innerHTML = `
@@ -17,238 +19,91 @@ export async function renderMatch(root) {
         <p class="hero-sub">拿你的简历和搜到的岗位逐个比对，给出匹配度、好在哪、差在哪，还有一句给 HR 的开场白。开场白可以自己改，确认后才发给对方。</p>
       </div>
     </div>
-
-    <div class="bento mb-24">
-      <div class="card span-12">
-        <div class="flex between center gap-12 wrap mb-16">
-          <div class="flex center gap-12 wrap">
-            <label class="muted" style="font-size:12.5px">简历</label>
-            <select class="select" id="resume-select" style="min-width:220px"></select>
-            <span class="pill" id="llm-badge">AI —</span>
-          </div>
-          <div class="btn-row">
-            <button class="btn primary" id="btn-match-all">一键匹配全部</button>
-            <button class="btn" id="btn-match-sel">匹配选中</button>
-          </div>
-        </div>
-        <div id="match-task"></div>
-      </div>
-    </div>
-
-    <div class="card mb-24">
-      <div class="card-head">
-        <h3 class="card-title">发送工具条</h3>
-        <span class="card-sub">每次发送前都会弹窗让你确认 · 已经发过的不会重发 · 发出去的就是招呼语正文</span>
-      </div>
-      <div class="flex between center wrap gap-12 mb-16">
-        <div class="btn-row">
-          <button class="btn primary" id="btn-send-all">一键发送全部 (<span id="send-all-n">0</span>)</button>
-          <button class="btn" id="btn-send-sel">发送选中 (<span id="send-sel-n">0</span>)</button>
-        </div>
-        <label class="flex center gap-8">
-          <span class="muted" style="font-size:12.5px">评分阈值</span>
-          <input type="number" class="input" id="send-min-score" value="70" min="0" max="100" step="1" style="width:76px">
-          <span class="muted" style="font-size:11.5px">≥ 该分数才进「一键发送全部」，改完自动保存</span>
-        </label>
-        <span class="muted" id="send-excluded" style="font-size:12px"></span>
-        <span class="muted" style="font-size:12px">点击下方「匹配结果」条目可看全部信息、改招呼语 / 发送</span>
-      </div>
-      <div id="deliver-task"></div>
-    </div>
-
-    <div class="card mb-24">
-      <div class="card-head">
-        <h3 class="card-title">历史分析</h3>
-        <span class="card-sub">data/boss.db · analysis 表</span>
-      </div>
-      <div id="history-list" class="scroll-y" style="max-height:200px"></div>
-    </div>
-
-    <div class="bento">
-      <div class="card span-5 panel-col">
-        <div class="card-head">
-          <h3 class="card-title">岗位列表</h3>
-          <span class="card-sub" id="jobs-sub">—</span>
-        </div>
-        <div class="flex between center mb-12">
-          <div class="btn-row">
-            <button class="btn sm ghost" id="btn-select-page">全选本页</button>
-            <button class="btn sm ghost" id="btn-clear-sel">清空</button>
-          </div>
-          <span class="pill accent" id="sel-count">已选 0</span>
-        </div>
-        <div id="job-list" class="scroll-y"></div>
-        <div class="flex between center mt-12">
-          <button class="btn sm ghost" id="btn-prev">上一页</button>
-          <span class="muted mono" id="page-info" style="font-size:12px">—</span>
-          <button class="btn sm ghost" id="btn-next">下一页</button>
-        </div>
-      </div>
-
-      <div class="card span-7 panel-col" id="results-card">
-        <div class="card-head">
-          <h3 class="card-title">匹配结果</h3>
-          <span class="card-sub" id="an-sub">尚未匹配</span>
-        </div>
-        <div id="an-results" class="scroll-y">
-          <div class="empty"><div class="empty-icon">◌</div><p>启动匹配后，结果会按分数从高到低排在这里</p></div>
-        </div>
-      </div>
+    <div class="settings-shell">
+      <aside class="card settings-nav" aria-label="匹配目录">
+        <button class="settings-tab active" data-tab="workbench" type="button">匹配工作台</button>
+        <button class="settings-tab" data-tab="deliver" type="button">批量发送</button>
+        <button class="settings-tab" data-tab="crawls" type="button">抓取任务</button>
+        <button class="settings-tab" data-tab="history" type="button">分析历史</button>
+      </aside>
+      <section class="card settings-pane" id="match-pane"></section>
     </div>
   `;
 
-  const $ = (id) => root.querySelector("#" + id);
-  let resumes = [];
-  let currentResumeId = "";
-  let jobs = [];
-  let totalJobs = 0;
-  let page = 0;
-  const selected = new Set(); // encrypt_job_id
-  let matches = [];           // 当前展示的 match 条目
-  let analysisId = null;
-  let pollTimer = null;
-  let taskId = null;
-  let deliverTimer = null;    // 发送任务轮询
-  let deliverTaskId = null;
-  const greetDrafts = new Map();   // 手改中的招呼语草稿，弹窗关掉 / 轮询重绘不丢
-  let detailApi = null;            // 当前打开的详情弹窗 { jid, close, setStatus }
+  // ---------- 页面级状态（跨目录不销毁） ----------
+  const state = {
+    resumes: [],
+    currentResumeId: "",
+    jobs: [],
+    totalJobs: 0,
+    page: 0,
+    selected: new Set(),
+    matches: [],
+    analysisId: null,
+    resumeTitle: "",
+    scope: { type: "all" },   // {type:"all"} | {type:"crawl_task",crawl_task_id,job_count} | {type:"jobs",job_ids}
+    matchTaskId: null,
+    deliverTaskId: null,
+    greetDrafts: new Map(),
+    detailApi: null,
+    pollTimer: null,
+    deliverTimer: null,
+  };
 
-  // ---------- 长任务面板（匹配 / 发送） ----------
+  // ---------- 任务面板 ----------
   const matchPanel = taskPanel({ title: "批量匹配", stopLabel: "停止匹配" });
-  $("match-task").appendChild(matchPanel.el);
+  const deliverPanel = taskPanel({ title: "批量投递", stopLabel: "停止投递" });
+  matchPanel.update({ status: "idle", percent: 0 });
+  deliverPanel.update({ status: "idle", percent: 0 });
+
   matchPanel.onStop(async () => {
-    if (!taskId) return;
+    if (!state.matchTaskId) return;
     try {
-      await api.post(`/api/match/analyze/${taskId}/cancel`);
+      await api.post(`/api/match/analyze/${state.matchTaskId}/cancel`);
       toast("已请求停止匹配", "warn");
     } catch (err) {
       toast(err.message || "停止失败", "bad");
     }
   });
-  matchPanel.update({ status: "idle", percent: 0 });
-
-  const deliverPanel = taskPanel({ title: "批量投递", stopLabel: "停止投递" });
-  $("deliver-task").appendChild(deliverPanel.el);
   deliverPanel.onStop(async () => {
-    if (!deliverTaskId) return;
+    if (!state.deliverTaskId) return;
     try {
-      await api.post(`/api/deliver/${deliverTaskId}/cancel`);
+      await api.post(`/api/deliver/${state.deliverTaskId}/cancel`);
       toast("已请求停止投递", "warn");
     } catch (err) {
       toast(err.message || "停止失败", "bad");
     }
   });
-  deliverPanel.update({ status: "idle", percent: 0 });
 
-  /** 把 match 快照喂给面板（done/total/current_job 在顶层，不在 progress{} 里）。 */
-  function paintMatch(s) {
-    if (!s) {
-      matchPanel.update({ status: "idle", percent: 0 });
-      return;
-    }
-    const done = s.done || 0;
-    const total = s.total || 0;
-    const running = s.status === "running";
-    matchPanel.update({
-      status: s.status,
-      percent: total ? Math.round((done / total) * 100) : (s.status === "done" ? 100 : undefined),
-      current: running ? (s.current_job || "匹配中") : (s.error || ""),
-      counts: [
-        ["完成", `${done}${total ? " / " + total : ""}`],
-        ["结果", `${(s.matches || []).length} 条`],
-      ],
-      error: s.status === "error" ? s.error : undefined,
-      log: renderEvents(s.events, { limit: 20 }),
-    });
-  }
+  // ---------- 共享 helpers ----------
+  const helpers = {
+    matchPanelHost: matchPanel.el,
+    deliverPanelHost: deliverPanel.el,
 
-  /** 把投递快照喂给面板（current/total/done/ok/failed/skipped 也在顶层）。 */
-  function paintDeliver(s) {
-    if (!s || !s.task_id) {
-      deliverPanel.update({ status: "idle", percent: 0 });
-      return;
-    }
-    const total = s.total || 0;
-    const done = s.done || 0;
-    const running = s.status === "running";
-    deliverPanel.update({
-      status: s.status,
-      percent: total ? Math.round((done / total) * 100) : (s.status === "done" ? 100 : undefined),
-      current: running ? (s.current || "发送中") : (s.error || ""),
-      counts: [
-        ["进度", `${done}${total ? " / " + total : ""}`],
-        ["成功", String(s.ok || 0)],
-        ["失败", String(s.failed || 0)],
-        ["跳过", String(s.skipped || 0)],
-      ],
-      error: s.status === "error" ? s.error : undefined,
-      log: renderEvents(s.events, { limit: 20 }),
-    });
-  }
+    switchTab(name) {
+      const tab = root.querySelector(`.settings-tab[data-tab="${name}"]`);
+      if (tab) show(name);
+    },
 
-  /** 匹配按钮的显隐跟着任务状态走，不再各自 toggle。 */
-  function setMatchButtons(running) {
-    $("btn-match-all").classList.toggle("hidden", running);
-    $("btn-match-sel").classList.toggle("hidden", running);
-  }
+    // --- 岗位列表 ---
+    renderJobs() {
+      const pane = root.querySelector("#match-pane");
+      const jobList = pane?.querySelector("#job-list");
+      const jobsSub = pane?.querySelector("#jobs-sub");
+      const selCount = pane?.querySelector("#sel-count");
+      const pageInfo = pane?.querySelector("#page-info");
+      if (!jobList) return;
 
-  // ---------- 简历选择 ----------
-  async function loadResumes() {
-    try {
-      const r = await api.get("/api/resume/list");
-      resumes = r.items || [];
-      const sel = $("resume-select");
-      sel.innerHTML =
-        `<option value="">— 选择简历 —</option>` +
-        resumes
-          .map((it) => {
-            const parsed = it.llm && it.llm.has_data ? " · 已解析" : " · 未解析";
-            return `<option value="${escapeHtml(it.resume_id)}">${escapeHtml(it.title || it.resume_id)}${parsed}</option>`;
-          })
-          .join("");
-      if (resumes.length) {
-        currentResumeId = resumes[0].resume_id;
-        sel.value = currentResumeId;
+      const mIds = new Set(state.matches.map((m) => m.encrypt_job_id));
+      const sc = state.scope;
+      if (jobsSub) {
+        jobsSub.textContent = sc.type !== "all"
+          ? `范围：${sc.type === "crawl_task" ? "抓取任务" : "已选"} · 共 ${state.totalJobs} 条`
+          : `共 ${state.totalJobs} 条 · 第 ${state.page + 1}/${Math.max(1, Math.ceil(state.totalJobs / PAGE_SIZE))} 页`;
       }
-      updateLlmBadge();
-    } catch { /* ignore */ }
-  }
-
-  function updateLlmBadge() {
-    const it = resumes.find((x) => x.resume_id === currentResumeId);
-    const parsed = it && it.llm && it.llm.has_data;
-    $("llm-badge").className = parsed ? "pill accent" : "pill";
-    $("llm-badge").textContent = parsed ? "简历已解析" : "简历未解析（匹配将用规则摘要）";
-  }
-
-  $("resume-select").addEventListener("change", () => {
-    currentResumeId = $("resume-select").value;
-    updateLlmBadge();
-  });
-
-  // ---------- 岗位列表 ----------
-  async function loadJobs() {
-    try {
-      const r = await api.get(`/api/jobs?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`);
-      jobs = r.items || [];
-      totalJobs = r.total || 0;
-      renderJobs();
-    } catch (err) {
-      toast(err.message || "加载职位失败", "bad");
-    }
-  }
-
-  function matchedIds() {
-    return new Set(matches.map((m) => m.encrypt_job_id));
-  }
-
-  function renderJobs() {
-    const mIds = matchedIds();
-    $("jobs-sub").textContent = `共 ${totalJobs} 条 · 第 ${page + 1}/${Math.max(1, Math.ceil(totalJobs / PAGE_SIZE))} 页`;
-    $("job-list").innerHTML = jobs
-      .map((j) => {
+      jobList.innerHTML = state.jobs.map((j) => {
         const id = j.encrypt_job_id;
-        const on = selected.has(id);
+        const on = state.selected.has(id);
         const done = mIds.has(id);
         return `
         <label class="flex center gap-8" style="padding:8px 0;border-bottom:1px solid var(--stroke);cursor:pointer">
@@ -261,217 +116,84 @@ export async function renderMatch(root) {
             <div class="muted" style="font-size:11px">${escapeHtml(j.location || "")} · ${escapeHtml(j.salary_desc || "")}</div>
           </div>
         </label>`;
-      })
-      .join("") || `<div class="muted">库里还没有职位，先去「职位」页抓取</div>`;
+      }).join("") || `<div class="muted">库里还没有职位，先去「职位」页抓取</div>`;
 
-    $("job-list").querySelectorAll("input[type=checkbox]").forEach((cb) => {
-      cb.addEventListener("change", () => {
-        if (cb.checked) selected.add(cb.dataset.id);
-        else selected.delete(cb.dataset.id);
-        updateSelCount();
+      jobList.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+        cb.addEventListener("change", () => {
+          if (cb.checked) state.selected.add(cb.dataset.id);
+          else state.selected.delete(cb.dataset.id);
+          helpers.updateSelCount();
+        });
       });
-    });
-    $("page-info").textContent = `${page + 1} / ${Math.max(1, Math.ceil(totalJobs / PAGE_SIZE))}`;
-    updateSelCount();
-  }
+      if (pageInfo) pageInfo.textContent = `${state.page + 1} / ${Math.max(1, Math.ceil(state.totalJobs / PAGE_SIZE))}`;
+      const prevBtn = pane?.querySelector("#btn-prev");
+      const nextBtn = pane?.querySelector("#btn-next");
+      if (prevBtn) prevBtn.disabled = state.page <= 0;
+      if (nextBtn) nextBtn.disabled = (state.page + 1) * PAGE_SIZE >= state.totalJobs;
+      helpers.updateSelCount();
+    },
 
-  function updateSelCount() {
-    $("sel-count").textContent = `已选 ${selected.size}`;
-    $("send-sel-n").textContent = String(selected.size);
-  }
+    updateSelCount() {
+      const pane = root.querySelector("#match-pane");
+      const selCount = pane?.querySelector("#sel-count");
+      const sendSelN = pane?.querySelector("#send-sel-n");
+      if (selCount) selCount.textContent = `已选 ${state.selected.size}`;
+      if (sendSelN) sendSelN.textContent = String(state.selected.size);
+    },
 
-  // ---------- 一键发送的评分阈值 ----------
-  function minScore() {
-    const v = parseInt($("send-min-score").value, 10);
-    if (Number.isNaN(v)) return MIN_SCORE_DEFAULT;
-    return Math.min(100, Math.max(0, v));
-  }
-
-  function sendRestriction(m) {
-    if (!["is_blacklisted", "company_blacklisted", "jd_blacklisted", "jd_rule_checked", "jd_status", "auto_delivery_blocked"].some((key) => key in m)) {
-      return "缺少匹配时安全快照";
-    }
-    if (m.company_blacklisted) return "公司黑名单";
-    if (m.jd_blacklisted) return "JD 黑名单";
-    if (!m.jd_rule_checked) return "JD 规则未检查";
-    if (["failed", "pending", "collecting", "unchecked"].includes(m.jd_status || "")) return "JD 状态不完整";
-    if (m.auto_delivery_blocked) return "职位状态不完整";
-    return "";
-  }
-
-  /** 一键发送只展示明确安全且具有招呼语的目标。 */
-  function sendAllTargets() {
-    const min = minScore();
-    return matches.filter(
-      (m) => (m.match_score || 0) >= min && !m.delivered_at && (m.greeting || "").trim() && !sendRestriction(m)
-    );
-  }
-
-  function updateSendCounts() {
-    const eligible = sendAllTargets();
-    const ranked = matches.filter((m) => (m.match_score || 0) >= minScore() && !m.delivered_at && (m.greeting || "").trim());
-    const excluded = ranked.length - eligible.length;
-    $("send-all-n").textContent = String(eligible.length);
-    $("send-excluded").textContent = excluded ? `一键发送将排除 ${excluded} 条受限 / 状态不完整职位` : "";
-    $("send-sel-n").textContent = String(matches.filter((m) => selected.has(m.encrypt_job_id) && !m.delivered_at && (m.greeting || "").trim()).length);
-  }
-
-  $("send-min-score").addEventListener("input", updateSendCounts);
-  $("send-min-score").addEventListener("change", saveMinScore);
-
-  /** 阈值落状态库 doc('deliver_config')：刷新 / 换机器都跟着走。 */
-  async function loadMinScore() {
-    try {
-      const cfg = await api.get("/api/deliver/config");
-      if (typeof cfg.min_score === "number") {
-        $("send-min-score").value = String(cfg.min_score);
-        updateSendCounts();
-      }
-    } catch { /* 读不到就用默认 70 */ }
-  }
-
-  async function saveMinScore() {
-    const v = minScore();
-    $("send-min-score").value = String(v);  // 越界 / 空值收回合法区间
-    updateSendCounts();
-    try {
-      await api.put("/api/deliver/config", { min_score: v });
-    } catch (err) {
-      toast(err.message || "阈值保存失败", "bad");
-    }
-  }
-
-  $("btn-select-page").addEventListener("click", () => {
-    jobs.forEach((j) => selected.add(j.encrypt_job_id));
-    renderJobs();
-  });
-  $("btn-clear-sel").addEventListener("click", () => {
-    selected.clear();
-    renderJobs();
-  });
-  $("btn-prev").addEventListener("click", () => {
-    if (page > 0) {
-      page -= 1;
-      loadJobs();
-    }
-  });
-  $("btn-next").addEventListener("click", () => {
-    if ((page + 1) * PAGE_SIZE < totalJobs) {
-      page += 1;
-      loadJobs();
-    }
-  });
-
-  // ---------- 匹配 ----------
-  $("btn-match-all").addEventListener("click", () => startMatch([]));
-  $("btn-match-sel").addEventListener("click", () => {
-    if (!selected.size) return toast("先在左侧勾选岗位", "warn");
-    startMatch([...selected]);
-  });
-
-  async function startMatch(jobIds) {
-    if (!currentResumeId) return toast("先选择一份简历", "warn");
-    try {
-      const task = await api.post("/api/match/analyze", {
-        resume_id: currentResumeId,
-        job_ids: jobIds,
-      });
-      taskId = task.task_id;
-      analysisId = task.analysis_id;
-      matches = [];
-      setMatchButtons(true);
-      $("an-sub").textContent = "匹配中…";
-      toast(`匹配已开始（共 ${task.total || "?"} 个职位，AI 会逐个比对）`, "ok");
-      paintMatch({ ...task, status: "running" });
-      startPoll();
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-  }
-
-  /** 页面回来 / 刷新后，接上还在跑（或刚跑完）的匹配任务 */
-  async function restoreTask() {
-    let s = null;
-    try {
-      s = await api.get("/api/match/analyze/status");
-    } catch { /* ignore */ }
-    if (!s || !s.task_id) return;
-
-    taskId = s.task_id;
-    analysisId = s.analysis_id || s.task_id;
-    matches = s.matches || [];
-    if (s.resume_id) {
-      currentResumeId = s.resume_id;
-      $("resume-select").value = s.resume_id;
-      updateLlmBadge();
-    }
-
-    if (s.status === "running") {
-      setMatchButtons(true);
-      $("an-sub").textContent = `匹配中 · ${s.done || 0}/${s.total || "?"}`;
-      paintMatch(s);
-      renderMatches();
-      renderJobs();
-      startPoll();
-      toast("已接上进行中的匹配任务", "ok");
-      return;
-    }
-
-    if (matches.length) {
-      $("an-sub").textContent = `${s.status === "done" ? "已完成" : s.status === "cancelled" ? "已停止" : "失败"} · ${matches.length} 条`;
-      paintMatch(s);
-      renderMatches();
-      renderJobs();
-    }
-  }
-
-  function startPoll() {
-    clearInterval(pollTimer);
-    pollTimer = setInterval(async () => {
-      if (!taskId) return;
+    async loadJobs() {
       try {
-        const s = await api.get(`/api/match/analyze/${taskId}`);
-        paintMatch(s);
-        if (s.matches && s.matches.length) {
-          matches = s.matches;
-          renderMatches();
-        }
-        if (["done", "error", "cancelled"].includes(s.status)) {
-          clearInterval(pollTimer);
-          pollTimer = null;
-          taskId = null;
-          setMatchButtons(false);
-          if (s.status === "done") {
-            $("an-sub").textContent = `完成 · ${matches.length} 条`;
-            toast("匹配完成", "ok");
-            loadHistory();
-          } else if (s.status === "error") {
-            $("an-sub").textContent = "失败";
-            toast(s.error || "匹配失败", "bad");
-          } else {
-            $("an-sub").textContent = `已停止 · ${matches.length} 条`;
+        const sc = state.scope;
+        let url = `/api/jobs?limit=${PAGE_SIZE}&offset=${state.page * PAGE_SIZE}`;
+        if (sc.type === "crawl_task" && sc.crawl_task_id) {
+          // 范围内职位：从任务归属取 id，再拉详情
+          const r = await api.get(`/api/crawl/tasks/${encodeURIComponent(sc.crawl_task_id)}/jobs?limit=200`);
+          const ids = (r.items || []).filter((j) => !j.missing).map((j) => j.encrypt_job_id);
+          state.jobs = ids.slice(state.page * PAGE_SIZE, (state.page + 1) * PAGE_SIZE).map((id) => ({ encrypt_job_id: id, job_name: id, brand_name: "" }));
+          state.totalJobs = ids.length;
+          // 拉全量摘要
+          if (ids.length) {
+            try {
+              const full = await api.get(`/api/jobs?limit=${Math.min(ids.length, 200)}&offset=0`);
+              const map = new Map((full.items || []).map((j) => [j.encrypt_job_id, j]));
+              state.jobs = state.jobs.map((j) => map.get(j.encrypt_job_id) || j);
+            } catch { /* ignore */ }
           }
-          renderMatches();
-          renderJobs();
+        } else if (sc.type === "jobs" && sc.job_ids?.length) {
+          const ids = sc.job_ids;
+          state.jobs = ids.slice(state.page * PAGE_SIZE, (state.page + 1) * PAGE_SIZE).map((id) => ({ encrypt_job_id: id, job_name: id, brand_name: "" }));
+          state.totalJobs = ids.length;
+        } else {
+          const r = await api.get(url);
+          state.jobs = r.items || [];
+          state.totalJobs = r.total || 0;
         }
-      } catch { /* ignore */ }
-    }, 1200);
-  }
+        helpers.renderJobs();
+      } catch (err) {
+        toast(err.message || "加载职位失败", "bad");
+      }
+    },
 
-  // ---------- 匹配结果（列表只留摘要，整卡可点 → 弹窗看全部信息） ----------
-  function renderMatches() {
-    const box = $("an-results");
-    const keepScroll = box.scrollTop;
-    updateSendCounts();  // 「一键发送全部」的待发条数随匹配结果走
+    // --- 匹配结果 ---
+    renderMatches() {
+      const pane = root.querySelector("#match-pane");
+      const box = pane?.querySelector("#an-results");
+      const anSub = pane?.querySelector("#an-sub");
+      const clearBtn = pane?.querySelector("#btn-clear-analysis");
+      if (!box) return;
+      // 有分析结果时才显示清空按钮
+      if (clearBtn) {
+        clearBtn.classList.toggle("hidden", !(state.analysisId || state.matches.length));
+      }
+      helpers.updateSendCounts();
 
-    if (!matches.length) {
-      box.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>还没有匹配结果</p></div>`;
-      return;
-    }
+      if (!state.matches.length) {
+        box.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>还没有匹配结果</p></div>`;
+        return;
+      }
 
-    const ranked = [...matches].sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
-    box.innerHTML = ranked
-      .map((m) => {
+      const ranked = [...state.matches].sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
+      box.innerHTML = ranked.map((m) => {
         const jid = m.encrypt_job_id;
         const score = m.match_score || 0;
         const adviceLine = (m.advice || "").trim() || (m.verdict || "").trim();
@@ -481,9 +203,26 @@ export async function renderMatch(root) {
           !m.jd_rule_checked ? "JD 规则未检查" : "",
           ["failed", "empty", "pending", "collecting", "unchecked"].includes(m.jd_status) ? `JD ${m.jd_status}` : "",
         ].filter(Boolean);
-        const safety = tags.length
-          ? `<div class="pills mt-8">${tags.map((tag) => `<span class="pill static bad">${escapeHtml(tag)}</span>`).join(" ")}</div>`
-          : `<div class="pills mt-8"><span class="pill static accent">安全状态已检查</span></div>`;
+        const cool = helpers.greetState(m);
+        // 是否可发送：与安全状态同一行
+        const sendPill = cool.in_cooldown
+          ? `<span class="pill static warn">冷却中 · ${escapeHtml(cool.cooldown_date)} 可再发</span>`
+          : helpers.sendRestriction(m)
+            ? `<span class="pill static bad">不可发送</span>`
+            : m.deliver_status === "failed"
+              ? `<span class="pill static bad">发送失败</span>`
+              : m.delivered_at
+                ? `<span class="pill static accent">已发送</span>`
+                : m.deliver_status === "sending"
+                  ? `<span class="pill static">发送中…</span>`
+                  : !(m.greeting || "").trim()
+                    ? `<span class="pill static warn">无招呼语</span>`
+                    : `<span class="pill static ok">可发送</span>`;
+        const safety = `<div class="pills mt-8">${
+          tags.length
+            ? tags.map((tag) => `<span class="pill static bad">${escapeHtml(tag)}</span>`).join(" ")
+            : `<span class="pill static accent">安全状态已检查</span>`
+        } ${sendPill}</div>`;
         return `
           <div class="card lift mb-16 match-card" style="padding:16px" data-jid="${escapeHtml(jid)}"
                role="button" tabindex="0" title="点击查看全部信息">
@@ -495,483 +234,762 @@ export async function renderMatch(root) {
                 ${safety}
                 ${adviceLine ? `<div class="muted" style="font-size:12.5px;margin-top:6px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(adviceLine)}</div>` : ""}
                 <div class="flex between center gap-8 mt-8">
-                  <span class="muted" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
+                  <span class="muted" style="font-size:11.5px">${
+                    !cool.in_cooldown && cool.last_date && m.delivered_at
+                      ? `上次发送 ${escapeHtml(cool.last_date)}`
+                      : ""
+                  }</span>
                   <span class="muted" style="font-size:11px;flex-shrink:0">点击查看详情 ›</span>
                 </div>
               </div>
             </div>
           </div>`;
-      })
-      .join("");
+      }).join("");
 
-    box.querySelectorAll(".match-card").forEach((card) => {
-      const jid = card.dataset.jid;
-      card.addEventListener("click", () => openMatchDetail(jid));
-      card.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          openMatchDetail(jid);
-        }
-      });
-    });
-
-    box.scrollTop = keepScroll;
-  }
-
-  /** 整卡点开的详情弹窗：匹配分析 + 职位全量信息 + 招呼语手改 / 单发。 */
-  function openMatchDetail(jid) {
-    const m = matches.find((x) => x.encrypt_job_id === jid);
-    if (!m) return;
-    if (detailApi) {
-      detailApi.close();
-      detailApi = null;
-    }
-
-    const score = m.match_score || 0;
-    const failed = !!(m.error || "").trim(); // 匹配失败（LLM 调用挂了）→ 提供重新匹配
-    const verdict = (m.verdict || "").trim();
-    const advice = (m.advice || "").trim();
-    const matched = (m.matched_skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
-    const missing = (m.missing_skills || []).map((s) => `<span class="pill static bad">${escapeHtml(s)}</span>`).join(" ");
-    const pros = (m.pros || []).map((p) => `<div class="muted" style="font-size:12.5px">✓ ${escapeHtml(p)}</div>`).join("");
-    const cons = (m.cons || []).map((c) => `<div class="muted" style="font-size:12.5px">✗ ${escapeHtml(c)}</div>`).join("");
-    const draft = greetDrafts.has(jid) ? greetDrafts.get(jid) : (m.greeting || "");
-    const safetyLabels = [
-      m.company_blacklisted ? "公司黑名单" : "",
-      m.jd_blacklisted ? "JD 关键词黑名单" : "",
-      !m.jd_rule_checked ? "JD 规则未检查" : "",
-      m.jd_status ? `JD 状态：${m.jd_status}` : "",
-      m.auto_delivery_blocked ? "自动投递已阻断" : "",
-    ].filter(Boolean);
-    const snapshotRules = (m.matched_rule_snapshot || []).map((rule) =>
-      `<li>${escapeHtml(rule.rule_type || "规则")} · ${escapeHtml(rule.pattern || "")} · ${escapeHtml(rule.matched_text || "")}</li>`
-    ).join("");
-
-    const dlg = modal({
-      wide: true,
-      body: `
-        <div class="flex between gap-12 mb-16 wrap" style="align-items:flex-start">
-          <div>
-            <div class="flex center gap-12">
-              ${scoreRing(score)}
-              <div>
-                <div style="font-size:17px;font-weight:650">${escapeHtml(m.brand_name)}</div>
-                <div class="muted" style="font-size:12.5px">${escapeHtml(m.location || "")}</div>
-              </div>
-            </div>
-            <div class="md-boss muted mt-12" style="font-size:12.5px"></div>
-          </div>
-          <div class="job-salary">${escapeHtml(m.salary_desc || "面议")}</div>
-        </div>
-
-        <div class="card-sub mb-8">匹配分析</div>
-        ${safetyLabels.length ? `<div class="pills mb-8">${safetyLabels.map((label) => `<span class="pill static bad">${escapeHtml(label)}</span>`).join(" ")}</div>` : `<div class="pill static accent mb-8">安全状态已检查</div>`}
-        ${snapshotRules ? `<details class="acc mb-8"><summary>匹配时命中规则快照</summary><ul class="acc-body">${snapshotRules}</ul></details>` : ""}
-        ${verdict ? `<div class="muted mb-8" style="font-size:12.5px"><span class="muted" style="font-size:11px">结论</span> ${escapeHtml(verdict)}</div>` : ""}
-        ${advice ? `<div class="muted mb-8" style="font-size:12.5px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(advice)}</div>` : ""}
-        ${matched ? `<div class="card-sub mb-8 mt-12">技能匹配</div><div class="job-meta">${matched}</div>` : ""}
-        ${missing ? `<div class="card-sub mb-8 mt-12">缺口</div><div class="pills">${missing}</div>` : ""}
-        ${pros ? `<div class="card-sub mb-8 mt-12">优点</div>${pros}` : ""}
-        ${cons ? `<div class="card-sub mb-8 mt-12">缺点</div>${cons}` : ""}
-        ${!verdict && !advice && !matched && !missing && !pros && !cons ? `<div class="muted mb-8" style="font-size:12px">这条没有分析内容${m.error ? "（匹配失败）" : ""}</div>` : ""}
-
-        <div class="card-sub mb-8 mt-16">职位信息</div>
-        <div class="md-job-extra"><div class="muted" style="font-size:12px">加载职位详情…</div></div>
-
-        <div class="card-sub mb-8 mt-16">招呼语 <span class="muted" style="font-size:11px">生成后先存草稿，满意再点保存</span></div>
-        <textarea class="input mono greeting-edit" rows="3" style="width:100%;font-size:12.5px">${escapeHtml(draft)}</textarea>
-        <div class="btn-row mt-8">
-          ${
-            failed
-            ? `<button class="btn sm primary btn-rematch">重新匹配</button>`
-            : ""
+      box.querySelectorAll(".match-card").forEach((card) => {
+        const jid = card.dataset.jid;
+        card.addEventListener("click", () => helpers.openMatchDetail(jid));
+        card.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            helpers.openMatchDetail(jid);
           }
-          <button class="btn sm btn-regen-greet">重新生成</button>
-          <button class="btn sm ghost btn-save-greet">保存招呼语</button>
-          <button class="btn sm primary btn-send-one">发送</button>
-          <span class="muted send-status" style="font-size:11.5px">${escapeHtml(deliverLabel(m))}</span>
-        </div>
-        <div class="muted draft-hint mt-8" style="font-size:11px;display:none">草稿未保存，满意后点「保存招呼语」；可反复点「重新生成」换一版</div>
-        ${
-          failed
-            ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>`
-            : ""
+        });
+      });
+    },
+
+    // --- 冷却状态 ---
+    greetState(m) {
+      const last = m.last_greeted_at || "";
+      const delivered = m.delivered_at || 0;
+      // 取较晚者
+      let lastTs = 0;
+      if (delivered) lastTs = Math.max(lastTs, Number(delivered) || 0);
+      if (last) {
+        // last_greeted_at 是 ISO 字符串
+        const t = new Date(last.replace(" ", "T")).getTime();
+        if (!Number.isNaN(t)) lastTs = Math.max(lastTs, t / 1000);
+      }
+      if (!lastTs) return { in_cooldown: false, cooldown_date: "", last_date: "" };
+      const now = Date.now() / 1000;
+      const cooldownUntil = lastTs + GREET_COOLDOWN_DAYS * 86400;
+      const inCooldown = cooldownUntil > now;
+      const d = new Date(lastTs * 1000);
+      const mmdd = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const untilD = new Date(cooldownUntil * 1000);
+      const untilMmdd = `${String(untilD.getMonth() + 1).padStart(2, "0")}-${String(untilD.getDate()).padStart(2, "0")}`;
+      return {
+        in_cooldown: inCooldown,
+        cooldown_date: untilMmdd,
+        last_date: mmdd,
+        last_ts: lastTs,
+      };
+    },
+
+    inCooldown(m) {
+      return helpers.greetState(m).in_cooldown;
+    },
+
+    deliverLabel(m) {
+      if (m.deliver_status === "failed") return `失败：${m.deliver_error || ""}`;
+      const cool = helpers.greetState(m);
+      if (cool.in_cooldown) return `冷却中（${cool.cooldown_date} 后可再发）`;
+      if (m.delivered_at) return "已发送";
+      return m.deliver_status === "sending" ? "发送中…" : "";
+    },
+
+    sendStatusLabel(m) {
+      if (m.deliver_status === "failed") return `失败：${m.deliver_error || ""}`;
+      const cool = helpers.greetState(m);
+      if (cool.in_cooldown) return `冷却中（${cool.cooldown_date} 后可再发）`;
+      if (m.delivered_at) return "已发送";
+      if (m.deliver_status === "sending") return "发送中…";
+      const restriction = helpers.sendRestriction(m);
+      if (restriction) return `不可发送（${restriction}）`;
+      if (!(m.greeting || "").trim()) return "无招呼语";
+      return "待发";
+    },
+
+    // --- 发送判定 ---
+    sendRestriction(m) {
+      if (!["is_blacklisted", "company_blacklisted", "jd_blacklisted", "jd_rule_checked", "jd_status", "auto_delivery_blocked"].some((key) => key in m)) {
+        return "缺少匹配时安全快照";
+      }
+      if (m.company_blacklisted) return "公司黑名单";
+      if (m.jd_blacklisted) return "JD 黑名单";
+      if (!m.jd_rule_checked) return "JD 规则未检查";
+      if (["failed", "pending", "collecting", "unchecked"].includes(m.jd_status || "")) return "JD 状态不完整";
+      if (m.auto_delivery_blocked) return "职位状态不完整";
+      return "";
+    },
+
+    minScore(inputEl) {
+      const v = parseInt(inputEl?.value, 10);
+      if (Number.isNaN(v)) return MIN_SCORE_DEFAULT;
+      return Math.min(100, Math.max(0, v));
+    },
+
+    sendAllTargets(inputEl) {
+      const min = helpers.minScore(inputEl);
+      const sendRestriction = helpers.sendRestriction;
+      return state.matches.filter(
+        (m) => (m.match_score || 0) >= min && !helpers.inCooldown(m) && (m.greeting || "").trim() && !sendRestriction(m)
+      );
+    },
+
+    updateSendCounts(inputEl) {
+      const pane = root.querySelector("#match-pane");
+      if (!inputEl) inputEl = pane?.querySelector("#send-min-score");
+      const sendAllN = pane?.querySelector("#send-all-n");
+      const sendExcluded = pane?.querySelector("#send-excluded");
+      const sendSelN = pane?.querySelector("#send-sel-n");
+      const min = helpers.minScore(inputEl);
+      const eligible = helpers.sendAllTargets(inputEl);
+      const ranked = state.matches.filter((m) => (m.match_score || 0) >= min && !helpers.inCooldown(m) && (m.greeting || "").trim());
+      const restricted = ranked.filter((m) => helpers.sendRestriction(m)).length;
+      const cooled = state.matches.filter((m) => (m.match_score || 0) >= min && helpers.inCooldown(m) && (m.greeting || "").trim()).length;
+      const noGreeting = state.matches.filter((m) => (m.match_score || 0) >= min && !helpers.inCooldown(m) && !(m.greeting || "").trim()).length;
+      if (sendAllN) sendAllN.textContent = String(eligible.length);
+      const parts = [];
+      if (restricted) parts.push(`${restricted} 条受限`);
+      if (cooled) parts.push(`${cooled} 条冷却中`);
+      if (noGreeting) parts.push(`${noGreeting} 条无招呼语`);
+      if (sendExcluded) sendExcluded.textContent = parts.length ? `将排除 ${parts.join(" / ")}` : "";
+      if (sendSelN) sendSelN.textContent = String(state.matches.filter((m) => state.selected.has(m.encrypt_job_id) && !helpers.inCooldown(m) && (m.greeting || "").trim() && !helpers.sendRestriction(m)).length);
+    },
+
+    async loadMinScore(inputEl) {
+      try {
+        const cfg = await api.get("/api/deliver/config");
+        if (typeof cfg.min_score === "number" && inputEl) {
+          inputEl.value = String(cfg.min_score);
+          helpers.updateSendCounts(inputEl);
         }
-      `,
-      onClose: () => {
-        if (detailApi && detailApi.jid === jid) detailApi = null;
-      },
-    });
+      } catch { /* ignore */ }
+    },
 
-    detailApi = {
-      jid,
-      close: dlg.close,
-      setStatus: (text) => {
-        const el = dlg.box.querySelector(".send-status");
-        if (el) el.textContent = text;
-      },
-    };
-
-    const ta = dlg.box.querySelector(".greeting-edit");
-    const draftHint = dlg.box.querySelector(".draft-hint");
-    const syncDraft = () => {
-      greetDrafts.set(jid, ta.value);
-      const cur = matches.find((x) => x.encrypt_job_id === jid);
-      const dirty = ta.value.trim() !== (cur?.greeting || "").trim();
-      if (draftHint) draftHint.style.display = dirty ? "" : "none";
-    };
-    ta.addEventListener("input", syncDraft);
-    syncDraft();
-
-    const regenBtn = dlg.box.querySelector(".btn-regen-greet");
-    regenBtn.addEventListener("click", async () => {
-      if (!analysisId) return toast("先跑一次匹配再生成招呼语", "warn");
-      regenBtn.disabled = true;
-      regenBtn.textContent = "生成中…";
+    async saveMinScore(inputEl) {
+      const v = helpers.minScore(inputEl);
+      if (inputEl) inputEl.value = String(v);
+      helpers.updateSendCounts(inputEl);
       try {
-        const r = await api.post(`/api/match/${analysisId}/greeting/regenerate`, {
-          encrypt_job_id: jid,
-        });
-        const text = (r.greeting || "").trim();
-        if (!text) return toast("AI 没生成出招呼语，再点一次试试", "bad");
-        // 只写进草稿，不落库——用户可能反复生成再挑一条
-        ta.value = text;
-        syncDraft();
-        toast("已生成新草稿（未保存，可反复生成）", "ok");
+        await api.put("/api/deliver/config", { min_score: v });
       } catch (err) {
-        toast(err.message || "生成失败", "bad");
-      } finally {
-        regenBtn.disabled = false;
-        regenBtn.textContent = "重新生成";
+        toast(err.message || "阈值保存失败", "bad");
       }
-    });
+    },
 
-    dlg.box.querySelector(".btn-save-greet").addEventListener("click", async () => {
-      const text = dlg.box.querySelector(".greeting-edit").value;
+    // --- 任务面板 ---
+    paintMatch(s) {
+      if (!s) {
+        matchPanel.update({ status: "idle", percent: 0 });
+        return;
+      }
+      const done = s.done || 0;
+      const total = s.total || 0;
+      const running = s.status === "running";
+      matchPanel.update({
+        status: s.status,
+        percent: total ? Math.round((done / total) * 100) : (s.status === "done" ? 100 : undefined),
+        current: running ? (s.current_job || "匹配中") : (s.error || ""),
+        counts: [
+          ["完成", `${done}${total ? " / " + total : ""}`],
+          ["结果", `${(s.matches || []).length} 条`],
+        ],
+        error: s.status === "error" ? s.error : undefined,
+        log: renderEvents(s.events, { limit: 20 }),
+      });
+    },
+
+    paintDeliver(s) {
+      if (!s || !s.task_id) {
+        deliverPanel.update({ status: "idle", percent: 0 });
+        return;
+      }
+      const total = s.total || 0;
+      const done = s.done || 0;
+      const running = s.status === "running";
+      deliverPanel.update({
+        status: s.status,
+        percent: total ? Math.round((done / total) * 100) : (s.status === "done" ? 100 : undefined),
+        current: running ? (s.current || "发送中") : (s.error || ""),
+        counts: [
+          ["进度", `${done}${total ? " / " + total : ""}`],
+          ["成功", String(s.ok || 0)],
+          ["失败", String(s.failed || 0)],
+          ["跳过", String(s.skipped || 0)],
+        ],
+        error: s.status === "error" ? s.error : undefined,
+        log: renderEvents(s.events, { limit: 20 }),
+      });
+    },
+
+    setMatchButtons(running) {
+      const pane = root.querySelector("#match-pane");
+      pane?.querySelector("#btn-match-all")?.classList.toggle("hidden", running);
+      pane?.querySelector("#btn-match-sel")?.classList.toggle("hidden", running);
+    },
+
+    // --- 匹配任务 ---
+    async startMatch(jobIds) {
+      if (!state.currentResumeId) return toast("先选择一份简历", "warn");
+      const sc = state.scope;
+      const body = {
+        resume_id: state.currentResumeId,
+        job_ids: jobIds || [],
+      };
+      if (sc.type === "crawl_task" && sc.crawl_task_id) {
+        body.crawl_task_id = sc.crawl_task_id;
+        body.job_ids = [];
+      }
       try {
-        await api.patch(`/api/match/${analysisId}/greeting`, {
-          encrypt_job_id: jid,
-          greeting: text,
-        });
-        const cur = matches.find((x) => x.encrypt_job_id === jid);
-        if (cur) cur.greeting = text;
-        greetDrafts.delete(jid);
-        syncDraft();
-        toast("招呼语已保存", "ok");
+        const task = await api.post("/api/match/analyze", body);
+        state.matchTaskId = task.task_id;
+        state.analysisId = task.analysis_id;
+        state.matches = [];
+        helpers.setMatchButtons(true);
+        const anSub = root.querySelector("#match-pane")?.querySelector("#an-sub");
+        if (anSub) anSub.textContent = "匹配中…";
+        toast(`匹配已开始（共 ${task.total || "?"} 个职位，AI 会逐个比对）`, "ok");
+        helpers.paintMatch({ ...task, status: "running" });
+        helpers.startPoll();
       } catch (err) {
-        toast(err.message || "保存失败", "bad");
+        toast(err.message, "bad");
       }
-    });
+    },
 
-    dlg.box.querySelector(".btn-send-one").addEventListener("click", () => {
-      const cur = matches.find((x) => x.encrypt_job_id === jid);
-      if (cur) confirmAndSend([cur], "单条手动发送需要单独确认；后端仍会按匹配时快照校验", { mode: "manual" });
-    });
+    async setMatchScope(taskId, jobCount) {
+      state.scope = { type: "crawl_task", crawl_task_id: taskId, job_count: jobCount };
+      state.page = 0;
+      helpers.switchTab("workbench");
+      await helpers.loadJobs();
+      helpers._renderScopeBar?.();
+      toast("已设为匹配范围，可点击「一键匹配当前范围」开始匹配", "ok");
+    },
 
-    // 匹配失败才有的补救入口：只重跑这一条，结果原地覆盖（不新增分析记录）
-    const rematchBtn = dlg.box.querySelector(".btn-rematch");
-    if (rematchBtn) {
-      rematchBtn.addEventListener("click", async () => {
-        if (!analysisId) return toast("先跑一次匹配再重新匹配", "warn");
-        rematchBtn.disabled = true;
-        rematchBtn.textContent = "重新匹配中…";
+    startPoll() {
+      clearInterval(state.pollTimer);
+      state.pollTimer = setInterval(async () => {
+        if (!state.matchTaskId) return;
         try {
-          const r = await api.post(`/api/match/${analysisId}/rematch`, { encrypt_job_id: jid });
-          const item = r.item || {};
-          const idx = matches.findIndex((x) => x.encrypt_job_id === jid);
-          if (idx >= 0) matches[idx] = item;
-          greetDrafts.delete(jid); // 整条结果重来，旧草稿别顶掉新招呼语
-          renderMatches();
-          if (item.error) toast(`重新匹配又失败了：${item.error}`, "bad");
-          else toast("重新匹配完成，结果已原地覆盖", "ok");
-          // 弹窗还开着才就地刷新；用户已关掉就别把弹窗弹回来
-          if (detailApi && detailApi.jid === jid) openMatchDetail(jid);
-        } catch (err) {
-          toast(err.message || "重新匹配失败", "bad");
-          if (rematchBtn.isConnected) {
-            rematchBtn.disabled = false;
-            rematchBtn.textContent = "重新匹配";
+          const s = await api.get(`/api/match/analyze/${state.matchTaskId}`);
+          helpers.paintMatch(s);
+          if (s.matches && s.matches.length) {
+            state.matches = s.matches;
+            helpers.renderMatches();
+          }
+          if (["done", "error", "cancelled"].includes(s.status)) {
+            clearInterval(state.pollTimer);
+            state.pollTimer = null;
+            state.matchTaskId = null;
+            helpers.setMatchButtons(false);
+            const anSub = root.querySelector("#match-pane")?.querySelector("#an-sub");
+            if (s.status === "done") {
+              if (anSub) anSub.textContent = `完成 · ${state.matches.length} 条`;
+              toast("匹配完成", "ok");
+            } else if (s.status === "error") {
+              if (anSub) anSub.textContent = "失败";
+              toast(s.error || "匹配失败", "bad");
+            } else {
+              if (anSub) anSub.textContent = `已停止 · ${state.matches.length} 条`;
+            }
+            helpers.renderMatches();
+            helpers.renderJobs();
+          }
+        } catch { /* ignore */ }
+      }, 1200);
+    },
+
+    async restoreTask() {
+      let s = null;
+      try {
+        s = await api.get("/api/match/analyze/status");
+      } catch { /* ignore */ }
+      if (!s || !s.task_id) return;
+
+      state.matchTaskId = s.task_id;
+      state.analysisId = s.analysis_id || s.task_id;
+      state.matches = s.matches || [];
+      if (s.resume_id) {
+        state.currentResumeId = s.resume_id;
+        const it = state.resumes.find((x) => x.resume_id === s.resume_id);
+        if (it) state.resumeTitle = it.title || s.resume_id;
+      }
+
+      if (s.status === "running") {
+        helpers.setMatchButtons(true);
+        helpers.paintMatch(s);
+        helpers.renderMatches();
+        helpers.renderJobs();
+        helpers.startPoll();
+        toast("已接上进行中的匹配任务", "ok");
+        return;
+      }
+      if (state.matches.length) {
+        helpers.paintMatch(s);
+        helpers.renderMatches();
+        helpers.renderJobs();
+      }
+    },
+
+    // --- 发送 ---
+    async startDeliver(targets, { mode = "selected", confirmed = false, confirmationToken = "" } = {}) {
+      if (!state.analysisId) return toast("先跑一次匹配再发送", "warn");
+      if (state.deliverTaskId) return toast("已有发送任务在跑，等它结束", "warn");
+      try {
+        const s = await api.post("/api/deliver/start", {
+          analysis_id: state.analysisId,
+          encrypt_job_ids: targets.map((m) => m.encrypt_job_id),
+          mode,
+          confirmed,
+          confirmation_token: confirmationToken,
+        });
+        state.deliverTaskId = s.task_id;
+        toast(`开始发送 · 待发 ${s.total || 0} 条，跳过 ${s.skipped || 0} 条`, "ok");
+        helpers.applyDeliverSnapshot(s);
+        helpers.paintDeliver(s);
+        helpers.startDeliverPoll();
+      } catch (err) {
+        toast(err.message || "发送启动失败", "bad");
+      }
+    },
+
+    applyDeliverSnapshot(s) {
+      let touched = false;
+      (s.items || []).forEach((it) => {
+        const m = state.matches.find((x) => x.encrypt_job_id === it.encrypt_job_id);
+        if (!m) return;
+        m.deliver_status = it.status;
+        if (it.delivered_at) m.delivered_at = it.delivered_at;
+        if (it.error) m.deliver_error = it.error;
+        else if (it.status !== "failed") delete m.deliver_error;
+        touched = true;
+      });
+      if (touched) helpers.renderMatches();
+      if (state.detailApi) {
+        const cur = state.matches.find((x) => x.encrypt_job_id === state.detailApi.jid);
+        if (cur) state.detailApi.setStatus(helpers.deliverLabel(cur));
+      }
+    },
+
+    startDeliverPoll() {
+      clearInterval(state.deliverTimer);
+      state.deliverTimer = setInterval(async () => {
+        let s = null;
+        try {
+          s = await api.get("/api/deliver/status");
+        } catch {
+          return;
+        }
+        if (!s || !s.task_id) {
+          clearInterval(state.deliverTimer);
+          state.deliverTimer = null;
+          state.deliverTaskId = null;
+          return;
+        }
+        state.deliverTaskId = s.task_id;
+        helpers.applyDeliverSnapshot(s);
+        helpers.paintDeliver(s);
+        if (["done", "error", "cancelled"].includes(s.status)) {
+          clearInterval(state.deliverTimer);
+          state.deliverTimer = null;
+          state.deliverTaskId = null;
+          if (s.status === "done") {
+            toast(`发送完成 · 成功 ${s.ok || 0} / 失败 ${s.failed || 0} / 跳过 ${s.skipped || 0}`, "ok");
+          } else if (s.status === "error") {
+            toast(s.error || "发送中断", "bad");
+          } else {
+            toast("发送已取消", "warn");
           }
         }
-      });
-    }
+      }, 1000);
+    },
 
-    // 职位全量信息（经验 / 学历 / 行业 / 规模 / 技能 / 福利 / JD）异步补进来；
-    // 招聘人单独放到顶部工作地点下方
-    api
-      .get("/api/jobs/" + encodeURIComponent(jid))
-      .then((j) => {
-        const boss = dlg.box.querySelector(".md-boss");
-        if (boss) {
-          const who = [j.boss_name, j.boss_title].filter(Boolean).join(" · ");
-          boss.innerHTML = who ? `招聘人 <span style="color:var(--text-1)">${escapeHtml(who)}</span>` : "";
-        }
-        const host = dlg.box.querySelector(".md-job-extra");
-        if (!host) return;
-        const skills = (j.skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
-        const labels = (j.job_labels || []).map((s) => `<span class="pill static">${escapeHtml(s)}</span>`).join(" ");
-        const welfare = (j.welfare_list || []).map((s) => `<span class="pill static">${escapeHtml(s)}</span>`).join(" ");
-        host.innerHTML = `
-          <div class="job-meta">
-            <span class="pill static">${escapeHtml(j.job_experience || "—")}</span>
-            <span class="pill static">${escapeHtml(j.job_degree || "—")}</span>
-            <span class="pill static">${escapeHtml(j.brand_industry || "—")}</span>
-            <span class="pill static">${escapeHtml(j.brand_scale_name || "—")}</span>
-            ${j.brand_stage_name ? `<span class="pill static">${escapeHtml(j.brand_stage_name)}</span>` : ""}
-          </div>
-          ${skills ? `<div class="card-sub mb-8 mt-12">技能</div><div class="job-meta">${skills}</div>` : ""}
-          ${labels ? `<div class="card-sub mb-8 mt-12">标签</div><div class="pills">${labels}</div>` : ""}
-          ${welfare ? `<div class="card-sub mb-8 mt-12">福利</div><div class="pills">${welfare}</div>` : ""}
-          <div class="flex between center mb-8 mt-12">
-            <div class="card-sub">职位描述</div>
-            <span class="pill ${j.job_desc ? "accent" : "static"}">${j.job_desc ? "已抓描述" : "无描述"}</span>
-          </div>
-          ${j.job_desc
-            ? `<details class="acc"><summary>展开 JD（${String(j.job_desc).length} 字）</summary><div class="acc-body" style="white-space:pre-wrap">${escapeHtml(j.job_desc)}</div></details>`
-            : `<div class="muted" style="font-size:12px">列表接口不带 JD；到「职位」页点「补抓描述」。</div>`}
-        `;
-      })
-      .catch(() => {
-        const host = dlg.box.querySelector(".md-job-extra");
-        if (host) host.innerHTML = `<div class="muted" style="font-size:12px">职位详情不可用（可能已从库里删除）</div>`;
-      });
-  }
-
-  function deliverLabel(m) {
-    if (m.deliver_status === "failed") return `失败：${m.deliver_error || ""}`;
-    if (m.delivered_at) return "已发送";
-    return m.deliver_status === "sending" ? "发送中…" : "";
-  }
-
-  // ---------- 发送：三种粒度共用一个任务（C6） ----------
-  async function startDeliver(targets, { mode = "selected", confirmed = false, confirmationToken = "" } = {}) {
-    if (!analysisId) return toast("先跑一次匹配再发送", "warn");
-    if (deliverTaskId) return toast("已有发送任务在跑，等它结束", "warn");
-    try {
-      const s = await api.post("/api/deliver/start", {
-        analysis_id: analysisId,
-        encrypt_job_ids: targets.map((m) => m.encrypt_job_id),
-        mode,
-        confirmed,
-        confirmation_token: confirmationToken,
-      });
-      deliverTaskId = s.task_id;
-      toast(`开始发送 · 待发 ${s.total || 0} 条，跳过 ${s.skipped || 0} 条已发送`, "ok");
-      applyDeliverSnapshot(s);
-      paintDeliver(s);
-      startDeliverPoll();
-    } catch (err) {
-      toast(err.message || "发送启动失败", "bad");
-    }
-  }
-
-  /** 把发送任务的每条状态贴回对应的匹配结果行。 */
-  function applyDeliverSnapshot(s) {
-    let touched = false;
-    (s.items || []).forEach((it) => {
-      if (it.status === "skipped" && it.error === "已发送") return;
-      const m = matches.find((x) => x.encrypt_job_id === it.encrypt_job_id);
-      if (!m) return;
-      m.deliver_status = it.status;
-      if (it.delivered_at) m.delivered_at = it.delivered_at;
-      if (it.error) m.deliver_error = it.error;
-      else if (it.status !== "failed") delete m.deliver_error;
-      touched = true;
-    });
-    if (touched) renderMatches();
-    // 详情弹窗若开着，里面的发送状态也跟着走
-    if (detailApi) {
-      const cur = matches.find((x) => x.encrypt_job_id === detailApi.jid);
-      if (cur) detailApi.setStatus(deliverLabel(cur));
-    }
-  }
-
-  function startDeliverPoll() {
-    clearInterval(deliverTimer);
-    deliverTimer = setInterval(async () => {
+    async restoreDeliver() {
       let s = null;
       try {
         s = await api.get("/api/deliver/status");
       } catch {
         return;
       }
-      if (!s || !s.task_id) {
-        stopDeliverPoll();
-        return;
+      if (!s || !s.task_id) return;
+      helpers.applyDeliverSnapshot(s);
+      helpers.paintDeliver(s);
+      if (s.status === "running") {
+        state.deliverTaskId = s.task_id;
+        helpers.startDeliverPoll();
+        toast("已接上进行中的发送任务", "ok");
       }
-      deliverTaskId = s.task_id;
-      applyDeliverSnapshot(s);
-      paintDeliver(s);
-      if (["done", "error", "cancelled"].includes(s.status)) {
-        stopDeliverPoll();
-        if (s.status === "done") {
-          toast(`发送完成 · 成功 ${s.ok || 0} / 失败 ${s.failed || 0} / 跳过 ${s.skipped || 0}`, "ok");
-        } else if (s.status === "error") {
-          toast(s.error || "发送中断", "bad");
-        } else {
-          toast("发送已取消", "warn");
-        }
-      }
-    }, 1000);
-  }
+    },
 
-  function stopDeliverPoll() {
-    clearInterval(deliverTimer);
-    deliverTimer = null;
-    deliverTaskId = null;
-  }
-
-  /** 刷新回来接上还在跑的发送任务（跟匹配任务一样的待遇）。 */
-  async function restoreDeliver() {
-    let s = null;
-    try {
-      s = await api.get("/api/deliver/status");
-    } catch {
-      return;
-    }
-    if (!s || !s.task_id) return;
-    applyDeliverSnapshot(s);
-    paintDeliver(s);
-    if (s.status === "running") {
-      deliverTaskId = s.task_id;
-      startDeliverPoll();
-      toast("已接上进行中的发送任务", "ok");
-    }
-  }
-
-  // ---------- 发送入口（确认弹窗 → startDeliver） ----------
-  $("btn-send-all").addEventListener("click", () => {
-    const min = minScore();
-    const targets = sendAllTargets();
-    if (!targets.length) return toast(`没有「评分 ≥ ${min}、安全状态完整且有招呼语」的条目`, "warn");
-    confirmAndSend(targets, `筛选条件：评分 ≥ ${min}`, { mode: "all" });
-  });
-  $("btn-send-sel").addEventListener("click", () => {
-    const targets = matches.filter((m) => selected.has(m.encrypt_job_id) && !m.delivered_at && (m.greeting || "").trim());
-    if (!targets.length) return toast("选中的条目里没有「有招呼语且未发送」的", "warn");
-    confirmAndSend(targets, "选中的职位将按匹配时安全快照执行策略", { mode: "selected" });
-  });
-
-  function confirmAndSend(targets, scopeNote = "", { mode = "selected" } = {}) {
-    const restricted = targets.filter((m) => sendRestriction(m));
-    const restrictionNote = restricted.length
-      ? `<div class="banner warn mb-12">其中 ${restricted.length} 条受限职位：${escapeHtml([...new Set(restricted.map(sendRestriction))].join("、"))}。${mode === "all" ? "一键发送会自动排除它们。" : "确认后才会允许发送这些明确选中的职位。"}</div>`
-      : "";
-    const rows = targets
-      .map(
-        (m) => `
+    confirmAndSend(targets, scopeNote = "", { mode = "selected" } = {}) {
+      const restricted = targets.filter((m) => helpers.sendRestriction(m));
+      const restrictionNote = restricted.length
+        ? `<div class="banner warn mb-12">其中 ${restricted.length} 条受限职位：${escapeHtml([...new Set(restricted.map(helpers.sendRestriction))].join("、"))}。${mode === "all" ? "一键发送会自动排除它们。" : "确认后才会允许发送这些明确选中的职位。"}</div>`
+        : "";
+      const rows = targets.map((m) => `
         <div style="padding:10px 0;border-bottom:1px solid var(--stroke)">
           <div><strong>${escapeHtml(m.job_name)}</strong> <span class="muted">@ ${escapeHtml(m.brand_name)}</span>
             <span class="pill accent" style="margin-left:6px">评分 ${m.match_score || 0}</span>
-            ${sendRestriction(m) ? `<span class="pill static bad" style="margin-left:6px">${escapeHtml(sendRestriction(m))}</span>` : ""}
+            ${helpers.sendRestriction(m) ? `<span class="pill static bad" style="margin-left:6px">${escapeHtml(helpers.sendRestriction(m))}</span>` : ""}
           </div>
           <div class="greeting-box mt-8" style="font-size:12px">${escapeHtml(m.greeting || "（无招呼语）")}</div>
-        </div>`
-      )
-      .join("");
-    const dlg = modal({
-      title: `确认发送 · 共 ${targets.length} 条`,
-      body: `
-        <div class="banner warn mb-12">将先<strong>建立会话</strong>，再把下方的招呼语正文作为<strong>聊天消息</strong>单独发给招聘方。</div>
-        ${restrictionNote}
-        ${restrictionNote}
-        ${scopeNote ? `<div class="muted mb-8" style="font-size:12px">${escapeHtml(scopeNote)}</div>` : ""}
-        ${rows}
-        <div class="btn-row mt-16">
-          <button class="btn primary" id="m-confirm">确认发送</button>
-          <button class="btn ghost" id="m-cancel">取消</button>
-        </div>`,
-      wide: true,
-    });
-    // 用自己的 close，别 document.querySelector——详情弹窗可能压在下面
-    const ok = dlg.box.querySelector("#m-confirm");
-    const no = dlg.box.querySelector("#m-cancel");
-    if (!ok || !no) return;
-    no.addEventListener("click", () => dlg.close());
-    ok.addEventListener("click", () => {
-      dlg.close();
-      startDeliver(targets, { mode, confirmed: true, confirmationToken: mode === "manual" ? `ui-${Date.now()}` : "" });
+        </div>`).join("");
+      const dlg = modal({
+        title: `确认发送 · 共 ${targets.length} 条`,
+        body: `
+          <div class="banner warn mb-12">将先<strong>建立会话</strong>，再把下方的招呼语正文作为<strong>聊天消息</strong>单独发给招聘方。</div>
+          ${restrictionNote}
+          ${scopeNote ? `<div class="muted mb-8" style="font-size:12px">${escapeHtml(scopeNote)}</div>` : ""}
+          ${rows}
+          <div class="btn-row mt-16">
+            <button class="btn primary" id="m-confirm">确认发送</button>
+            <button class="btn ghost" id="m-cancel">取消</button>
+          </div>`,
+        wide: true,
+      });
+      const ok = dlg.box.querySelector("#m-confirm");
+      const no = dlg.box.querySelector("#m-cancel");
+      if (!ok || !no) return;
+      no.addEventListener("click", () => dlg.close());
+      ok.addEventListener("click", () => {
+        dlg.close();
+        helpers.startDeliver(targets, { mode, confirmed: true, confirmationToken: mode === "manual" ? `ui-${Date.now()}` : "" });
+      });
+    },
+
+    // --- 详情弹窗 ---
+    openMatchDetail(jid) {
+      const m = state.matches.find((x) => x.encrypt_job_id === jid);
+      if (!m) return;
+      if (state.detailApi) {
+        state.detailApi.close();
+        state.detailApi = null;
+      }
+
+      const score = m.match_score || 0;
+      const failed = !!(m.error || "").trim();
+      const verdict = (m.verdict || "").trim();
+      const advice = (m.advice || "").trim();
+      const matched = (m.matched_skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
+      const missing = (m.missing_skills || []).map((s) => `<span class="pill static bad">${escapeHtml(s)}</span>`).join(" ");
+      const pros = (m.pros || []).map((p) => `<div class="muted" style="font-size:12.5px">✓ ${escapeHtml(p)}</div>`).join("");
+      const cons = (m.cons || []).map((c) => `<div class="muted" style="font-size:12.5px">✗ ${escapeHtml(c)}</div>`).join("");
+      const draft = state.greetDrafts.has(jid) ? state.greetDrafts.get(jid) : (m.greeting || "");
+      const safetyLabels = [
+        m.company_blacklisted ? "公司黑名单" : "",
+        m.jd_blacklisted ? "JD 关键词黑名单" : "",
+        !m.jd_rule_checked ? "JD 规则未检查" : "",
+        m.jd_status ? `JD 状态：${m.jd_status}` : "",
+        m.auto_delivery_blocked ? "自动投递已阻断" : "",
+      ].filter(Boolean);
+      const snapshotRules = (m.matched_rule_snapshot || []).map((rule) =>
+        `<li>${escapeHtml(rule.rule_type || "规则")} · ${escapeHtml(rule.pattern || "")} · ${escapeHtml(rule.matched_text || "")}</li>`
+      ).join("");
+
+      const cool = helpers.greetState(m);
+      const sendDisabled = cool.in_cooldown ? "disabled" : "";
+      const coolNote = cool.in_cooldown
+        ? `<div class="banner warn mt-8">该岗位 ${escapeHtml(cool.last_date)} 已发送过，${escapeHtml(cool.cooldown_date)} 后可再次发送</div>`
+        : m.delivered_at && cool.last_date
+          ? `<div class="muted mt-8" style="font-size:11px">上次发送 ${escapeHtml(cool.last_date)}</div>`
+          : "";
+
+      const dlg = modal({
+        wide: true,
+        body: `
+          <div class="flex between gap-12 mb-16 wrap" style="align-items:flex-start">
+            <div>
+              <div class="flex center gap-12">
+                ${scoreRing(score)}
+                <div>
+                  <div style="font-size:17px;font-weight:650">${escapeHtml(m.brand_name)}</div>
+                  <div class="muted" style="font-size:12.5px">${escapeHtml(m.location || "")}</div>
+                </div>
+              </div>
+              <div class="md-boss muted mt-12" style="font-size:12.5px"></div>
+            </div>
+            <div class="job-salary">${escapeHtml(m.salary_desc || "面议")}</div>
+          </div>
+
+          <div class="card-sub mb-8">匹配分析</div>
+          <div class="pills mb-8">${
+            safetyLabels.length
+              ? safetyLabels.map((label) => `<span class="pill static bad">${escapeHtml(label)}</span>`).join(" ")
+              : `<span class="pill static accent">安全状态已检查</span>`
+          } ${
+            cool.in_cooldown
+              ? `<span class="pill static warn">冷却中 · ${escapeHtml(cool.cooldown_date)} 可再发</span>`
+              : helpers.sendRestriction(m)
+                ? `<span class="pill static bad">不可发送</span>`
+                : m.deliver_status === "failed"
+                  ? `<span class="pill static bad">发送失败</span>`
+                  : m.delivered_at
+                    ? `<span class="pill static accent">已发送</span>`
+                    : m.deliver_status === "sending"
+                      ? `<span class="pill static">发送中…</span>`
+                      : !(m.greeting || "").trim()
+                        ? `<span class="pill static warn">无招呼语</span>`
+                        : `<span class="pill static ok">可发送</span>`
+          }</div>
+          ${snapshotRules ? `<details class="acc mb-8"><summary>匹配时命中规则快照</summary><ul class="acc-body">${snapshotRules}</ul></details>` : ""}
+          ${verdict ? `<div class="muted mb-8" style="font-size:12.5px"><span class="muted" style="font-size:11px">结论</span> ${escapeHtml(verdict)}</div>` : ""}
+          ${advice ? `<div class="muted mb-8" style="font-size:12.5px"><span class="muted" style="font-size:11px">建议</span> ${escapeHtml(advice)}</div>` : ""}
+          ${matched ? `<div class="card-sub mb-8 mt-12">技能匹配</div><div class="job-meta">${matched}</div>` : ""}
+          ${missing ? `<div class="card-sub mb-8 mt-12">缺口</div><div class="pills">${missing}</div>` : ""}
+          ${pros ? `<div class="card-sub mb-8 mt-12">优点</div>${pros}` : ""}
+          ${cons ? `<div class="card-sub mb-8 mt-12">缺点</div>${cons}` : ""}
+          ${!verdict && !advice && !matched && !missing && !pros && !cons ? `<div class="muted mb-8" style="font-size:12px">这条没有分析内容${m.error ? "（匹配失败）" : ""}</div>` : ""}
+
+          <div class="card-sub mb-8 mt-16">职位信息</div>
+          <div class="md-job-extra"><div class="muted" style="font-size:12px">加载职位详情…</div></div>
+
+          <div class="card-sub mb-8 mt-16">招呼语 <span class="muted" style="font-size:11px">生成后先存草稿，满意再点保存</span></div>
+          <textarea class="input mono greeting-edit" rows="3" style="width:100%;font-size:12.5px">${escapeHtml(draft)}</textarea>
+          <div class="btn-row mt-8">
+            ${failed ? `<button class="btn sm primary btn-rematch">重新匹配</button>` : ""}
+            <button class="btn sm btn-regen-greet">重新生成</button>
+            <button class="btn sm ghost btn-save-greet">保存招呼语</button>
+            <button class="btn sm primary btn-send-one" ${sendDisabled}>发送</button>
+            <span class="muted send-status" style="font-size:11.5px">${escapeHtml(helpers.deliverLabel(m))}</span>
+          </div>
+          ${coolNote}
+          <div class="muted draft-hint mt-8" style="font-size:11px;display:none">草稿未保存，满意后点「保存招呼语」；可反复点「重新生成」换一版</div>
+          ${failed ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>` : ""}
+        `,
+        onClose: () => {
+          if (state.detailApi && state.detailApi.jid === jid) state.detailApi = null;
+        },
+      });
+
+      state.detailApi = {
+        jid,
+        close: dlg.close,
+        setStatus: (text) => {
+          const el = dlg.box.querySelector(".send-status");
+          if (el) el.textContent = text;
+        },
+      };
+
+      const ta = dlg.box.querySelector(".greeting-edit");
+      const draftHint = dlg.box.querySelector(".draft-hint");
+      const syncDraft = () => {
+        state.greetDrafts.set(jid, ta.value);
+        const cur = state.matches.find((x) => x.encrypt_job_id === jid);
+        const dirty = ta.value.trim() !== (cur?.greeting || "").trim();
+        if (draftHint) draftHint.style.display = dirty ? "" : "none";
+      };
+      ta.addEventListener("input", syncDraft);
+      syncDraft();
+
+      const regenBtn = dlg.box.querySelector(".btn-regen-greet");
+      regenBtn.addEventListener("click", async () => {
+        if (!state.analysisId) return toast("先跑一次匹配再生成招呼语", "warn");
+        regenBtn.disabled = true;
+        regenBtn.textContent = "生成中…";
+        try {
+          const r = await api.post(`/api/match/${state.analysisId}/greeting/regenerate`, {
+            encrypt_job_id: jid,
+          });
+          const text = (r.greeting || "").trim();
+          if (!text) return toast("AI 没生成出招呼语，再点一次试试", "bad");
+          ta.value = text;
+          syncDraft();
+          toast("已生成新草稿（未保存，可反复生成）", "ok");
+        } catch (err) {
+          toast(err.message || "生成失败", "bad");
+        } finally {
+          regenBtn.disabled = false;
+          regenBtn.textContent = "重新生成";
+        }
+      });
+
+      dlg.box.querySelector(".btn-save-greet").addEventListener("click", async () => {
+        const text = dlg.box.querySelector(".greeting-edit").value;
+        try {
+          await api.patch(`/api/match/${state.analysisId}/greeting`, {
+            encrypt_job_id: jid,
+            greeting: text,
+          });
+          const cur = state.matches.find((x) => x.encrypt_job_id === jid);
+          if (cur) cur.greeting = text;
+          state.greetDrafts.delete(jid);
+          syncDraft();
+          toast("招呼语已保存", "ok");
+        } catch (err) {
+          toast(err.message || "保存失败", "bad");
+        }
+      });
+
+      dlg.box.querySelector(".btn-send-one").addEventListener("click", () => {
+        const cur = state.matches.find((x) => x.encrypt_job_id === jid);
+        if (cur) helpers.confirmAndSend([cur], "单条手动发送需要单独确认；后端仍会按匹配时快照校验", { mode: "manual" });
+      });
+
+      const rematchBtn = dlg.box.querySelector(".btn-rematch");
+      if (rematchBtn) {
+        rematchBtn.addEventListener("click", async () => {
+          if (!state.analysisId) return toast("先跑一次匹配再重新匹配", "warn");
+          rematchBtn.disabled = true;
+          rematchBtn.textContent = "重新匹配中…";
+          try {
+            const r = await api.post(`/api/match/${state.analysisId}/rematch`, { encrypt_job_id: jid });
+            const item = r.item || {};
+            const idx = state.matches.findIndex((x) => x.encrypt_job_id === jid);
+            if (idx >= 0) state.matches[idx] = item;
+            state.greetDrafts.delete(jid);
+            helpers.renderMatches();
+            if (item.error) toast(`重新匹配又失败了：${item.error}`, "bad");
+            else toast("重新匹配完成，结果已原地覆盖", "ok");
+            if (state.detailApi && state.detailApi.jid === jid) helpers.openMatchDetail(jid);
+          } catch (err) {
+            toast(err.message || "重新匹配失败", "bad");
+            if (rematchBtn.isConnected) {
+              rematchBtn.disabled = false;
+              rematchBtn.textContent = "重新匹配";
+            }
+          }
+        });
+      }
+
+      // 职位全量信息
+      api.get("/api/jobs/" + encodeURIComponent(jid))
+        .then((j) => {
+          const boss = dlg.box.querySelector(".md-boss");
+          if (boss) {
+            const who = [j.boss_name, j.boss_title].filter(Boolean).join(" · ");
+            boss.innerHTML = who ? `招聘人 <span style="color:var(--text-1)">${escapeHtml(who)}</span>` : "";
+          }
+          const host = dlg.box.querySelector(".md-job-extra");
+          if (!host) return;
+          const skills = (j.skills || []).map((s) => `<span class="chip">${escapeHtml(s)}</span>`).join(" ");
+          const labels = (j.job_labels || []).map((s) => `<span class="pill static">${escapeHtml(s)}</span>`).join(" ");
+          const welfare = (j.welfare_list || []).map((s) => `<span class="pill static">${escapeHtml(s)}</span>`).join(" ");
+          host.innerHTML = `
+            <div class="job-meta">
+              <span class="pill static">${escapeHtml(j.job_experience || "—")}</span>
+              <span class="pill static">${escapeHtml(j.job_degree || "—")}</span>
+              <span class="pill static">${escapeHtml(j.brand_industry || "—")}</span>
+              <span class="pill static">${escapeHtml(j.brand_scale_name || "—")}</span>
+              ${j.brand_stage_name ? `<span class="pill static">${escapeHtml(j.brand_stage_name)}</span>` : ""}
+            </div>
+            ${skills ? `<div class="card-sub mb-8 mt-12">技能</div><div class="job-meta">${skills}</div>` : ""}
+            ${labels ? `<div class="card-sub mb-8 mt-12">标签</div><div class="pills">${labels}</div>` : ""}
+            ${welfare ? `<div class="card-sub mb-8 mt-12">福利</div><div class="pills">${welfare}</div>` : ""}
+            <div class="flex between center mb-8 mt-12">
+              <div class="card-sub">职位描述</div>
+              <span class="pill ${j.job_desc ? "accent" : "static"}">${j.job_desc ? "已抓描述" : "无描述"}</span>
+            </div>
+            ${j.job_desc
+              ? `<details class="acc"><summary>展开 JD（${String(j.job_desc).length} 字）</summary><div class="acc-body" style="white-space:pre-wrap">${escapeHtml(j.job_desc)}</div></details>`
+              : `<div class="muted" style="font-size:12px">列表接口不带 JD；到「职位」页点「补抓描述」。</div>`}
+          `;
+        })
+        .catch(() => {
+          const host = dlg.box.querySelector(".md-job-extra");
+          if (host) host.innerHTML = `<div class="muted" style="font-size:12px">职位详情不可用（可能已从库里删除）</div>`;
+        });
+    },
+
+    // --- 清空当前分析，恢复初始状态 ---
+    clearAnalysis() {
+      state.analysisId = null;
+      state.matches = [];
+      state.greetDrafts.clear();
+      if (state.detailApi) {
+        state.detailApi.close();
+        state.detailApi = null;
+      }
+      const pane = root.querySelector("#match-pane");
+      const anSub = pane?.querySelector("#an-sub");
+      const clearBtn = pane?.querySelector("#btn-clear-analysis");
+      if (anSub) anSub.textContent = "尚未匹配";
+      if (clearBtn) clearBtn.classList.add("hidden");
+      helpers.renderMatches();
+      helpers.renderJobs();
+      helpers.updateSendCounts();
+      toast("已清空分析结果", "ok");
+    },
+
+    // --- 载入历史分析 ---
+    loadAnalysisIntoWorkbench(data) {
+      state.analysisId = data.analysis_id;
+      state.matches = data.matches || [];
+      if (state.detailApi) {
+        state.detailApi.close();
+        state.detailApi = null;
+      }
+      state.greetDrafts.clear();
+      helpers.renderMatches();
+      helpers.renderJobs();
+    },
+  };
+
+  // ---------- 目录切换 ----------
+  const pane = root.querySelector("#match-pane");
+  const tabs = [...root.querySelectorAll(".settings-tab")];
+  let active = "workbench";
+  let loaded = { workbench: false, deliver: false, crawls: false, history: false };
+
+  function setActive(name) {
+    active = name;
+    tabs.forEach((tab) => {
+      const on = tab.dataset.tab === name;
+      tab.classList.toggle("active", on);
+      tab.setAttribute("aria-current", on ? "page" : "false");
     });
   }
 
-  // ---------- 历史 ----------
-  async function loadHistory() {
-    try {
-      const r = await api.get("/api/match/analyses");
-      const items = (r.items || []).filter((a) => true);
-      $("history-list").innerHTML = items
-        .map(
-          (a) => `
-          <div class="flex between center gap-12" style="padding:10px 0;border-bottom:1px solid var(--stroke)">
-            <div>
-              <div>${escapeHtml(a.resume_title || a.analysis_id)}</div>
-              <div class="muted" style="font-size:11px">${fmtTime(a.created_at)} · ${a.job_count} 个职位</div>
-            </div>
-            <div class="flex center gap-8">
-              <span class="pill accent">最高 ${a.top_score}</span>
-              <button class="btn sm ghost" data-load="${escapeHtml(a.analysis_id)}">载入</button>
-              <button class="btn sm danger" data-del="${escapeHtml(a.analysis_id)}">删</button>
-            </div>
-          </div>`
-        )
-        .join("") || `<div class="muted">还没有历史分析</div>`;
+  async function show(name) {
+    if (name === active && loaded[name]) return;
+    setActive(name);
+    loaded[name] = true;
+    pane.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>加载中…</p></div>`;
+    if (name === "workbench") {
+      renderWorkbench(pane, state, helpers);
+      return;
+    }
+    if (name === "deliver") {
+      renderDeliver(pane, state, helpers);
+      return;
+    }
+    if (name === "crawls") {
+      await renderCrawls(pane, state, helpers);
+      return;
+    }
+    await renderHistory(pane, state, helpers);
+  }
 
-      $("history-list").querySelectorAll("button[data-load]").forEach((b) => {
-        b.addEventListener("click", async () => {
-          try {
-            const data = await api.get("/api/match/analyses/" + b.dataset.load);
-            analysisId = data.analysis_id;
-            matches = data.matches || [];
-            if (detailApi) {
-              detailApi.close();
-              detailApi = null;
-            }
-            greetDrafts.clear();
-            $("an-sub").textContent = `历史 · ${fmtTime(data.created_at)} · ${matches.length} 条`;
-            renderMatches();
-            renderJobs();
-            $("results-card").scrollIntoView({ behavior: "smooth", block: "start" });
-            toast("已载入历史分析", "ok");
-          } catch (err) {
-            toast(err.message || "载入失败", "bad");
-          }
-        });
-      });
-      $("history-list").querySelectorAll("button[data-del]").forEach((b) => {
-        b.addEventListener("click", async () => {
-          if (!confirm("删除这份分析？")) return;
-          try {
-            await api.del("/api/match/analyses/" + b.dataset.del);
-            if (analysisId === b.dataset.del) {
-              analysisId = null;
-              matches = [];
-              if (detailApi) {
-                detailApi.close();
-                detailApi = null;
-              }
-              greetDrafts.clear();
-              renderMatches();
-            }
-            loadHistory();
-            toast("已删除", "ok");
-          } catch (err) {
-            toast(err.message || "删除失败", "bad");
-          }
-        });
-      });
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => show(tab.dataset.tab));
+    tab.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        show(tab.dataset.tab);
+      }
+    });
+  });
+
+  // ---------- 初始加载 ----------
+  async function loadResumes() {
+    try {
+      const r = await api.get("/api/resume/list");
+      state.resumes = r.items || [];
+      if (state.resumes.length) {
+        state.currentResumeId = state.resumes[0].resume_id;
+        state.resumeTitle = state.resumes[0].title || state.currentResumeId;
+      }
     } catch { /* ignore */ }
   }
 
   await loadResumes();
-  await loadMinScore();
-  await loadJobs();
-  await loadHistory();
-  await restoreTask();
-  await restoreDeliver();
-  updateSendCounts();
+  await helpers.loadJobs();
+  await helpers.restoreTask();
+  await helpers.restoreDeliver();
+  await show("workbench");
 
   return () => {
-    clearInterval(pollTimer);
-    clearInterval(deliverTimer);
+    clearInterval(state.pollTimer);
+    clearInterval(state.deliverTimer);
   };
 }

@@ -42,7 +42,8 @@ def jobs_js() -> str:
 
 @pytest.fixture(scope="module")
 def match_js() -> str:
-    return _read("js/views/match.js")
+    # 拆分后契约断言要覆盖壳层 + 四个子目录视图
+    return _read("js/views/match.js") + _read("js/views/match_workbench.js") + _read("js/views/match_deliver.js") + _read("js/views/match_crawls.js") + _read("js/views/match_history.js")
 
 
 @pytest.fixture(scope="module")

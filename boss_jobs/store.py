@@ -22,7 +22,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import boss_db
 
@@ -56,6 +56,9 @@ INSERT INTO jobs (
     jd_status, jd_error, jd_rule_checked, jd_rule_checked_at,
     is_blacklisted, company_blacklisted, jd_blacklisted, blacklist_types,
     matched_rule_ids, matched_rule_snapshot, blacklist_checked_at, auto_delivery_blocked
+    -- last_greeted_at 故意不进 INSERT/UPDATE：
+    -- 重抓（UPSERT）不改写发送史，30 天冷却以「最近一次成功发送」为准。
+    -- 写入只走 update_last_greeted_at()。
 ) VALUES (
     :encrypt_job_id, :job_name, :brand_name, :location, :salary_desc,
     :job_experience, :job_degree, :brand_industry, :brand_scale_name,
@@ -101,8 +104,23 @@ ON CONFLICT(encrypt_job_id) DO UPDATE SET
 _INSERT_PAGE = """
 INSERT INTO fetch_pages (
     page, raw_count, kept_count, dropped_count,
-    inserted_count, updated_count, has_more, note, fetched_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    inserted_count, updated_count, has_more, note, fetched_at, task_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+#: 任务 ↔ 岗位归属：同一职位在同一任务里重复出现时保留首次动作
+#: （inserted 比 updated 更有信息量），冲突不覆盖。
+_INSERT_TASK_JOB = """
+INSERT OR IGNORE INTO crawl_task_jobs (task_id, encrypt_job_id, action)
+VALUES (?, ?, ?)
+"""
+
+_INSERT_CRAWL_TASK = """
+INSERT INTO crawl_tasks (
+    task_id, source, status, created_at, started_at, ended_at,
+    params_json, stats_json, job_count, inserted_count, updated_count,
+    error, stopped_reason
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -128,8 +146,12 @@ class JobStore:
     # 写入
     # ------------------------------------------------------------------ #
 
-    def save_page(self, result: PageResult) -> SaveOutcome:
-        """把一页的清洗结果立刻入库，同时记一行 ``fetch_pages`` 流水。"""
+    def save_page(self, result: PageResult, *, task_id: str = "") -> SaveOutcome:
+        """把一页的清洗结果立刻入库，同时记一行 ``fetch_pages`` 流水。
+
+        ``task_id`` 非空时，本页职位还会写进 ``crawl_task_jobs``（任务↔岗位归属），
+        ``fetch_pages`` 也带上任务号——历史抓取任务能回看「这次带回了哪些职位」。
+        """
         inserted = 0
         updated = 0
         skipped = 0
@@ -144,8 +166,12 @@ class JobStore:
                 self._conn.execute(_INSERT_JOB, _job_params(job, now))
                 if before is None:
                     inserted += 1
+                    action = "inserted"
                 else:
                     updated += 1
+                    action = "updated"
+                if task_id:
+                    self._conn.execute(_INSERT_TASK_JOB, (task_id, job.encrypt_job_id, action))
 
             skipped = result.dropped_count
             self._conn.execute(
@@ -160,6 +186,7 @@ class JobStore:
                     1 if result.has_more else 0,
                     "; ".join(result.dropped)[:500],
                     now,
+                    task_id or "",
                 ),
             )
 
@@ -174,9 +201,9 @@ class JobStore:
         )
         return SaveOutcome(page=result.page, inserted=inserted, updated=updated, skipped=skipped)
 
-    def save_pages(self, results: Iterable[PageResult]) -> list[SaveOutcome]:
+    def save_pages(self, results: Iterable[PageResult], *, task_id: str = "") -> list[SaveOutcome]:
         """连续存多页（离线回放用；线上是抓一页存一页）。"""
-        return [self.save_page(result) for result in results]
+        return [self.save_page(result, task_id=task_id) for result in results]
 
     def update_job_desc(
         self, encrypt_job_id: str, job_desc: str, *, fetched_at: str | None = None,
@@ -239,6 +266,225 @@ class JobStore:
                 ),
             )
         return cur.rowcount > 0
+
+    def update_last_greeted_at(self, encrypt_job_id: str, greeted_at: str | None = None) -> bool:
+        """记一次「招呼语发送成功」。失败/跳过不写，抓取 UPSERT 也不会碰这一列。
+
+        :param greeted_at: ``%Y-%m-%d %H:%M:%S``；省略 = 服务器本地当前时间。
+        """
+        cur = self._conn.execute(
+            "UPDATE jobs SET last_greeted_at = ? WHERE encrypt_job_id = ?",
+            (greeted_at or _now(), encrypt_job_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def get_last_greeted_at(self, encrypt_job_id: str) -> str:
+        """该岗位最近一次发送成功时间；读不到 / 从未发送 → 空串。"""
+        row = self._conn.execute(
+            "SELECT last_greeted_at FROM jobs WHERE encrypt_job_id = ?",
+            (encrypt_job_id,),
+        ).fetchone()
+        return str(row["last_greeted_at"] or "") if row else ""
+
+    def last_greeted_map(self, encrypt_job_ids: Sequence[str]) -> dict[str, str]:
+        """批量读发送史（读接口出门前给 match 条目补冷却用）。"""
+        ids = [str(i) for i in encrypt_job_ids if i]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = self._conn.execute(
+            f"SELECT encrypt_job_id, last_greeted_at FROM jobs "
+            f"WHERE encrypt_job_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        return {str(r["encrypt_job_id"]): str(r["last_greeted_at"] or "") for r in rows}
+
+    # ------------------------------------------------------------------ #
+    # 抓取任务档案（只读追溯流水：不提供删除/改写）
+    # ------------------------------------------------------------------ #
+
+    def create_crawl_task(
+        self,
+        task_id: str,
+        *,
+        source: str = "search",
+        status: str = "running",
+        created_at: float | None = None,
+        started_at: float | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> None:
+        """``crawl_tasks.start()`` 时插一行（status=running）+ 写入配置快照。"""
+        now = time.time() if created_at is None else float(created_at)
+        self._conn.execute(
+            _INSERT_CRAWL_TASK,
+            (
+                task_id,
+                source or "search",
+                status or "running",
+                now,
+                now if started_at is None else float(started_at),
+                0.0,
+                json.dumps(dict(params or {}), ensure_ascii=False),
+                "{}",
+                0,
+                0,
+                0,
+                "",
+                "",
+            ),
+        )
+        self._conn.commit()
+
+    def finish_crawl_task(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        ended_at: float | None = None,
+        stats: Mapping[str, Any] | None = None,
+        error: str = "",
+        stopped_reason: str = "",
+        job_count: int | None = None,
+        inserted_count: int | None = None,
+        updated_count: int | None = None,
+    ) -> bool:
+        """结束时回写状态与统计。``job_count`` 等省略则按关联表现算。"""
+        with self._conn:
+            if job_count is None:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM crawl_task_jobs WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                job_count = int(row["n"]) if row else 0
+            if inserted_count is None or updated_count is None:
+                rows = self._conn.execute(
+                    "SELECT action, COUNT(*) AS n FROM crawl_task_jobs "
+                    "WHERE task_id = ? GROUP BY action",
+                    (task_id,),
+                ).fetchall()
+                counts = {str(r["action"]): int(r["n"]) for r in rows}
+                if inserted_count is None:
+                    inserted_count = counts.get("inserted", 0)
+                if updated_count is None:
+                    updated_count = counts.get("updated", 0)
+            cur = self._conn.execute(
+                "UPDATE crawl_tasks SET status=?, ended_at=?, stats_json=?, error=?, "
+                "stopped_reason=?, job_count=?, inserted_count=?, updated_count=? "
+                "WHERE task_id=?",
+                (
+                    status,
+                    time.time() if ended_at is None else float(ended_at),
+                    json.dumps(dict(stats or {}), ensure_ascii=False),
+                    error or "",
+                    stopped_reason or "",
+                    int(job_count),
+                    int(inserted_count),
+                    int(updated_count),
+                    task_id,
+                ),
+            )
+        return cur.rowcount > 0
+
+    def touch_crawl_task_stats(self, task_id: str, stats: Mapping[str, Any]) -> None:
+        """进行中任务的中间统计落库（落库失败不影响抓取本体）。"""
+        self._conn.execute(
+            "UPDATE crawl_tasks SET stats_json=? WHERE task_id=?",
+            (json.dumps(dict(stats), ensure_ascii=False), task_id),
+        )
+        self._conn.commit()
+
+    def get_crawl_task(self, task_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM crawl_tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return _row_to_crawl_task(row) if row else None
+
+    def list_crawl_tasks(self, *, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+        """历史任务，最近的在前。进行中任务的实时进度由调用方用内存快照覆盖。"""
+        rows = self._conn.execute(
+            "SELECT * FROM crawl_tasks ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [_row_to_crawl_task(row) for row in rows]
+
+    def count_crawl_tasks(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS n FROM crawl_tasks").fetchone()
+        return int(row["n"]) if row else 0
+
+    def count_crawl_task_jobs(self, task_id: str, *, only_existing: bool = False) -> int:
+        """本批职位数。``only_existing=True`` 只数库里还存在的（「匹配本批」用）。"""
+        if only_existing:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM crawl_task_jobs c "
+                "JOIN jobs j ON j.encrypt_job_id = c.encrypt_job_id "
+                "WHERE c.task_id = ?",
+                (task_id,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM crawl_task_jobs WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def crawl_task_job_ids(self, task_id: str, *, only_existing: bool = True) -> list[str]:
+        """本批职位 id。默认只回库里仍存在的（交集为空就别开匹配）。"""
+        if only_existing:
+            sql = (
+                "SELECT c.encrypt_job_id AS jid FROM crawl_task_jobs c "
+                "JOIN jobs j ON j.encrypt_job_id = c.encrypt_job_id "
+                "WHERE c.task_id = ? ORDER BY c.rowid"
+            )
+        else:
+            sql = (
+                "SELECT encrypt_job_id AS jid FROM crawl_task_jobs "
+                "WHERE task_id = ? ORDER BY rowid"
+            )
+        rows = self._conn.execute(sql, (task_id,)).fetchall()
+        return [str(row["jid"]) for row in rows]
+
+    def list_crawl_task_jobs(
+        self, task_id: str, *, limit: int = 20, offset: int = 0, only_existing: bool = False
+    ) -> list[dict[str, Any]]:
+        """本批职位摘要（含归属动作）。``only_existing=True`` 只回库里仍存在的。"""
+        if only_existing:
+            sql = (
+                "SELECT j.*, c.encrypt_job_id AS link_job_id, c.action AS crawl_action "
+                "FROM crawl_task_jobs c "
+                "JOIN jobs j ON j.encrypt_job_id = c.encrypt_job_id "
+                "WHERE c.task_id = ? ORDER BY c.rowid LIMIT ? OFFSET ?"
+            )
+        else:
+            sql = (
+                "SELECT j.*, c.encrypt_job_id AS link_job_id, c.action AS crawl_action "
+                "FROM crawl_task_jobs c "
+                "LEFT JOIN jobs j ON j.encrypt_job_id = c.encrypt_job_id "
+                "WHERE c.task_id = ? ORDER BY c.rowid LIMIT ? OFFSET ?"
+            )
+        rows = self._conn.execute(sql, (task_id, limit, offset)).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            action = str(data.get("crawl_action") or "inserted")
+            link_id = str(data.get("link_job_id") or "")
+            if not data.get("encrypt_job_id"):
+                # 职位已从库里删掉：只剩归属记录，摘要退化成 id
+                out.append({
+                    "encrypt_job_id": link_id,
+                    "job_name": "",
+                    "brand_name": "",
+                    "location": "",
+                    "salary_desc": "",
+                    "action": action,
+                    "missing": True,
+                })
+                continue
+            item = _row_to_job(row).to_dict()
+            item["action"] = action
+            item["missing"] = False
+            out.append(item)
+        return out
 
     # ------------------------------------------------------------------ #
     # 查询
@@ -533,7 +779,24 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         matched_rule_snapshot=_json_dict_tuple(data.get("matched_rule_snapshot")),
         blacklist_checked_at=data.get("blacklist_checked_at") or "",
         auto_delivery_blocked=bool(data.get("auto_delivery_blocked", 1)),
+        last_greeted_at=data.get("last_greeted_at") or "",
     )
+
+
+def _row_to_crawl_task(row: sqlite3.Row) -> dict[str, Any]:
+    """抓取任务行 → API 形状（JSON 列解开，时间保持 REAL）。"""
+    data = dict(row)
+    for key in ("params_json", "stats_json"):
+        raw = data.get(key) or "{}"
+        try:
+            data[key[:-5]] = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            data[key[:-5]] = {}
+        data.pop(key, None)
+    data["job_count"] = int(data.get("job_count") or 0)
+    data["inserted_count"] = int(data.get("inserted_count") or 0)
+    data["updated_count"] = int(data.get("updated_count") or 0)
+    return data
 
 
 def _json_tuple(raw: Any) -> tuple[str, ...]:

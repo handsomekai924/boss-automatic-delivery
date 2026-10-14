@@ -8,6 +8,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..errors import NotFoundError, ValidationWebError
+from ..services.deliver_task import enrich_match_greet_state
 from ..services.match_task import match_tasks, regenerate_greeting, rematch_job
 from ..services.resume_store import (
     delete_analysis,
@@ -23,6 +24,8 @@ class MatchBody(BaseModel):
     resume_id: str
     #: 空 = 全库全部岗位；非空 = 只对勾选的 job_id 跑
     job_ids: list[str] = Field(default_factory=list)
+    #: 非空 = 只跑该抓取任务的岗位（优先级 > job_ids > 全库）
+    crawl_task_id: str = ""
 
 
 class GreetingBody(BaseModel):
@@ -38,20 +41,36 @@ class RematchBody(BaseModel):
     encrypt_job_id: str
 
 
+def _with_greet_state(snap: dict[str, Any]) -> dict[str, Any]:
+    """任务快照出门前补当前发送史与冷却状态。"""
+    matches = snap.get("matches")
+    if isinstance(matches, list):
+        enrich_match_greet_state([m for m in matches if isinstance(m, dict)])
+    return snap
+
+
 @router.post("/analyze")
 def start_match(body: MatchBody) -> dict[str, Any]:
-    task = match_tasks.start(resume_id=body.resume_id, job_ids=body.job_ids)
-    return task.snapshot()
+    task = match_tasks.start(
+        resume_id=body.resume_id,
+        job_ids=body.job_ids,
+        crawl_task_id=body.crawl_task_id,
+    )
+    snap = task.snapshot()
+    # 范围条要的 scope 字段；空集合时也要把范围说清楚
+    if "scope" not in snap:
+        snap["scope"] = task.scope_info()
+    return snap
 
 
 @router.get("/analyze/status")
 def match_status() -> dict[str, Any]:
-    return match_tasks.snapshot()
+    return _with_greet_state(match_tasks.snapshot())
 
 
 @router.get("/analyze/{task_id}")
 def match_task(task_id: str) -> dict[str, Any]:
-    return match_tasks.snapshot(task_id)
+    return _with_greet_state(match_tasks.snapshot(task_id))
 
 
 @router.post("/analyze/{task_id}/cancel")
@@ -106,9 +125,14 @@ def analyses() -> dict[str, Any]:
 @router.get("/analyses/{analysis_id}")
 def get_analysis(analysis_id: str) -> dict[str, Any]:
     try:
-        return load_analysis(analysis_id)
+        payload = load_analysis(analysis_id)
     except FileNotFoundError as exc:
         raise NotFoundError(f"分析结果不存在：{analysis_id}") from exc
+    matches = payload.get("matches")
+    if isinstance(matches, list):
+        # 出门前补**当前**发送史与冷却状态：快照里的 last_greeted_at 是匹配那一刻的值
+        enrich_match_greet_state([m for m in matches if isinstance(m, dict)])
+    return payload
 
 
 @router.delete("/analyses/{analysis_id}")

@@ -879,6 +879,7 @@ class JobClient:
         enrich_details: bool = False,
         detail_interval: float | None = None,
         blacklist_context: CrawlBlacklistContext | None = None,
+        task_id: str = "",
     ) -> CrawlReport:
         """分页抓取职位，**每页即时清洗入库**，页与页之间硬睡一会。
 
@@ -904,6 +905,8 @@ class JobClient:
         :param enrich_details: 每页入库后顺带补 JD（默认关，网页抓取流程会开）。
             单条详情失败只发一条 ``detail_error`` 事件，**不**中断列表抓取。
         :param detail_interval: 补详情的条间隔（秒），默认 :data:`config.DETAIL_INTERVAL`
+        :param task_id: 抓取任务号；非空时 ``fetch_pages`` 与 ``crawl_task_jobs``
+            都记到这个任务上（历史抓取任务的「本批岗位」快照）
         :return: :class:`CrawlReport`（统计 + 每页明细）
 
         **两条流二选一，优先级 expect > search**（调用方保证互斥，这里再兜一层）：
@@ -981,7 +984,7 @@ class JobClient:
                 if blacklist_context is None:
                     # Preserve the established ordinary crawl contract: persist
                     # the list page first, then enrich its already-stored rows.
-                    outcome = store.save_page(result)
+                    outcome = store.save_page(result, task_id=task_id)
                     report.pages.append(result)
                     stats = stats.add(result, outcome)
                     report.stats = stats
@@ -1094,7 +1097,7 @@ class JobClient:
                             dropped=page_result.dropped, lid=page_result.lid,
                         )
 
-                    outcome = store.save_page(page_result)
+                    outcome = store.save_page(page_result, task_id=task_id)
                     # UPSERT 故意不覆盖安全列；这里按本轮评估显式回写，重抓才能刷新旧状态
                     for job in page_result.jobs:
                         store.update_blacklist_state(
