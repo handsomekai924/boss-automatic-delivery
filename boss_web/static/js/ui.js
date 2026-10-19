@@ -445,9 +445,16 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
     labelEl.textContent = hit ? hit.name : pickedCode;
   }
 
-  function paintCols() {
+  /**
+   * @param {number} [resetFrom] 该列起（含）滚动重置为 0——换父级时子级要回顶部；
+   *   不传 = 全部保留（勾选/清空不打断浏览位置）。
+   */
+  function paintCols(resetFrom = Infinity) {
     const cols = visibleColumns();
     colsEl.style.setProperty("--cascader-n", String(Math.max(cols.length, 1)));
+    const scrolls = [...colsEl.querySelectorAll(".cascader-col")].map((c, i) =>
+      i < resetFrom ? c.scrollTop : 0,
+    );
     if (!tree.length) {
       colsEl.innerHTML = `<div class="cascader-empty">暂无选项</div>`;
       return;
@@ -485,15 +492,17 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
         const node = findNode(tree, code);
         if (!node) return;
         const colIndex = [...colsEl.children].indexOf(btn.closest(".cascader-col"));
+        const prevKey = drill.map((d) => d.code).join("/");
         drill = drill.slice(0, colIndex);
         if (node.children?.length) drill.push(node);
+        const resetFrom = drill.map((d) => d.code).join("/") === prevKey ? Infinity : colIndex + 1;
         if (multiple) {
           // 多选的父级只负责展开
-          paintCols();
+          paintCols(resetFrom);
           return;
         }
         pickedCode = node.code;
-        paintCols();
+        paintCols(resetFrom);
         paintLabel();
         if (onChange) onChange(pickedCode);
         // 选完不关窗：还能继续改主意 / 往下点别的路径，点「确定」或点外面才收
@@ -507,6 +516,10 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
         paintLabel();
         if (onChange) onChange(getValue());
       });
+    });
+
+    colsEl.querySelectorAll(".cascader-col").forEach((col, i) => {
+      col.scrollTop = scrolls[i] ?? 0;
     });
   }
 
@@ -529,7 +542,7 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
   function setNodes(next) {
     tree = normalizeNodes(next || []);
     drill = [];
-    paintCols();
+    paintCols(0);
     paintLabel();
   }
 
