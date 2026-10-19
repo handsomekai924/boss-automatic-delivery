@@ -367,7 +367,8 @@ function pathToNode(nodes, code) {
 /**
  * 级联选择：每列只渲染当前路径的一层，几千个城市节点也不卡。
  *
- * 单选（城市）：点任意节点即取值；有子级的同时展开下一级。点「确定」或点外面才收起。
+ * 单选（城市）：点市 / 区即取值；顶层省（如「广东」101280000）只展开下一级、
+ * 不取值——搜索接口只吃市 / 区 code。有子级的同时展开下一级。点「确定」或点外面才收起。
  * 多选（行业）：父级只导航，点叶子勾选/取消，勾完点「确定」。
  *
  *   const c = cascader({ nodes: [{ code, name, children }], onChange: (v) => … });
@@ -469,7 +470,7 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
             const cls = `cascader-item${isActive ? " active" : ""}${isPicked ? " picked" : ""}`;
             const code = escapeHtml(n.code);
             const name = escapeHtml(n.name);
-            // 多选：只有叶子能勾，父级点开下一级；单选：任意节点都能取值
+            // 多选：只有叶子能勾，父级点开下一级；单选：市/区取值，顶层省只展开
             if (multiple && !hasKids) {
               return `<label class="${cls}" data-code="${code}">
                 <input type="checkbox" data-code="${code}" ${isPicked ? "checked" : ""}>
@@ -498,6 +499,11 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
         const resetFrom = drill.map((d) => d.code).join("/") === prevKey ? Infinity : colIndex + 1;
         if (multiple) {
           // 多选的父级只负责展开
+          paintCols(resetFrom);
+          return;
+        }
+        // 顶层有子级 = 省级分组（如「广东」101280000），只展开不取值——搜索只吃市/区 code
+        if (colIndex === 0 && node.children?.length) {
           paintCols(resetFrom);
           return;
         }
@@ -532,9 +538,29 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
     return out;
   }
 
+  /**
+   * 这个 code 能不能当值：顶层省不算，但同 code 在下层再现（直辖市「北京」两层同码）算。
+   * 树还没载入时没法判，调用方先收下。
+   */
+  function isSelectableCode(code) {
+    let ok = false;
+    (function go(list, depth) {
+      for (const n of list || []) {
+        if (n.code === code && !(depth === 0 && n.children?.length)) ok = true;
+        if (n.children?.length) go(n.children, depth + 1);
+      }
+    })(tree, 0);
+    return ok;
+  }
+
   function setValue(v) {
-    if (multiple) picked = new Set((v || []).map(String));
-    else pickedCode = v ? String(v) : "";
+    if (multiple) {
+      picked = new Set((v || []).map(String));
+    } else {
+      const code = v ? String(v) : "";
+      // 丢掉省级 code，别把 101280000 这种旧值原样发给接口
+      pickedCode = code && tree.length && !isSelectableCode(code) ? "" : code;
+    }
     paintCols();
     paintLabel();
   }
@@ -542,6 +568,8 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
   function setNodes(next) {
     tree = normalizeNodes(next || []);
     drill = [];
+    // 换树后重判一次：先 setValue 后 setNodes 的调用顺序也兜得住
+    if (!multiple && pickedCode && tree.length && !isSelectableCode(pickedCode)) pickedCode = "";
     paintCols(0);
     paintLabel();
   }

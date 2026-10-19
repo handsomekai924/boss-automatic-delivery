@@ -218,6 +218,18 @@ def test_级联选完不自动关窗(settings_js: str):
     assert "openPop.contains(e.target)" not in ui
 
 
+def test_城市级联不许选省级(settings_js: str):
+    """城市树顶层是省（如「广东」101280000），搜索接口只吃市 / 区 code。
+
+    点省只展开下一级不取值；setValue / setNodes 撞见省级 code 也要丢掉，
+    免得旧配置把 101280000 原样发出去。直辖市两层同码（北京 101010100）仍可选。
+    """
+    ui = _read("js/ui.js")
+    assert "colIndex === 0 && node.children?.length" in ui, "点省级仍在取值"
+    assert "isSelectableCode" in ui, "setValue 没挡省级 code"
+    assert "顶层有子级 = 省级分组" in ui
+
+
 # --------------------------------------------------------------------------- #
 # 职位页：搜索编辑器已迁走，只剩摘要 + 跳转
 # --------------------------------------------------------------------------- #
