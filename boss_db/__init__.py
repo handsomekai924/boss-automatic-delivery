@@ -264,39 +264,61 @@ def resolve_db_path(path: Path | str | None = None) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# 连接（进程内缓存：":memory:" 必须共享，文件库也省得反复开）
+# 连接（线程本地 + 进程内跟踪：sqlite3.Connection 不是并发安全的）
+#
+# FastAPI 线程池会并发跑同步端点。以前 `_conns` 只缓存一个连接给所有线程共用，
+# 并发 execute/fetch 会把 sqlite3 内部状态搅乱——轻则 InterfaceError（bad parameter
+# or other API misuse），重则 Row 变成残缺元组（IndexError: tuple index out of range）。
+# 现在每个线程各自持连接：文件库靠 WAL 并发读写，":memory:" 同线程内共享一份。
 # --------------------------------------------------------------------------- #
 
 _lock = threading.Lock()
-_conns: dict[str, sqlite3.Connection] = {}
+#: key → 该路径下所有已开连接（close_db / close_all 收尾用）
+_conns: dict[str, list[sqlite3.Connection]] = {}
+_local = threading.local()
 #: 迁移要串行跑：web 线程池会并发 ``connect`` 同一个默认库
 _migrate_lock = threading.Lock()
 
 
+def _thread_conns() -> dict[str, sqlite3.Connection]:
+    """当前线程的「路径 → 连接」表。"""
+    d = getattr(_local, "conns", None)
+    if d is None:
+        d = {}
+        _local.conns = d
+    return d
+
+
 @contextmanager
 def db(path: Path | str | None = None, *, migrate: bool = True) -> Iterator[sqlite3.Connection]:
-    """借一个连接，用完还回缓存（不 close）。
+    """借当前线程的连接，用完不 close（线程复用）。
 
-    连接是 ``check_same_thread=False`` 的——FastAPI 的线程池会拿它。
+    每个线程各自持连接——``sqlite3.Connection`` 不是并发安全的，
+    共享一个连接在 FastAPI 线程池下会炸（见上方注释）。
     """
     conn = acquire(path, migrate=migrate)
     try:
         yield conn
     finally:
-        pass  # 连接留在缓存里
+        pass  # 连接留在本线程缓存里
 
 
 def acquire(path: Path | str | None = None, *, migrate: bool = True) -> sqlite3.Connection:
-    """拿连接（缓存命中就不重开）。调用方不用 close。"""
+    """拿**当前线程**的连接（缓存命中就不重开）。调用方不用 close。"""
     resolved = resolve_db_path(path)
     key = str(resolved)
-    with _lock:
-        conn = _conns.get(key)
-        if conn is not None:
-            return conn
-        conn = _open(resolved, migrate=migrate)
-        _conns[key] = conn
+
+    tc = _thread_conns()
+    conn = tc.get(key)
+    if conn is not None:
         return conn
+
+    with _lock:
+        conn = _open(resolved, migrate=migrate)
+        _conns.setdefault(key, []).append(conn)
+
+    tc[key] = conn
+    return conn
 
 
 def connect(path: Path | str | None = None, *, migrate: bool = True) -> sqlite3.Connection:
@@ -305,27 +327,30 @@ def connect(path: Path | str | None = None, *, migrate: bool = True) -> sqlite3.
 
 
 def close_db(path: Path | str | None = None) -> None:
-    """丢掉缓存的连接（测试里让 ``tmp_path`` 能被清理掉）。"""
+    """关掉该路径下所有线程的连接（测试里让 ``tmp_path`` 能被清理掉）。"""
     key = str(resolve_db_path(path))
     with _lock:
-        conn = _conns.pop(key, None)
-    if conn is not None:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
-
-
-def close_all() -> None:
-    """把缓存里所有连接关掉（测试收尾用）。"""
-    with _lock:
-        conns = list(_conns.values())
-        _conns.clear()
+        conns = _conns.pop(key, [])
     for conn in conns:
         try:
             conn.close()
         except sqlite3.Error:
             pass
+    tc = _thread_conns()
+    tc.pop(key, None)
+
+
+def close_all() -> None:
+    """把所有线程开过的连接都关掉（测试收尾用）。"""
+    with _lock:
+        all_conns = [c for conns in _conns.values() for c in conns]
+        _conns.clear()
+    for conn in all_conns:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+    _local.conns = {}
 
 
 #: 补列迁移表：``表名 → {列名: 建列 DDL 片段}``。``CREATE TABLE IF NOT EXISTS``
