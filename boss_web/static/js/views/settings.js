@@ -2,6 +2,7 @@
 
 import { api } from "../api.js";
 import { toast, escapeHtml, modal, multiSelect, cascader } from "../ui.js";
+import { applyUpdateStatus, peekUpdateStatus } from "../update.js";
 import { renderLLM } from "./llm.js";
 import { renderSettingsUpdate } from "./settings_update.js";
 
@@ -66,14 +67,32 @@ export async function renderSettings(root) {
     await renderCollection(pane, setDirty);
   }
 
-  /** 有新版时在「版本更新」页签上点个小圆点；不弹窗（弹窗归首屏/update.js） */
+  /** 有新版且**没被忽略**才在「版本更新」页签上点小圆点；不弹窗（弹窗归首屏/update.js）。
+   *  后端 ``should_prompt = has_update && !suppressed``——``ignored`` 是忽略**水位线**，
+   *  新版比水位高时照亮，所以判断只看 ``should_prompt``，不能再拿 ``!ignored`` 卡一道。
+   *
+   *  圆点要**一直挂着**：关掉弹窗 ≠ 忽略，只要还有没被忽略的新版就不灭。因此进页面
+   *  得先按缓存画上，不能只等 60s 一轮的 ``boss:update``——关完弹窗进设置页那一分钟
+   *  里圆点会是灭的，看着就像「关掉就没提示了」。 */
   function onUpdateDot(e) {
     const dot = root.querySelector(".settings-tab-dot");
     if (!dot) return;
-    const should = Boolean(e && e.detail && e.detail.should_prompt);
-    dot.hidden = !should;
+    const d = (e && e.detail) || {};
+    dot.hidden = !Boolean(d.has_update && d.should_prompt);
   }
   window.addEventListener("boss:update", onUpdateDot);
+  const cached = peekUpdateStatus();
+  if (cached) {
+    onUpdateDot({ detail: cached });
+  } else {
+    api
+      .get("/api/system/update")
+      .then((s) => {
+        if (s) applyUpdateStatus(s);
+      })
+      .catch(() => {
+      });
+  }
 
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => show(tab.dataset.tab));

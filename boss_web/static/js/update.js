@@ -18,12 +18,34 @@ const DONE_SEEN_KEY = "boss:update-done-seen";
 let notifiedVersion = "";
 
 /**
+ * 最近一次 ``/api/system/update`` 的结果。
+ *
+ * 「版本更新」页签的圆点要**一直亮着**（有新版且没忽略就不灭），所以不能只靠
+ * 60s 一轮的 ``boss:update`` 事件碰运气——关掉弹窗进设置页那会儿没事件，
+ * 圆点就是灭的。状态进缓存，页面一挂载就能画上。
+ */
+let lastStatus = null;
+
+/** 把检测结果记进缓存并广播出去，页签圆点和设置页跟着刷 */
+export function applyUpdateStatus(status) {
+  if (!status) return;
+  lastStatus = status;
+  window.dispatchEvent(new CustomEvent("boss:update", { detail: status }));
+}
+
+/** 进设置页先按这个画圆点；还没测过回 ``null``，调用方自己决定要不要现取 */
+export function peekUpdateStatus() {
+  return lastStatus;
+}
+
+/**
  * 有新版本就弹「发现新版本」窗口。出口：
  *
  * - **立即更新**——应用内自更新：下载 zip → 停服换文件 → 同端口重启，全程 WS 进度
  * - **前往 Gitee / GitHub 下载**——打开对应发行版页（版本判断只用 Gitee）
  * - **忽略此版本**——记进后端，这一版不再弹；发了更**新**的版本照样弹
- * - **取消 / 关掉**——什么都不记，下次打开页面还会弹
+ * - **取消 / 关掉**——什么都不记，下次打开页面还会弹；圆点**也不灭**，
+ *   「关掉」≠「忽略」，只要还有没被忽略的新版就一直挂着
  */
 export async function maybePromptUpdate() {
   let status;
@@ -34,6 +56,7 @@ export async function maybePromptUpdate() {
     return;
   }
   if (!status) return;
+  applyUpdateStatus(status);
   if (status.update_done) {
     // 更新完了：刷一下页面就回新版本，**不关标签页**（见 showUpdateDone）
     showUpdateDone(status.update_done);
@@ -69,7 +92,7 @@ export function startUpdateWatcher(options) {
       return;
     }
     if (!status) return;
-    window.dispatchEvent(new CustomEvent("boss:update", { detail: status }));
+    applyUpdateStatus(status);
     if (status.should_prompt && status.latest && status.latest !== notifiedVersion) {
       markNotified(status.latest);
       toast(`发现新版本 v${status.latest}，到「系统设置 → 版本更新」看看`, "ok", 6000);
@@ -171,6 +194,8 @@ function showUpdateModal(status) {
       btn.disabled = true;
       try {
         await api.post("/api/system/update/ignore", { version: status.latest });
+        // 忽略成功 = 这一版不再提醒，圆点**立刻**熄掉（别等下一轮轮询才灭）
+        applyUpdateStatus({ ...status, should_prompt: false, ignored: status.latest });
         toast(`已忽略 v${status.latest}`, "ok");
         box.close();
       } catch (err) {

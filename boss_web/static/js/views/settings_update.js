@@ -2,7 +2,7 @@
 
 import { api } from "../api.js";
 import { toast, escapeHtml, modal, fmtTime } from "../ui.js";
-import { openUpdateDialog } from "../update.js";
+import { applyUpdateStatus, openUpdateDialog } from "../update.js";
 
 /** 日志读失败 / 更新失败时横幅里要能看到版本号，一张截图就是一份反馈 */
 export async function renderSettingsUpdate(root) {
@@ -150,8 +150,7 @@ export async function renderSettingsUpdate(root) {
       } else {
         toast("已是最新", "ok");
       }
-      // 让页签圆点跟着动
-      window.dispatchEvent(new CustomEvent("boss:update", { detail: status }));
+      applyUpdateStatus(status);
     } catch (err) {
       renderBanner(null, err.message || "检测失败，请重试");
       toast(err.message || "检测失败", "bad");

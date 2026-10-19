@@ -472,6 +472,52 @@ def test_系统配置多了版本更新页签(settings_js: str):
     assert "renderSettingsUpdate" in settings_js
 
 
+def test_圆点只在有新版且未忽略时亮():
+    """圆点默认是 hidden 的；``display: inline-block`` 会把 UA 的 [hidden] 压掉，
+    那样圆点就一直挂着。判断也要两个字段都看：``should_prompt`` 单独一个够用，
+    但 ``has_update`` 点明「有新版」这个前提，免得后端字段语义漂移时跟着误导。"""
+    settings_js = _read("js/views/settings.js")
+    body = _fn_body(settings_js, "onUpdateDot")
+    assert "has_update" in body
+    assert "should_prompt" in body
+    assert "dot.hidden" in body
+    # 已忽略的版本不亮：should_prompt 后端已含 !suppressed，前端别再拿 ignored 反卡
+    assert "ignored" not in body, "忽略水位线归后端 should_prompt，前端别再卡一道"
+    css = _read("css/app.css")
+    assert "[hidden]" in css, "hidden 必须压得住组件自己的 display"
+    assert "display: none !important" in css
+
+
+def test_圆点一直挂着不靠弹窗续命():
+    """关掉弹窗 ≠ 忽略——只要还有没被忽略的新版，圆点就得一直亮。
+
+    只靠 60s 一轮的 ``boss:update`` 事件是不够的：关完弹窗进设置页那一分钟里
+    没有事件，圆点就灭了，看着像「关掉就没提示」。所以检测结果要进缓存，
+    页面一挂载就按缓存画上。
+    """
+    update_js = _read("js/update.js")
+    settings_js = _read("js/views/settings.js")
+    # 检测结果得留一份
+    assert "lastStatus" in update_js
+    assert "export function applyUpdateStatus" in update_js
+    assert "export function peekUpdateStatus" in update_js
+    # 每次拿到状态都进缓存，不只是广播
+    assert "applyUpdateStatus(status)" in update_js
+    # 进设置页先按缓存画，不等事件
+    assert "peekUpdateStatus()" in settings_js
+    body = _fn_body(settings_js, "renderSettings") if "function renderSettings(" in settings_js else settings_js
+    assert "peekUpdateStatus()" in body, "挂载时就要按缓存定圆点"
+    # 「取消 / 关掉」不许写状态——写成 should_prompt:false 圆点就灭了
+    modal_src = update_js.split("function showUpdateModal(", 1)[1]
+    cancel_block = modal_src.split('act === "cancel"', 1)[1].split("if (act ===", 1)[0]
+    assert "applyUpdateStatus" not in cancel_block, "关掉弹窗不该改圆点状态"
+    assert "should_prompt: false" not in cancel_block
+    # 「忽略此版本」才立刻灭圆点（不然要等下一轮轮询）
+    ignore_block = modal_src.split('act === "ignore"', 1)[1].split("if (act ===", 1)[0]
+    assert "applyUpdateStatus" in ignore_block
+    assert "should_prompt: false" in ignore_block
+
+
 def test_版本更新页签有日志接口和复制诊断():
     src = _read("js/views/settings_update.js")
     assert "/api/system/update/log" in src
@@ -496,7 +542,8 @@ def test_后台轻提示不重复弹窗():
     body = _fn_body(update_js, "startUpdateWatcher")
     assert "toast" in body
     assert "发现新版本" in body
-    assert "boss:update" in body
+    # 广播统一走 applyUpdateStatus（它负责缓存 + dispatch boss:update）
+    assert "applyUpdateStatus" in body
     assert "should_prompt" in body, "忽略水位线要压住 toast"
     assert "showUpdateModal(" not in body, "watcher 不许再弹窗"
     assert "openUpdateDialog(" not in body, "watcher 不许再弹窗"
