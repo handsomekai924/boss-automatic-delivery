@@ -102,6 +102,28 @@ def ok_cities() -> dict:
     }
 
 
+def ok_industries() -> dict:
+    return {
+        "code": 0,
+        "message": "Success",
+        "zpData": [
+            {
+                "code": 100000,
+                "name": "互联网/AI",
+                "subLevelModelList": [
+                    {"code": 100020, "name": "互联网"},
+                    {"code": 100001, "name": "电子商务"},
+                ],
+            },
+            {
+                "code": 101400,
+                "name": "电子/通信/半导体",
+                "subLevelModelList": [{"code": 101405, "name": "半导体/芯片"}],
+            },
+        ],
+    }
+
+
 def make_client(responses, **kwargs) -> FilterClient:
     kwargs.setdefault("sleeper", lambda _s: None)
     kwargs.setdefault("retries", 0)
@@ -157,7 +179,7 @@ class TestParseConditionsPayload:
 
 class TestClientTransport:
     def test_uses_get_with_endpoint_path(self):
-        http = FakeHttp([ok_conditions(), ok_cities()])
+        http = FakeHttp([ok_conditions(), ok_cities(), ok_industries()])
         client = FilterClient(
             http=http, sleeper=lambda _s: None, retries=0, endpoints=only_primary_endpoints()
         )
@@ -165,9 +187,10 @@ class TestClientTransport:
         assert all(c["method"] == "GET" for c in http.calls)
         assert http.calls[0]["url"].endswith("/wapi/zpgeek/pc/all/filter/conditions.json")
         assert http.calls[1]["url"].endswith("/wapi/zpCommon/data/city.json")
+        assert http.calls[2]["url"].endswith("/wapi/zpCommon/data/industry.json")
 
     def test_retries_on_5xx_then_succeeds(self):
-        http = FakeHttp([FakeResponse({}, status=500), ok_conditions(), ok_cities()])
+        http = FakeHttp([FakeResponse({}, status=500), ok_conditions(), ok_cities(), ok_industries()])
         client = FilterClient(
             http=http, sleeper=lambda _s: None, retries=1, endpoints=only_primary_endpoints()
         )
@@ -202,7 +225,7 @@ class TestClientTransport:
 
     def test_conditions_endpoint_falls_back_to_recommend(self):
         """主力路由 500 时降到 recommend 那份，而不是整次失败。"""
-        http = FakeHttp([FakeResponse({}, status=500), ok_conditions(), ok_cities()])
+        http = FakeHttp([FakeResponse({}, status=500), ok_conditions(), ok_cities(), ok_industries()])
         client = FilterClient(http=http, sleeper=lambda _s: None, retries=0)
         cond = client.get_filter_conditions()
         assert "recommend/conditions" in http.calls[1]["url"]
@@ -237,14 +260,19 @@ class TestClientTransport:
 
 
 class TestClientAssembly:
-    def test_industry_always_comes_from_tables(self):
-        """行业没有接口，任何情况下都走写死表。"""
+    def test_industry_fallback_tables_are_aligned_with_api(self):
+        """写死表是行业接口的兜底，code 要跟 /wapi/zpCommon/data/industry.json 一致。"""
         industries = load_industries()
         assert len(industries) == 15
-        assert sum(len(g.options) for g in industries) == 145
+        assert sum(len(g.options) for g in industries) == 134
+        # 抽查几个真接口码（不是 HTML ka 的 0-144）
+        codes = {o.code for g in industries for o in g.options}
+        assert "100020" in codes  # 互联网
+        assert "100206" in codes  # 互联网金融
+        assert "0" not in codes
 
     def test_get_filter_conditions_merges_all_sources(self):
-        client = make_client([ok_conditions(), ok_cities()])
+        client = make_client([ok_conditions(), ok_cities(), ok_industries()])
         cond = client.get_filter_conditions()
         assert cond.source == "api"
         assert cond.degraded == {}
@@ -255,7 +283,7 @@ class TestClientAssembly:
         client = make_client([requests.ConnectionError("down")] * 6)
         cond = client.get_filter_conditions(use_fallback=True)
         assert cond.source == "fallback"
-        assert set(cond.degraded) == {"conditions", "cities"}
+        assert set(cond.degraded) == {"conditions", "cities", "industries"}
         assert cond.job_types and cond.industries
         assert cond.cities == ()  # 写死表没有城市树
         assert cond.hot_cities
@@ -266,7 +294,7 @@ class TestClientAssembly:
             client.get_filter_conditions(use_fallback=False)
 
     def test_partial_failure_keeps_api_data_and_marks_degraded(self):
-        client = make_client([ok_conditions(), requests.ConnectionError("city down")])
+        client = make_client([ok_conditions(), requests.ConnectionError("city down"), ok_industries()])
         cond = client.get_filter_conditions(use_fallback=True)
         assert cond.degraded == {"cities": "fallback"}
         assert cond.source == "fallback"  # 有降级就如实标注
@@ -301,6 +329,8 @@ class TestClientAssembly:
                 seen.append(url)
                 if "conditions" in url:
                     return FakeResponse(ok_conditions())
+                if "industry" in url:
+                    return FakeResponse(ok_industries())
                 return FakeResponse(ok_cities())
 
         client = FilterClient(http=SpyHttp(), sleeper=lambda _s: None, retries=0)

@@ -125,6 +125,7 @@ FILTER_ROUTES: tuple[str, ...] = (
     "/wapi/zpCommon/data/city.json",
     "/wapi/zpCommon/data/cityGroup.json",
     "/wapi/zpgeek/search/job/hot/city.json",
+    "/wapi/zpCommon/data/industry.json",
 )
 
 #: 与线上同 code / 同文案（实测抄下来的），别手写凑数
@@ -209,6 +210,27 @@ MOCK_HOT_CITIES: list[dict] = [
     {"code": 101020100, "name": "上海"},
     {"code": 101280100, "name": "广州"},
     {"code": 101280600, "name": "深圳"},
+]
+
+#: 行业树（线上 /wapi/zpCommon/data/industry.json 的精简版，code 为 1000xx）
+MOCK_INDUSTRIES: list[dict] = [
+    {
+        "code": 100000,
+        "name": "互联网/AI",
+        "subLevelModelList": [
+            {"code": 100020, "name": "互联网"},
+            {"code": 100001, "name": "电子商务"},
+            {"code": 100021, "name": "计算机软件"},
+        ],
+    },
+    {
+        "code": 101400,
+        "name": "电子/通信/半导体",
+        "subLevelModelList": [
+            {"code": 101405, "name": "半导体/芯片"},
+            {"code": 101406, "name": "电子/硬件开发"},
+        ],
+    },
 ]
 
 #: 城市树只要一小片够测递归解析即可（省→市→区三层，照线上字段名）
@@ -626,6 +648,8 @@ class Handler(BaseHTTPRequestHandler):
         """按路径回筛选项，形状与真实 wapi 一致。"""
         if FILTER_API_DOWN:
             return _json(self, {"code": 10001, "message": "system error", "zpData": {}})
+        if path.endswith("/industry.json"):
+            return _json(self, {"code": 0, "message": "Success", "zpData": MOCK_INDUSTRIES})
         if path.endswith("/hot/city.json"):
             return _json(self, {"code": 0, "message": "Success", "zpData": {"hotCityList": MOCK_HOT_CITIES}})
         if path.endswith("/city.json"):

@@ -398,7 +398,7 @@ def test_版本判断只查_gitee():
 
 
 # --------------------------------------------------------------------------- #
-# 应用内自更新：立即更新按钮 / WS 进度 / 关标签页
+# 应用内自更新：立即更新按钮 / WS 进度 / 更新完成后刷新
 # --------------------------------------------------------------------------- #
 
 
@@ -420,11 +420,21 @@ def test_更新进度走_ws():
     assert "WebSocket" in update_js
 
 
-def test_更新完成后要关标签页并留兜底文案():
+def test_更新完成后只刷新不关标签页():
     update_js = _read("js/update.js")
-    assert "window.close()" in update_js
-    # window.close 常被浏览器拦，兜底文案必须一直留着
-    assert "可以关闭此标签页" in update_js
+    # 用户自己开的标签页 history.length === 1，window.close 照关不误；
+    # 重启的 exe 带 --no-browser 不会再开一个，关掉就等于页面全丢。
+    # 注释里会提 window.close()（写明为什么不能用），所以把 ``window.close()`` 摘掉再看有没有真调用
+    code_only = update_js.replace("``window.close()``", "")
+    assert "tryCloseTab" not in update_js
+    assert "window.close(" not in code_only
+    assert "location.reload()" in update_js
+    # 回执是进程内缓存的，不记标记就会「看到回执 → 刷新 → 又看到回执」无限刷
+    assert "sessionStorage" in update_js
+    assert "DONE_SEEN_KEY" in update_js
+    # 存不进 sessionStorage 时要让用户手动 F5，别刷不完
+    assert "立即刷新" in update_js
+    assert "F5" in update_js
 
 
 def test_换文件期要提醒别关电脑():

@@ -177,9 +177,13 @@ class TestTables:
     def test_scales_match_live_codes(self):
         assert [c for c, _ in tables.SCALES] == ["0", "301", "302", "303", "304", "305", "306"]
 
-    def test_industry_codes_are_contiguous_0_to_144(self):
-        codes = [int(c) for _g, rows in tables.INDUSTRY_GROUPS for c, _n in rows]
-        assert codes == list(range(145))
+    def test_industry_codes_are_real_api_codes(self):
+        """行业 code 是接口的 1000xx 码，不是 HTML ka 的 0-144。"""
+        codes = {c for _g, rows in tables.INDUSTRY_GROUPS for c, _n in rows}
+        assert all(c.startswith(("100", "101")) for c in codes), f"发现非 1000xx 行业码：{codes}"
+        assert "100020" in codes  # 互联网
+        assert "100206" in codes  # 互联网金融
+        assert "0" not in codes and "144" not in codes
 
     def test_industry_groups_have_names(self):
         assert [g for g, _rows in tables.INDUSTRY_GROUPS][0] == "互联网/AI"

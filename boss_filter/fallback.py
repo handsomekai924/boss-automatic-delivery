@@ -10,7 +10,8 @@ todo.md 第二节的说明：
   2. :func:`parse_html_conditions` —— 现场从 ``.saved_web`` 那份页面再解析一遍，
      用来校对写死表有没有过期，或在接口挂掉时现场凑一份。
 
-公司行业**只有** HTML 这一个来源：接口侧没有下发这张表（见 config 模块的说明）。
+公司行业现在走 ``/wapi/zpCommon/data/industry.json``（见 :mod:`boss_filter.client`）；
+写死表 :data:`boss_filter.tables.INDUSTRY_GROUPS` 是兜底，HTML 解析器仅供离线校对。
 """
 
 from __future__ import annotations

@@ -114,7 +114,15 @@ class FilterClient:
             parts.update(cities=fb.cities, hot_cities=fb.hot_cities)
             degraded["cities"] = "fallback"
 
-        industries = load_industries()
+        try:
+            industries = self.fetch_industries()
+        except FilterError as exc:
+            if not use_fallback:
+                raise
+            logger.warning("行业接口不可用，改用写死表：%s", exc)
+            industries = load_industries()
+            degraded["industries"] = "fallback"
+
         source = "fallback" if degraded else "api"
         return FilterConditions(
             cities=parts.get("cities", ()),
@@ -176,6 +184,32 @@ class FilterClient:
         """默认城市（站点当前城市）。原样返回 ``zpData.city``。"""
         payload = self._get_json(self.endpoints["default_city"], action="默认城市接口")
         return _zpdata(payload).get("city") or {}
+
+    def fetch_industries(self) -> tuple[IndustryGroup, ...]:
+        """打行业接口，返回分组树（15 组 + 134 子项，code 为 1000xx）。
+
+        接口路径 ``/wapi/zpCommon/data/industry.json``，不需要登录态。
+        ``zpData`` 直接是分组列表（不是 dict）。
+        """
+        payload = self._get_json(self.endpoints["industry"], action="行业接口")
+        raw = payload.get("zpData", payload.get("data"))
+        items = raw if isinstance(raw, list) else []
+        if not items:
+            raise FilterDataError("行业接口返回里没有行业列表")
+        groups: list[IndustryGroup] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            subs = item.get("subLevelModelList") or []
+            options = tuple(
+                FilterOption(code=str(s.get("code", "")), name=str(s.get("name", "")))
+                for s in subs
+                if isinstance(s, dict) and s.get("code") is not None
+            )
+            groups.append(IndustryGroup(name=str(item.get("name") or ""), options=options))
+        if not groups:
+            raise FilterDataError("行业接口返回的分组为空")
+        return tuple(groups)
 
     # ------------------------------------------------------------------ #
     # 传输层
@@ -258,10 +292,10 @@ def parse_conditions_payload(payload: Mapping[str, Any]) -> dict[str, tuple]:
 
 
 def load_industries() -> tuple[IndustryGroup, ...]:
-    """公司行业。
+    """公司行业的写死兜底表。
 
-    **没有接口**（见 :mod:`boss_filter.config` 的说明），所以永远走写死表。
-    这不是降级——是这条维度的唯一可用来源。
+    在线时优先走 :meth:`FilterClient.fetch_industries`（``/wapi/zpCommon/data/industry.json``）；
+    接口挂掉才退到这里。表本身已与线上接口对齐（2026-10-19）。
     """
     return tuple(
         IndustryGroup(name=name, options=options_from_rows(rows))

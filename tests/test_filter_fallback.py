@@ -98,7 +98,7 @@ class TestFallbackTables:
     def test_industry_matches_tables(self):
         cond = build_fallback_conditions()
         assert len(cond.industries) == len(tables.INDUSTRY_GROUPS)
-        assert len(cond.industry_options()) == 145
+        assert len(cond.industry_options()) == 134  # 与 /wapi/zpCommon/data/industry.json 对齐
 
     def test_fallback_is_deterministic(self):
         assert build_fallback_conditions().to_dict() == build_fallback_conditions().to_dict()

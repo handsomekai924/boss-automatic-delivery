@@ -1,8 +1,7 @@
 """筛选条件相关接口地址、请求头等常量。
 
-主路径（``conditions`` / ``city`` / ``hot_city`` 等）是真实 wapi GET 接口。
-**公司行业没有接口**：行业下拉是 SSR 写进 HTML 的，只能走 HTML 解析 / 写死，
-见 :mod:`boss_filter.fallback`。
+主路径（``conditions`` / ``city`` / ``hot_city`` / ``industry`` 等）是真实 wapi GET 接口。
+公司行业走 ``/wapi/zpCommon/data/industry.json``（2026-10-19 实测），不再靠 HTML 解析。
 """
 
 from __future__ import annotations
@@ -32,6 +31,8 @@ ENDPOINTS: Final[dict[str, str]] = {
     "hot_city": "/wapi/zpgeek/search/job/hot/city.json",
     #: 默认城市（当前站点城市）
     "default_city": "/wapi/zpgeek/common/data/defaultcity.json",
+    #: 公司行业树（15 分组 + 134 子项，code 为 1000xx）
+    "industry": "/wapi/zpCommon/data/industry.json",
 }
 
 #: conditions 响应 ``zpData`` 里的列表字段 → :class:`~boss_filter.models.FilterConditions` 字段名。
