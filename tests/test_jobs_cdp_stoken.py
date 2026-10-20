@@ -590,6 +590,24 @@ def test_Chrome日志_没有就不报错(tmp_path: Path):
     assert cdp._chrome_log_hint(tmp_path) == ""
 
 
+def test_profile有没有起来过(tmp_path: Path):
+    """Chrome 正常启动会写 Local State / Default；空目录 = 压根没跑起来。"""
+    assert cdp._profile_populated(tmp_path) is False
+    (tmp_path / "Local State").write_text("{}", encoding="utf-8")
+    assert cdp._profile_populated(tmp_path) is True
+
+
+def test_调试口_启动即退且profile为空要说明原因(launched, monkeypatch, tmp_path: Path):
+    """Popen 成功不代表 Chrome 真的跑了：空 profile + 秒退要说「被拦了/装得不对」。"""
+    monkeypatch.setattr(cdp, "_port_usable", lambda p: True)
+    monkeypatch.setattr(cdp, "probe_debug", lambda *a, **k: "")
+    monkeypatch.setattr(cdp, "launch_chrome", lambda **kw: FakeProc(alive=False))
+
+    with pytest.raises(StokenError) as caught:
+        cdp.connect_or_launch(profile_dir=tmp_path / "prof")
+    assert "profile 目录还是空的" in str(caught.value)
+
+
 # --------------------------------------------------------------------------- #
 # 退出收尾：把自己拉起来的 Chrome 关掉
 # --------------------------------------------------------------------------- #
@@ -603,6 +621,7 @@ class FakeProc:
         self.alive = alive
         self.exits = exits
         self.killed = False
+        self.returncode = 0
         self.waits: list[float | None] = []
 
     def poll(self):

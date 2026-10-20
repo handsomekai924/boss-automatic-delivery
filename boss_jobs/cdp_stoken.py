@@ -745,6 +745,11 @@ def _chrome_log_hint(profile: Path) -> str:
     return " | ".join(hits[-3:])[:500]
 
 
+def _profile_populated(profile: Path) -> bool:
+    """Chrome 到底有没有起来过：正常启动会写 ``Local State`` / ``Default``。"""
+    return (profile / "Local State").exists() or (profile / "Default").is_dir()
+
+
 def launch_chrome(
     *,
     chrome: str | None = None,
@@ -874,9 +879,17 @@ def connect_or_launch(
                 _track_ws(p, ws_url)
                 return client
             if proc.poll() is not None:
-                # 启动进程已经退了 = 这个 profile 被另一台 Chrome 占着，
-                # 请求被转交过去，调试口不会在这个端口上开。
-                last_note = f"端口 {p} 的启动进程提前退出了（profile 被别的 Chrome 占着）"
+                code = proc.returncode
+                if _profile_populated(profile):
+                    last_note = (
+                        f"端口 {p} 的启动进程提前退出（退出码 {code}），"
+                        f"profile 被别的 Chrome 占着"
+                    )
+                else:
+                    last_note = (
+                        f"端口 {p} 的 Chrome 启动后立刻退出（退出码 {code}），"
+                        f"profile 目录还是空的——多半被安全软件拦了，或 Chrome 装得不对"
+                    )
                 break
             time.sleep(0.25)
         else:
