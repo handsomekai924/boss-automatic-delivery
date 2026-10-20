@@ -431,6 +431,7 @@ def test_档位_透传到launch_chrome(monkeypatch):
 
     monkeypatch.setattr(cdp, "launch_chrome", fake_launch)
     monkeypatch.setattr(cdp, "probe_debug", lambda *a, **k: "")
+    monkeypatch.setattr(cdp, "_port_usable", lambda p: True)
 
     with pytest.raises(_Boom):
         cdp.connect_or_launch(mode="hidden")
@@ -447,6 +448,146 @@ def test_档位_复用现成调试口时不管档位(monkeypatch):
 
     monkeypatch.setattr(cdp, "launch_chrome", boom)
     assert cdp.connect_or_launch(mode="headless") is not None
+
+
+# --------------------------------------------------------------------------- #
+# 调试口探测：IPv4/IPv6、端口占用后的回退
+# --------------------------------------------------------------------------- #
+
+
+class _Resp:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def read(self) -> bytes:
+        return self.body
+
+    def __enter__(self) -> "_Resp":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def test_调试口_IPv4不通会问IPv6(monkeypatch):
+    """Chrome 在 127.0.0.1 被占时会退到 [::1]；只探 IPv4 会误报「没开」。"""
+    seen: list[str] = []
+
+    class Opener:
+        def open(self, url, timeout=None):
+            seen.append(url)
+            if "[::1]" in url:
+                return _Resp(
+                    b'{"webSocketDebuggerUrl": "ws://[::1]:9222/devtools/browser/x"}'
+                )
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(cdp, "_LOOPBACK_OPENER", Opener())
+    assert cdp.probe_debug(9222) == "ws://[::1]:9222/devtools/browser/x"
+    assert len(seen) == 2 and seen[0].startswith("http://127.0.0.1:9222")
+
+
+def test_调试口_两个协议都占着就换端口(launched, monkeypatch):
+    """IPv4/IPv6 都被占的端口直接跳过，别浪费 30 秒等一个不可能开的调试口。"""
+    launched_ports: list[int] = []
+    ws = "ws://127.0.0.1:9223/devtools/browser/x"
+    probes_9223 = iter(["", ws])  # 候选端口预探一次、拉起后再轮询到一次
+
+    monkeypatch.setattr(cdp, "_port_usable", lambda p: p != 9222)
+    monkeypatch.setattr(
+        cdp,
+        "probe_debug",
+        lambda p=None, **k: next(probes_9223, "") if p == 9223 else "",
+    )
+    monkeypatch.setattr(
+        cdp,
+        "launch_chrome",
+        lambda **kw: launched_ports.append(kw["port"]) or FakeProc(),
+    )
+
+    assert isinstance(cdp.connect_or_launch(), FakeCdp)
+    assert launched_ports == [9223]  # 9222 连拉都不拉
+
+
+def test_调试口_换端口时换一个profile(launched, monkeypatch):
+    """同一个 user-data-dir 的第二台 Chrome 会把启动交给第一台然后自己退出——
+    挪端口不换 profile 等于没挪。"""
+    profiles: list[Path] = []
+    procs: list[FakeProc] = []
+    probes_9223 = iter(["", "ws://x"])
+
+    monkeypatch.setattr(cdp, "_port_usable", lambda p: True)
+    monkeypatch.setattr(
+        cdp,
+        "probe_debug",
+        lambda p=None, **k: next(probes_9223, "") if p == 9223 else "",
+    )
+
+    def fake_launch(**kw):
+        profiles.append(Path(kw["profile_dir"]))
+        proc = FakeProc()
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(cdp, "launch_chrome", fake_launch)
+
+    assert cdp.connect_or_launch(timeout=0.01) is not None
+    assert [p.name for p in profiles] == [
+        profiles[0].name,
+        f"{profiles[0].name}-9223",
+    ]
+    assert procs[0].killed is True  # 没成的那台要收掉，别留个看不见的 Chrome
+
+
+def test_调试口_启动进程提前退出就换下一轮(launched, monkeypatch):
+    """启动进程秒退 = Chrome 把请求交给了已有实例，这个端口等也等不到。"""
+    profiles: list[Path] = []
+    procs = iter([FakeProc(alive=False), FakeProc()])
+    probes_9223 = iter(["", "ws://x"])
+
+    monkeypatch.setattr(cdp, "_port_usable", lambda p: True)
+    monkeypatch.setattr(
+        cdp,
+        "probe_debug",
+        lambda p=None, **k: next(probes_9223, "") if p == 9223 else "",
+    )
+
+    def fake_launch(**kw):
+        profiles.append(Path(kw["profile_dir"]))
+        return next(procs)
+
+    monkeypatch.setattr(cdp, "launch_chrome", fake_launch)
+    assert cdp.connect_or_launch() is not None
+    assert len(profiles) == 2
+    assert profiles[1].name.endswith("-9223")
+
+
+def test_调试口_下一轮能复用换端口拉起来的那台(launched, monkeypatch):
+    """第一次回退到 9223 后 Chrome 会留着；下次调用要先探到它，别再拉一台。"""
+    monkeypatch.setattr(cdp, "_port_usable", lambda p: p != 9222)
+    monkeypatch.setattr(
+        cdp, "probe_debug", lambda p=None, **k: "ws://x" if p == 9223 else ""
+    )
+    monkeypatch.setattr(cdp, "launch_chrome", lambda **kw: pytest.fail("不该拉新 Chrome"))
+
+    assert isinstance(cdp.connect_or_launch(), FakeCdp)
+
+
+def test_Chrome日志_只挑和调试口有关的行(tmp_path: Path):
+    (tmp_path / cdp._CHROME_LOG_NAME).write_text(
+        "[1:2:ERROR:tcp_socket_win.cc] bind() returned an error: 地址已被占用\n"
+        "DevTools listening on ws://[::1]:9222/devtools/browser/x\n"
+        "[1:2:ERROR:gcm] unrelated noise\n",
+        encoding="utf-8",
+    )
+    hint = cdp._chrome_log_hint(tmp_path)
+    assert "bind()" in hint
+    assert "[::1]" in hint
+    assert "noise" not in hint
+
+
+def test_Chrome日志_没有就不报错(tmp_path: Path):
+    assert cdp._chrome_log_hint(tmp_path) == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -584,6 +725,7 @@ def test_退出_连上才把ws地址记下来(monkeypatch, launched):
     monkeypatch.setattr(cdp.subprocess, "Popen", lambda *a, **k: FakeProc())
     probe = iter(["", "ws://127.0.0.1:9222/devtools/browser/x"])  # 第一次是「复用」那探
     monkeypatch.setattr(cdp, "probe_debug", lambda *a, **k: next(probe, ""))
+    monkeypatch.setattr(cdp, "_port_usable", lambda p: True)
 
     cdp.connect_or_launch()
     assert len(launched) == 1

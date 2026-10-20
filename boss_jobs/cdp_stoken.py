@@ -88,6 +88,7 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -427,11 +428,19 @@ def _disable_features(mode: str) -> str:
 _SW_HIDE: int = 0
 
 
-def _hide_windows(pid: int, *, timeout: float = 10.0) -> int:
+def _hide_windows(
+    pid: int,
+    *,
+    timeout: float = 10.0,
+    proc: subprocess.Popen | None = None,
+) -> int:
     """把这台 Chrome 的顶层窗口 ``SW_HIDE`` 掉，返回藏了几个。
 
     只在 Windows 上有意义（别处返回 0）。Chrome 开窗口比开调试口晚一拍，
     所以找不到就等到 ``timeout``，别以为藏好了。
+
+    :param proc: 启动时拿到的进程。它要是早退了（Chrome 把启动交给了同一个
+        profile 的现有实例），就没什么窗口可等，立刻返回——否则白等 10 秒。
     """
     if os.name != "nt":
         return 0
@@ -453,6 +462,9 @@ def _hide_windows(pid: int, *, timeout: float = 10.0) -> int:
     callback = enum_proc(_visit)
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            logger.debug("pid %s 已经退了，不再等窗口", pid)
+            return 0
         found.clear()
         user32.EnumWindows(callback, 0)
         if found:
@@ -637,26 +649,100 @@ def _kill(proc: subprocess.Popen) -> bool:
     return True
 
 
-def _debug_http(port: int) -> str:
-    return f"http://127.0.0.1:{port}"
+#: 调试口的两个 loopback 地址。Chrome 默认绑 ``127.0.0.1``，**被占时它退到
+#: ``[::1]``**（日志里照样写 ``DevTools listening on ws://[::1]:9222/…``）。
+#: 只问 IPv4 就会把「明明开了」误判成「没开」——真机踩过。
+_LOOPBACK_HOSTS: tuple[str, ...] = ("127.0.0.1", "[::1]")
+
+#: 不走环境变量里的 HTTP 代理。开着梯子 / 构了 ``HTTP_PROXY`` 时，默认 opener
+#: 会连 loopback 一起劫走，表现同样是「Chrome 起了但连不上调试口」。
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _debug_url(host: str, port: int, path: str) -> str:
+    return f"http://{host}:{port}{path}"
 
 
 def probe_debug(port: int | None = None, *, timeout: float = 1.5) -> str:
     """问一下调试口在不在，在就返回 browser 级 WebSocket 地址。
 
+    IPv4 / IPv6 两个 loopback 都问（原因见 :data:`_LOOPBACK_HOSTS`）。
+
     空字符串 = 没连上（Chrome 没起，或起了但没开调试口）。
     """
     port = port or _port()
-    url = f"{_debug_http(port)}/json/version"
+    for host in _LOOPBACK_HOSTS:
+        url = _debug_url(host, port, "/json/version")
+        try:
+            with _LOOPBACK_OPENER.open(url, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, OSError, ValueError):
+            continue
+        ws = str(data.get("webSocketDebuggerUrl") or "")
+        if ws:
+            return ws
+        logger.debug("调试口在 %s，但没给 webSocketDebuggerUrl：%s", url, data)
+    return ""
+
+
+def _can_bind(host: str, port: int) -> bool:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-    except (urllib.error.URLError, OSError, ValueError):
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.bind((host, port))
+    except OSError:
+        return False
+    return True
+
+
+def _port_usable(port: int) -> bool:
+    """Chrome 还能不能在这个端口上开调试口。
+
+    任一 loopback 能 bind 就行——Chrome 自己也是这么退的（见 :func:`probe_debug`）。
+    两个都被别的程序占着才值得换端口。
+    """
+    return _can_bind("127.0.0.1", port) or _can_bind("::1", port)
+
+
+#: Chrome 自己的 stderr 落在 profile 里。调试口起不来时，原因就在这几行：
+#: ``bind() returned an error`` / ``DevTools listening on …`` / 策略拦截。
+#: 以前直接扔 ``DEVNULL``，出问题只能靠猜「是不是安全软件」。
+_CHROME_LOG_NAME = "chrome-stderr.log"
+_CHROME_LOG_MAX = 1 << 20  # 1 MiB；超了下一次启动前清掉
+
+
+def _open_chrome_log(profile: Path, port: int):
+    """给这次启动开一个追加写的 Chrome 日志。开不了返回 ``None``，不拦主流程。"""
+    path = profile / _CHROME_LOG_NAME
+    try:
+        if path.exists() and path.stat().st_size > _CHROME_LOG_MAX:
+            path.unlink()
+        fp = path.open("ab")
+    except OSError as exc:
+        logger.debug("Chrome 日志打不开（%s），stderr 丢弃：%s", path, exc)
+        return None
+    try:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        fp.write(f"\n--- {stamp} launch port={port} ---\n".encode("utf-8"))
+        fp.flush()
+    except OSError:  # pragma: no cover - 写日志失败不该拦启动
+        pass
+    return fp
+
+
+def _chrome_log_hint(profile: Path) -> str:
+    """从 Chrome 日志里挑出解释「调试口为什么没开」的几行。"""
+    try:
+        text = (profile / _CHROME_LOG_NAME).read_text("utf-8", "replace")
+    except OSError:
         return ""
-    ws = str(data.get("webSocketDebuggerUrl") or "")
-    if not ws:
-        logger.debug("调试口在，但没给 webSocketDebuggerUrl：%s", data)
-    return ws
+    keys = ("bind(", "policy", "devtools listening", "remote debugging", "debug port")
+    hits = [
+        line.strip()
+        for line in text.splitlines()
+        if any(key in line.lower() for key in keys)
+    ]
+    return " | ".join(hits[-3:])[:500]
 
 
 def launch_chrome(
@@ -701,19 +787,23 @@ def launch_chrome(
         "about:blank",
     ]
     logger.info("拉起 Chrome（调试口 %s，profile %s，窗口 %s）", port, profile, mode)
+    log = _open_chrome_log(profile, port)
     try:
         proc = subprocess.Popen(  # noqa: S603 - 参数是自己拼的固定列表
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=log if log is not None else subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
     except OSError as exc:
         raise StokenError(f"拉不起 Chrome（{chrome}）：{exc}") from exc
+    finally:
+        if log is not None:
+            log.close()  # 子进程已经拿到句柄，父进程这份可以关了
     if mode == "hidden":
         # 窗口藏起来（Win32）。藏不藏得上都继续：顶多用户看见一个后台窗口，
         # 令牌该拿还是能拿——为这个把整条链路拦掉不值。
-        hidden = _hide_windows(proc.pid)
+        hidden = _hide_windows(proc.pid, proc=proc)
         if hidden:
             logger.info("已隐藏 %d 个 Chrome 窗口（pid %s）", hidden, proc.pid)
         else:
@@ -733,28 +823,43 @@ def connect_or_launch(
 ) -> "CdpClient":
     """连上现成的调试口，连不上就自己拉一台再等它起来。
 
-    端口被别的 Chrome 占着（握手还被拒）时，自动往后挪一两个端口，
-    免得跟用户自己那台死磕。
+    端口被别的程序占着时自动往后挪。⚠️ **每次换端口都换一个 user-data-dir**：
+    Chrome 对同一个 profile 只允许一个实例，第二台会把启动请求交给已经在跑的
+    那台、自己立刻退出——共用 profile 的话，端口永远轮不到第二台开。
 
     :param mode: 窗口档位（:data:`CHROME_MODES`）；只影响**自拉**那一支，
         复用现成的调试口时无从谈起——那台的窗口长什么样是它自己启动时定的。
     """
     first_port = port or _port()
-    ws_url = probe_debug(first_port)
-    if ws_url:
-        try:
-            client = CdpClient(ws_url)
-        except StokenError as exc:
-            # 端口在但握手被拒（多半是那台 Chrome 没开 --remote-allow-origins）
-            logger.info("复用已有调试口 %s 失败（%s），自己拉一台", first_port, exc)
-        else:
-            logger.debug("复用已有 Chrome 调试口 %s", first_port)
-            return client
-
+    base_profile = Path(profile_dir) if profile_dir else _profile_dir()
     last_note = ""
     for offset in range(3):
         p = first_port + offset
-        launch_chrome(chrome=chrome, port=p, profile_dir=profile_dir, mode=mode)
+
+        # 先看这个端口上是不是已经有能用的调试口：可能是用户自己开的那台，
+        # 也可能是上一次换端口时留下的我们那台（本进程内复用，秒连）。
+        ws_url = probe_debug(p)
+        if ws_url:
+            try:
+                client = CdpClient(ws_url)
+            except StokenError as exc:
+                # 端口在但握手被拒（多半是那台 Chrome 没开 --remote-allow-origins）。
+                # 这台用不了，也别在这个端口上再拉一台——探测会优先看到它。
+                last_note = f"端口 {p} 上的不是我们那台：{exc}"
+                continue
+            logger.debug("复用已有 Chrome 调试口 %s", p)
+            return client
+
+        if not _port_usable(p):
+            last_note = f"端口 {p} 被别的程序占着"
+            continue
+        # 只有第一轮用基础 profile（那是「正常」的那份）；后面几轮各用各的，
+        # 免得 Chrome 把启动交给还活着的上一轮实例（见函数 docstring）。
+        profile = base_profile
+        if offset:
+            profile = base_profile.with_name(f"{base_profile.name}-{p}")
+
+        proc = launch_chrome(chrome=chrome, port=p, profile_dir=profile, mode=mode)
         deadline = time.time() + (timeout if offset == 0 else 12.0)
         while time.time() < deadline:
             ws_url = probe_debug(p, timeout=1.0)
@@ -768,12 +873,26 @@ def connect_or_launch(
                 # 记下这台的 ws 地址，退出时按它连回去关掉（见 close_launched_browsers）
                 _track_ws(p, ws_url)
                 return client
+            if proc.poll() is not None:
+                # 启动进程已经退了 = 这个 profile 被另一台 Chrome 占着，
+                # 请求被转交过去，调试口不会在这个端口上开。
+                last_note = f"端口 {p} 的启动进程提前退出了（profile 被别的 Chrome 占着）"
+                break
             time.sleep(0.25)
         else:
             last_note = f"端口 {p} 一直没开"
+
+        # 这一轮没成：把我们拉的那台收掉，别留一个看不见的 Chrome 占着 profile/端口。
+        if proc.poll() is None:
+            _kill(proc)
+        hint = _chrome_log_hint(profile)
+        if hint:
+            last_note += f"；Chrome 日志：{hint}"
+
     raise StokenError(
-        f"Chrome 起了但调试口没开（试过 {first_port}~{first_port + 2}）。{last_note}\n"
-        f"换个 {CDP_PORT_ENV} 试试，或看 Chrome 是不是卡在启动页。"
+        f"调试口没开（试过 {first_port}~{first_port + 2}）。{last_note}\n"
+        f"常见原因：端口被其他程序占着，或安全软件拦了 Chrome 的调试口。\n"
+        f"先在任务管理器里结束所有 chrome.exe 再试；还不行就设 {CDP_PORT_ENV} 换个端口。"
     )
 
 

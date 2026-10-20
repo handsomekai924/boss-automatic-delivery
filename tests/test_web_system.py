@@ -32,7 +32,8 @@ REAL_MESSAGES = [
     "找不到 Chrome：装个 Google Chrome，或用 BOSS_CHROME_BIN 指到 chrome 可执行文件。",
     "BOSS_CHROME_BIN=C:\\nope\\chrome.exe 指的文件不存在",
     "连不上 CDP（ws://127.0.0.1:9222/devtools/browser/8f3c-...）：握手被拒",
-    "Chrome 起了但调试口没开（试过 9222~9224）。端口 9222 一直没开\n换个 BOSS_CDP_PORT 试试",
+    "调试口没开（试过 9222~9224）。端口 9222 一直没开\n"
+    "常见原因：端口被其他程序占着，或安全软件拦了 Chrome 的调试口。",
     "建 Chrome 专属 profile 失败 C:\\x\\.chrome_profile：[WinError 5] 拒绝访问",
     "拉不起 Chrome（C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe）：[WinError 2]",
     "等了 40s 也没等到站点写出 __zp_stoken__。多半是登录态没灌进去（``doc('session')`` 过期？）",
