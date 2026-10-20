@@ -9,6 +9,7 @@ from boss_jobs.store import JobStore, open_store
 
 
 def make_job(encrypt_job_id: str = "id-1", **overrides) -> Job:
+    """造一条带默认字段的职位。"""
     defaults = dict(
         job_name="Python 开发",
         brand_name="示例科技",
@@ -33,6 +34,7 @@ def make_job(encrypt_job_id: str = "id-1", **overrides) -> Job:
 
 
 def make_page(page: int = 1, jobs=(), has_more: bool = True, raw_count: int | None = None) -> PageResult:
+    """造一页抓取结果。"""
     jobs = tuple(jobs)
     return PageResult(
         page=page,
@@ -45,16 +47,13 @@ def make_page(page: int = 1, jobs=(), has_more: bool = True, raw_count: int | No
 
 @pytest.fixture
 def store(tmp_path):
+    """临时目录下的 `JobStore`。"""
     with JobStore(tmp_path / "jobs.db") as s:
         yield s
 
 
-# --------------------------------------------------------------------------- #
-# 写入
-# --------------------------------------------------------------------------- #
-
-
 def test_save_page_inserts_and_counts(store: JobStore):
+    """验保存一页后插入条数与职位/页数统计正确。"""
     outcome = store.save_page(make_page(jobs=[make_job("a"), make_job("b")]))
     assert outcome.inserted == 2
     assert outcome.updated == 0
@@ -63,6 +62,7 @@ def test_save_page_inserts_and_counts(store: JobStore):
 
 
 def test_save_page_upserts_same_job_id(store: JobStore):
+    """验同 id 再存走更新而不是新插。"""
     store.save_page(make_page(jobs=[make_job("a", job_name="旧岗位")]))
     outcome = store.save_page(
         make_page(page=2, jobs=[make_job("a", job_name="新岗位", page=2)], raw_count=1),
@@ -78,6 +78,7 @@ def test_save_page_upserts_same_job_id(store: JobStore):
 
 
 def test_save_page_records_drop_reason(store: JobStore):
+    """验丢弃条数与原因写进页记录。"""
     page = PageResult(
         page=1,
         jobs=(make_job("a"),),
@@ -97,6 +98,7 @@ def test_save_page_records_drop_reason(store: JobStore):
 
 
 def test_save_pages_batch(store: JobStore):
+    """验批量保存多页各自计数。"""
     outcomes = store.save_pages(
         [
             make_page(jobs=[make_job("a")]),
@@ -108,12 +110,8 @@ def test_save_pages_batch(store: JobStore):
     assert store.count_pages() == 2
 
 
-# --------------------------------------------------------------------------- #
-# 查询
-# --------------------------------------------------------------------------- #
-
-
 def test_roundtrip_preserves_fields(store: JobStore):
+    """验存取往返保留主要职位字段。"""
     store.save_page(make_page(jobs=[make_job("a")]))
     job = store.get_job("a")
     assert job is not None
@@ -129,6 +127,7 @@ def test_roundtrip_preserves_fields(store: JobStore):
 
 
 def test_list_jobs_filters(store: JobStore):
+    """验按城市、关键字与条数过滤。"""
     store.save_page(
         make_page(
             jobs=[
@@ -145,39 +144,39 @@ def test_list_jobs_filters(store: JobStore):
 
 
 def test_summary_counts(store: JobStore):
+    """验 summary 聚合职位/页数、原始与保留条数、热门城市。"""
     store.save_page(make_page(jobs=[make_job("a", city_name="广州"), make_job("b", city_name="广州")]))
     store.save_page(make_page(page=2, jobs=[make_job("c", city_name="深圳")], raw_count=3))
     summary = store.summary()
     assert summary["jobs"] == 3
     assert summary["pages"] == 2
-    assert summary["raw_seen"] == 2 + 3  # 第一页 2 条原始，第二页声称 3 条
+    assert summary["raw_seen"] == 2 + 3
     assert summary["kept_seen"] == 3
     assert summary["top_cities"][0] == {"city": "广州", "count": 2}
 
 
 def test_get_job_missing_returns_none(store: JobStore):
+    """验查不到的职位回 `None`。"""
     assert store.get_job("nope") is None
 
 
 def test_memory_db_works():
+    """验内存库也能存取。"""
     with JobStore(":memory:") as store:
         store.save_page(make_page(jobs=[make_job("a")]))
         assert store.count_jobs() == 1
 
 
 def test_open_store_uses_path(tmp_path):
+    """验 `open_store` 按路径建库文件。"""
     path = tmp_path / "sub" / "jobs.db"
     with open_store(path) as store:
         store.save_page(make_page(jobs=[make_job("a")]))
     assert path.exists()
 
 
-# --------------------------------------------------------------------------- #
-# job_desc / detail_fetched_at（JD 补抓）
-# --------------------------------------------------------------------------- #
-
-
 def test_job_desc_defaults_empty(store: JobStore):
+    """验新入库职位的 JD 与抓取时间默认为空。"""
     store.save_page(make_page(jobs=[make_job("a")]))
     job = store.get_job("a")
     assert job is not None
@@ -186,6 +185,7 @@ def test_job_desc_defaults_empty(store: JobStore):
 
 
 def test_update_job_desc_writes_and_stamps(store: JobStore):
+    """验写入 JD 并盖上抓取时间。"""
     store.save_page(make_page(jobs=[make_job("a")]))
     assert store.update_job_desc("a", "岗位职责：\n写代码", fetched_at="2026-10-08 12:00:00")
     job = store.get_job("a")
@@ -205,6 +205,7 @@ def test_update_job_desc_marks_empty_too(store: JobStore):
 
 
 def test_update_job_desc_missing_job_returns_false(store: JobStore):
+    """验职位不存在时写 JD 回 `False`。"""
     assert not store.update_job_desc("nope", "x")
 
 
@@ -221,6 +222,7 @@ def test_resave_does_not_wipe_job_desc(store: JobStore):
 
 
 def test_list_jobs_missing_desc(store: JobStore):
+    """验缺 JD 的职位统计与列表（含 limit）。"""
     store.save_page(make_page(jobs=[make_job("a"), make_job("b"), make_job("c")]))
     store.update_job_desc("b", "有描述", fetched_at="2026-10-08 12:00:00")
     assert store.count_jobs_missing_desc() == 2
@@ -235,7 +237,7 @@ def test_list_jobs_missing_desc_已有描述不再重复获取(store: JobStore):
         make_page(jobs=[make_job("a"), make_job("b"), make_job("c"), make_job("d")])
     )
     store.update_job_desc("b", "已经有 JD 了", fetched_at="2026-10-08 12:00:00")
-    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")  # 抓过，回空
+    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")
     assert store.count_jobs_missing_desc() == 2
     assert {j.encrypt_job_id for j in store.list_jobs_missing_desc()} == {"a", "d"}
 
@@ -256,7 +258,7 @@ def test_fetched_desc_ids(store: JobStore):
     """批量问「哪些已经抓过详情」——抓取流程顺带补 JD 时跳过已有的。"""
     store.save_page(make_page(jobs=[make_job("a"), make_job("b"), make_job("c")]))
     store.update_job_desc("b", "有描述", fetched_at="2026-10-08 12:00:00")
-    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")  # 空也算抓过
+    store.update_job_desc("c", "", fetched_at="2026-10-08 12:00:00")
 
     assert store.fetched_desc_ids(["a", "b", "c", "不在库里的"]) == {"b", "c"}
     assert store.fetched_desc_ids([]) == set()
@@ -264,6 +266,7 @@ def test_fetched_desc_ids(store: JobStore):
 
 
 def test_fetched_desc_ids_失败不算抓过(store: JobStore):
+    """验 `jd_status=failed` 不算抓过，`empty` 算。"""
     store.save_page(make_page(jobs=[make_job("a"), make_job("b")]))
     store.update_job_desc("a", "", fetched_at="2026-10-08 12:00:00", jd_status="failed")
     store.update_job_desc("b", "", fetched_at="2026-10-08 12:00:00", jd_status="empty")
@@ -272,7 +275,7 @@ def test_fetched_desc_ids_失败不算抓过(store: JobStore):
 
 
 def test_column_migration_adds_desc_columns(tmp_path):
-    """老库（建表时还没有 job_desc 列）打开后要能自动补列。"""
+    """老库（建表时还没有 job_desc 列）打开后要能自动补列，重开也幂等。"""
     import sqlite3
 
     import boss_db
@@ -326,6 +329,5 @@ def test_column_migration_adds_desc_columns(tmp_path):
         assert job is not None
         assert job.job_desc == "补上的 JD"
 
-    # 再开一次（幂等）不炸
     with JobStore(path) as store:
         assert store.count_jobs() == 1

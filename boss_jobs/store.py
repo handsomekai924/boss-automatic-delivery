@@ -1,17 +1,7 @@
 """职位入库（SQLite）。
 
-每拿完一页就调 :meth:`JobStore.save_page`——**清洗和入库是同一步**，
-不做「先攒完再批量写」。这样中途断网/被风控，已到手的页也已经落盘。
-
-两张表（DDL 在 :mod:`boss_db`，跟登录态/筛选条件同一个库）：
-
-``jobs``
-    职位主表，主键 ``encrypt_job_id``（接口的全站唯一 id）。
-    重复捞到同一职位时按主键 UPSERT，只更新内容与最近页码，不重复插行。
-
-``fetch_pages``
-    每页一行的抓取流水：本页原始几条、洗后几条、入库几条、有没有下一页。
-    排查「第 3 页怎么少了几条」时先看这张表，不用翻日志。
+每拿完一页就调 `JobStore.save_page`，清洗和入库是同一步；两张表
+（`jobs` 主表 + `fetch_pages` 抓取流水）DDL 在 `boss_db`。
 """
 
 from __future__ import annotations
@@ -33,7 +23,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SaveOutcome:
-    """一页入库的结果。"""
+    """一页入库的结果。
+
+    Attributes:
+        page: 页码。
+        inserted: 新增条数。
+        updated: 更新条数。
+        skipped: 丢弃条数。
+    """
 
     page: int
     inserted: int = 0
@@ -42,6 +39,7 @@ class SaveOutcome:
 
     @property
     def total(self) -> int:
+        """新增 + 更新条数。"""
         return self.inserted + self.updated
 
 
@@ -108,8 +106,6 @@ INSERT INTO fetch_pages (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
-#: 任务 ↔ 岗位归属：同一职位在同一任务里重复出现时保留首次动作
-#: （inserted 比 updated 更有信息量），冲突不覆盖。
 _INSERT_TASK_JOB = """
 INSERT OR IGNORE INTO crawl_task_jobs (task_id, encrypt_job_id, action)
 VALUES (?, ?, ?)
@@ -127,30 +123,30 @@ INSERT INTO crawl_tasks (
 class JobStore:
     """状态库里的职位表。
 
-    :param path: 库文件路径；省略 = ``BOSS_DB`` = ``data/boss.db``（调用时才解析，
-        所以测试只改一个环境变量就能全局隔离）。``":memory:"`` 走内存库（测试用）。
+    Args:
+        path: 库文件路径；省略 = `BOSS_DB` = `data/boss.db`。
+            `":memory:"` 走内存库（测试用）。
     """
 
     def __init__(self, path: Path | str | None = None) -> None:
+        """初始化。"""
         self.path = boss_db.resolve_db_path(path)
         if str(self.path) == ":memory:":
-            # 内存库必须跟 doc 助手共用一个连接，否则各看各的空库
             self._conn = boss_db.acquire(self.path)
             self._owns_conn = False
         else:
-            # 文件库各自开连接：web 线程池会并发建 JobStore，共用一个连接不安全
             self._conn = boss_db.connect(self.path)
             self._owns_conn = True
 
-    # ------------------------------------------------------------------ #
-    # 写入
-    # ------------------------------------------------------------------ #
-
     def save_page(self, result: PageResult, *, task_id: str = "") -> SaveOutcome:
-        """把一页的清洗结果立刻入库，同时记一行 ``fetch_pages`` 流水。
+        """把一页的清洗结果立刻入库，同时记一行 `fetch_pages` 流水。
 
-        ``task_id`` 非空时，本页职位还会写进 ``crawl_task_jobs``（任务↔岗位归属），
-        ``fetch_pages`` 也带上任务号——历史抓取任务能回看「这次带回了哪些职位」。
+        Args:
+            result: 一页清洗结果。
+            task_id: 非空时本页职位还会写进 `crawl_task_jobs`。
+
+        Returns:
+            本页入库结果。
         """
         inserted = 0
         updated = 0
@@ -212,8 +208,7 @@ class JobStore:
     ) -> bool:
         """把详情接口抓到的 JD 写回一条职位。
 
-        同时盖 ``detail_fetched_at``：空 JD 也记一笔，免得下次补抓又翻它一遍。
-        :return: 有没有真的写到行（职位不在库里 → ``False``）。
+        同时盖 `detail_fetched_at`；空 JD 也记一笔。职位不在库里返回 `False`。
         """
         cur = self._conn.execute(
             "UPDATE jobs SET job_desc = ?, detail_fetched_at = ?, "
@@ -246,7 +241,7 @@ class JobStore:
         auto_delivery_blocked: bool,
         checked_at: str | None = None,
     ) -> bool:
-        """Persist the current evaluation while keeping historical audit elsewhere."""
+        """持久化当前规则评估结果；历史审计另存，不在这里改写。"""
         rule_snapshot = list(matched_rules)
         types = sorted({str(rule.get("rule_type")) for rule in rule_snapshot if rule.get("rule_type")})
         conn = self._conn
@@ -270,7 +265,12 @@ class JobStore:
     def update_last_greeted_at(self, encrypt_job_id: str, greeted_at: str | None = None) -> bool:
         """记一次「招呼语发送成功」。失败/跳过不写，抓取 UPSERT 也不会碰这一列。
 
-        :param greeted_at: ``%Y-%m-%d %H:%M:%S``；省略 = 服务器本地当前时间。
+        Args:
+            encrypt_job_id: 职位 id。
+            greeted_at: `%Y-%m-%d %H:%M:%S`；省略 = 服务器本地当前时间。
+
+        Returns:
+            有没有真的写到行。
         """
         cur = self._conn.execute(
             "UPDATE jobs SET last_greeted_at = ? WHERE encrypt_job_id = ?",
@@ -300,10 +300,6 @@ class JobStore:
         ).fetchall()
         return {str(r["encrypt_job_id"]): str(r["last_greeted_at"] or "") for r in rows}
 
-    # ------------------------------------------------------------------ #
-    # 抓取任务档案（只读追溯流水：不提供删除/改写）
-    # ------------------------------------------------------------------ #
-
     def create_crawl_task(
         self,
         task_id: str,
@@ -314,7 +310,7 @@ class JobStore:
         started_at: float | None = None,
         params: Mapping[str, Any] | None = None,
     ) -> None:
-        """``crawl_tasks.start()`` 时插一行（status=running）+ 写入配置快照。"""
+        """`crawl_tasks.start()` 时插一行（status=running）+ 写入配置快照。"""
         now = time.time() if created_at is None else float(created_at)
         self._conn.execute(
             _INSERT_CRAWL_TASK,
@@ -349,7 +345,7 @@ class JobStore:
         inserted_count: int | None = None,
         updated_count: int | None = None,
     ) -> bool:
-        """结束时回写状态与统计。``job_count`` 等省略则按关联表现算。"""
+        """结束时回写状态与统计。`job_count` 等省略则按关联表现算。"""
         with self._conn:
             if job_count is None:
                 row = self._conn.execute(
@@ -395,6 +391,7 @@ class JobStore:
         self._conn.commit()
 
     def get_crawl_task(self, task_id: str) -> dict[str, Any] | None:
+        """按任务号取一行抓取任务；没有回 `None`。"""
         row = self._conn.execute(
             "SELECT * FROM crawl_tasks WHERE task_id = ?", (task_id,)
         ).fetchone()
@@ -409,11 +406,12 @@ class JobStore:
         return [_row_to_crawl_task(row) for row in rows]
 
     def count_crawl_tasks(self) -> int:
+        """抓取任务总数。"""
         row = self._conn.execute("SELECT COUNT(*) AS n FROM crawl_tasks").fetchone()
         return int(row["n"]) if row else 0
 
     def count_crawl_task_jobs(self, task_id: str, *, only_existing: bool = False) -> int:
-        """本批职位数。``only_existing=True`` 只数库里还存在的（「匹配本批」用）。"""
+        """本批职位数。`only_existing=True` 只数库里还存在的（「匹配本批」用）。"""
         if only_existing:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM crawl_task_jobs c "
@@ -447,7 +445,7 @@ class JobStore:
     def list_crawl_task_jobs(
         self, task_id: str, *, limit: int = 20, offset: int = 0, only_existing: bool = False
     ) -> list[dict[str, Any]]:
-        """本批职位摘要（含归属动作）。``only_existing=True`` 只回库里仍存在的。"""
+        """本批职位摘要（含归属动作）。`only_existing=True` 只回库里仍存在的。"""
         if only_existing:
             sql = (
                 "SELECT j.*, c.encrypt_job_id AS link_job_id, c.action AS crawl_action "
@@ -469,7 +467,6 @@ class JobStore:
             action = str(data.get("crawl_action") or "inserted")
             link_id = str(data.get("link_job_id") or "")
             if not data.get("encrypt_job_id"):
-                # 职位已从库里删掉：只剩归属记录，摘要退化成 id
                 out.append({
                     "encrypt_job_id": link_id,
                     "job_name": "",
@@ -486,19 +483,18 @@ class JobStore:
             out.append(item)
         return out
 
-    # ------------------------------------------------------------------ #
-    # 查询
-    # ------------------------------------------------------------------ #
-
     def count_jobs(self) -> int:
+        """职位总条数。"""
         row = self._conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()
         return int(row["n"]) if row else 0
 
     def count_pages(self) -> int:
+        """抓取流水总条数。"""
         row = self._conn.execute("SELECT COUNT(*) AS n FROM fetch_pages").fetchone()
         return int(row["n"]) if row else 0
 
     def get_job(self, encrypt_job_id: str) -> Job | None:
+        """按主键取一条职位；没有回 `None`。"""
         row = self._conn.execute(
             "SELECT * FROM jobs WHERE encrypt_job_id = ?", (encrypt_job_id,)
         ).fetchone()
@@ -515,10 +511,9 @@ class JobStore:
         jd_status: str | None = None,
         stable: bool = False,
     ) -> list[Job]:
-        """按最近抓取顺序列职位。``keyword`` 同时匹配岗位名与公司名。
+        """按最近抓取顺序列职位。`keyword` 同时匹配岗位名与公司名。
 
-        ``stable=True`` 时按主键排序：``fetched_at, page`` 不唯一，
-        OFFSET 翻页在并列时顺序会抖，批量扫描（规则重检）要用稳定序。
+        `stable=True` 时按主键排序，批量扫描（规则重检）要用稳定序。
         """
         sql = "SELECT * FROM jobs"
         where, params = _match_where(city=city, keyword=keyword, category=category, jd_status=jd_status)
@@ -547,7 +542,7 @@ class JobStore:
         category: str | None = None,
         jd_status: str | None = None,
     ) -> int:
-        """按 :meth:`list_jobs` 同款条件数职位，翻页前先看总数。"""
+        """按 `list_jobs` 同款条件数职位，翻页前先看总数。"""
         sql = "SELECT COUNT(*) AS n FROM jobs"
         where, params = _match_where(
             city=city, keyword=keyword, category=category, jd_status=jd_status
@@ -560,17 +555,10 @@ class JobStore:
     def list_jobs_missing_desc(
         self, *, limit: int = 20, offset: int = 0
     ) -> list[Job]:
-        """列出**还没抓到描述**的职位，手动补抓用。
+        """列出还没抓到描述的职位，手动补抓用。
 
-        两类进这个名单：
-
-        - ``detail_fetched_at = ''`` —— 一次都没抓过；
-        - ``jd_status = 'failed'`` —— 抓过但失败了（超时、风控…），要能重试。
-
-        两类不回，保证「已有描述的不再重复获取」：
-
-        - ``job_desc != ''`` —— 已经有 JD 了；
-        - 抓过且回了空 JD（``jd_status = 'empty'``）——别每次去撞同一批。
+        两类进名单：一次都没抓过、抓过但失败（可重试）。
+        已有 JD、或抓过且回了空 JD 的不再列，避免重复撞墙。
         """
         rows = self._conn.execute(
             "SELECT * FROM jobs WHERE job_desc = '' "
@@ -581,6 +569,7 @@ class JobStore:
         return [_row_to_job(row) for row in rows]
 
     def count_jobs_missing_desc(self) -> int:
+        """还没抓到描述的职位条数。"""
         row = self._conn.execute(
             "SELECT COUNT(*) AS n FROM jobs WHERE job_desc = '' "
             "AND (detail_fetched_at = '' OR jd_status = 'failed')"
@@ -588,11 +577,7 @@ class JobStore:
         return int(row["n"]) if row else 0
 
     def fetched_desc_ids(self, encrypt_job_ids: Sequence[str]) -> set[str]:
-        """批量问「这些职位里哪些已经抓过详情」，回已抓过的 id 集合。
-
-        抓取流程顺带补 JD 时用：一页里已入库、已有描述的**不再重复拉详情**。
-        失败的不算抓过——下次抓取再试一次。
-        """
+        """这些职位里哪些已经抓过详情；失败的不算抓过。"""
         ids = [str(i) for i in encrypt_job_ids if i]
         if not ids:
             return set()
@@ -636,7 +621,7 @@ class JobStore:
         return int(cur.rowcount)
 
     def summary(self) -> dict[str, Any]:
-        """一页人读摘要（CLI ``stats`` 用）。"""
+        """一页人读摘要（CLI `stats` 用）。"""
         total = self.count_jobs()
         by_city = self._conn.execute(
             "SELECT city_name, COUNT(*) AS n FROM jobs "
@@ -661,23 +646,18 @@ class JobStore:
             ],
         }
 
-    # ------------------------------------------------------------------ #
-
     def close(self) -> None:
+        """关掉自开的连接；内存库共用连接不关。"""
         if self._owns_conn:
             self._conn.close()
-        # :memory: 是跟 doc 助手共享的连接，留着给下一个使用者
 
     def __enter__(self) -> "JobStore":
+        """返回自身。"""
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """退出时关连接。"""
         self.close()
-
-
-# --------------------------------------------------------------------------- #
-# 行 ↔ 模型
-# --------------------------------------------------------------------------- #
 
 
 def _match_where(
@@ -687,7 +667,7 @@ def _match_where(
     category: str | None = None,
     jd_status: str | None = None,
 ) -> tuple[list[str], list[Any]]:
-    """``list_jobs`` / ``delete_*`` 共用的 WHERE 片段。"""
+    """`list_jobs` / `delete_*` 共用的 WHERE 片段。"""
     where: list[str] = []
     params: list[Any] = []
     if city:
@@ -715,6 +695,7 @@ def _match_where(
 
 
 def _job_params(job: Job, fetched_at: str) -> dict[str, Any]:
+    """职位 → UPSERT 参数（列表字段序列化成 JSON）。"""
     params = job.to_dict()
     params["job_labels"] = json.dumps(list(job.job_labels), ensure_ascii=False)
     params["skills"] = json.dumps(list(job.skills), ensure_ascii=False)
@@ -738,6 +719,7 @@ def _job_params(job: Job, fetched_at: str) -> dict[str, Any]:
 
 
 def _row_to_job(row: sqlite3.Row) -> Job:
+    """数据行 → `Job`。"""
     data = dict(row)
     return Job(
         job_name=data["job_name"],
@@ -800,6 +782,7 @@ def _row_to_crawl_task(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _json_tuple(raw: Any) -> tuple[str, ...]:
+    """JSON 列 → 字符串元组；坏数据回空元组。"""
     if not raw:
         return ()
     try:
@@ -812,6 +795,7 @@ def _json_tuple(raw: Any) -> tuple[str, ...]:
 
 
 def _json_dict_tuple(raw: Any) -> tuple[dict[str, Any], ...]:
+    """JSON 列 → dict 元组；坏数据回空元组。"""
     if not raw:
         return ()
     try:
@@ -824,11 +808,12 @@ def _json_dict_tuple(raw: Any) -> tuple[dict[str, Any], ...]:
 
 
 def _now() -> str:
+    """服务器本地当前时间（`%Y-%m-%d %H:%M:%S`）。"""
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
 def open_store(path: Path | str | None = None) -> JobStore:
-    """按默认库（或指定路径）打开职位表。省略 ``path`` 就是 ``BOSS_DB`` / ``data/boss.db``。"""
+    """按默认库（或指定路径）打开职位表。省略 `path` 就是 `BOSS_DB` / `data/boss.db`。"""
     return JobStore(path)
 
 

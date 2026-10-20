@@ -7,7 +7,7 @@ SmsCodeTicket(phone_masked='138****8000', ...)
 >>> client.login_by_sms("13800138000", "123456") # 人工填入收到的验证码
 LoginResult(token='...', user=UserInfo(...))
 
-配合 CLI 使用更省事::
+配合 CLI 使用更省事：
 
     python -m boss_login login --phone 13800138000
 """
@@ -77,12 +77,10 @@ from .verify import (
 __version__ = "1.1.0"
 
 __all__ = [
-    # 核心
     "ZhipinLoginClient",
     "AppScanLogin",
     "create_client",
     "persist_login",
-    # 模型
     "ApiResponse",
     "LoginResult",
     "SmsCodeTicket",
@@ -94,7 +92,6 @@ __all__ = [
     "SliderSolution",
     "StoredSession",
     "UserInfo",
-    # 异常
     "AccountBlocked",
     "ApiError",
     "BossLoginError",
@@ -105,7 +102,6 @@ __all__ = [
     "SessionExpired",
     "TransportError",
     "ValidationError",
-    # 工具
     "SliderSolver",
     "build_helper_html",
     "generate_trace_id",
@@ -128,7 +124,6 @@ __all__ = [
     "clear_session",
     "load_session",
     "save_session",
-    # 常量
     "BASE_URL",
     "CODE_LENGTH",
     "DEFAULT_DB_PATH",
@@ -148,8 +143,13 @@ def create_client(
 ) -> ZhipinLoginClient:
     """创建客户端，并把上次保存的 Cookie / token 注入会话。
 
-    :param session_path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
-    :param load_stored: 为 ``False`` 时忽略本地登录态，强制走新的登录流程。
+    Args:
+        session_path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+        load_stored: 为 `False` 时忽略本地登录态，强制走新的登录流程。
+        **client_kwargs: 透传给 `ZhipinLoginClient`。
+
+    Returns:
+        注入了本地登录态的客户端。
     """
     client = ZhipinLoginClient(**client_kwargs)
     if load_stored:
@@ -157,12 +157,8 @@ def create_client(
         if not stored.is_empty:
             for name, value in stored.cookies.items():
                 client.http.cookies.set(name, value)
-            # 落盘的会话可能只剩 token（真实站点鉴权靠 Cookie，但假服务端
-            # 之类会把 token 放响应体）。两种都得算登录态。
             if stored.token:
                 client.set_auth_token(stored.token)
-            # 落盘时已经认定是登录凭证的 Cookie 名，复用时也得认——名字可能
-            # 不在 AUTH_COOKIES 里（真实站点 Set-Cookie 的名字会变）。
             client.set_session_cookies(stored.cookies)
     return client
 
@@ -175,7 +171,13 @@ def persist_login(
 ) -> Path:
     """把登录结果落盘到状态库（token + Cookie + 脱敏手机号），供下次复用。
 
-    :param session_path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    Args:
+        client: 已登录的客户端，用于兜底取 Cookie。
+        result: 登录回执。
+        session_path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+
+    Returns:
+        状态库路径。
     """
     cookies = result.cookies or _cookies_of(client)
     return save_session(
@@ -195,6 +197,7 @@ def persist_login(
 
 
 def _cookies_of(client: ZhipinLoginClient) -> dict[str, str]:
+    """从客户端 Cookie 罐取出当前 Cookie。"""
     jar = getattr(client.http, "cookies", None)
     if jar is None or not hasattr(jar, "get_dict"):
         return {}

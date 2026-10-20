@@ -1,8 +1,6 @@
-"""``boss_web`` 入口层测试。
+"""`boss_web` 入口层测试。
 
-存在的理由和 ``tests/test_cli.py`` 一样：入口是最容易坏、又最不容易被测到的一层
-（那次的教训是一个不存在的名字被 import 进来，整套测试却全绿）。这里真的
-import 模块、真的调 ``main()``。
+入口是最容易坏又最不容易被测到的一层：这里真 import 模块、真调 `main()`。
 """
 
 from __future__ import annotations
@@ -29,18 +27,15 @@ def _fake_gitee(monkeypatch):
 
 
 def _occupy(host: str = "127.0.0.1") -> socket.socket:
+    """占住一个空闲端口，返回已 listen 的 socket。"""
     sock = socket.socket()
     sock.bind((host, 0))
     sock.listen(1)
     return sock
 
 
-# --------------------------------------------------------------------------- #
-# 入口本身
-# --------------------------------------------------------------------------- #
-
-
 def test_module_imports_and_parser_builds():
+    """验模块能 import，解析器默认参数正确。"""
     parser = cli.build_parser()
     args = parser.parse_args([])
     assert args.host == "127.0.0.1"
@@ -49,6 +44,7 @@ def test_module_imports_and_parser_builds():
 
 
 def test_parser_accepts_documented_flags():
+    """验文档里写过的 CLI 开关都能解析。"""
     args = cli.build_parser().parse_args(
         ["--host", "0.0.0.0", "--port", "9000", "--no-browser", "--self-check", "--log-level", "debug"]
     )
@@ -61,12 +57,8 @@ def test_parser_accepts_documented_flags():
     assert args.log_level == "debug"
 
 
-# --------------------------------------------------------------------------- #
-# 端口顺延
-# --------------------------------------------------------------------------- #
-
-
 def test_pick_port_returns_preferred_when_free():
+    """验首选端口空闲时原样返回。"""
     sock = _occupy()
     free = sock.getsockname()[1]
     sock.close()
@@ -86,20 +78,15 @@ def test_pick_port_skips_occupied_port():
 
 
 def test_pick_port_falls_back_to_system_when_all_taken():
+    """验首选端口占满时让系统另派端口。"""
     socks = [_occupy() for _ in range(3)]
     first = socks[0].getsockname()[1]
     try:
-        # tries=1 只试第一个；它被占着，就该走「让系统派一个」
         picked = cli.pick_port("127.0.0.1", first, tries=1)
         assert picked != first
     finally:
         for sock in socks:
             sock.close()
-
-
-# --------------------------------------------------------------------------- #
-# 自检
-# --------------------------------------------------------------------------- #
 
 
 def test_self_check_passes_on_a_good_tree(capsys):
@@ -122,6 +109,7 @@ def test_self_check_打印当前版本_发行版本_是否需要更新(capsys):
 
 
 def test_self_check_有新版本时给出下载地址(monkeypatch, capsys):
+    """验有新版本时自检输出 Gitee 与 GitHub 下载地址。"""
     monkeypatch.setattr(
         update_check,
         "fetch_latest_release",
@@ -150,12 +138,14 @@ def test_self_check_does_not_start_server(monkeypatch):
 
 
 def test_横幅先打版本对比占位_测完再补真结果(monkeypatch, capsys):
-    """启动不能卡在网络检测上，所以横幅先占位，后台测完再打一行结果。"""
+    """启动不能卡在网络检测上，所以横幅先占位，后台测完再打一行结果。
+
+    同步跑 on_done 方便断言（真跑在守护线程里）。
+    """
     monkeypatch.setattr(cli, "_setup_logging", lambda *_a, **_k: None)
     monkeypatch.setattr("uvicorn.Server.run", lambda self: None, raising=False)
     monkeypatch.setattr(cli, "pick_port", lambda *_a, **_k: 8799)
 
-    # 同步跑 on_done，方便断言；真跑是守护线程里跑的
     monkeypatch.setattr(
         update_check,
         "schedule_startup_check",
@@ -172,6 +162,7 @@ def test_横幅先打版本对比占位_测完再补真结果(monkeypatch, capsy
 
 
 def test_打印行格式固定三行(monkeypatch, capsys):
+    """验版本对比控制台固定打印三行。"""
     from boss_web.services.update_check import format_console_lines
 
     lines = format_console_lines(
@@ -181,11 +172,6 @@ def test_打印行格式固定三行(monkeypatch, capsys):
     assert "当前版本" in text and "v1.1.0" in text
     assert "发行版本" in text and "v1.2.0" in text
     assert "是否需要更新" in text and "有新版本" in text
-
-
-# --------------------------------------------------------------------------- #
-# 登录态自检：横幅占位 + 测完才开浏览器
-# --------------------------------------------------------------------------- #
 
 
 def test_横幅先打登录状态占位_测完再补真结果(monkeypatch, capsys):
@@ -200,6 +186,7 @@ def test_横幅先打登录状态占位_测完再补真结果(monkeypatch, capsy
     monkeypatch.setattr(update_check, "schedule_startup_check", lambda on_done=None: None)
 
     def fake_schedule(on_done=None, **_kwargs):
+        """同步回调登录态结果，返回已 set 的完成事件。"""
         if on_done is not None:
             on_done({"state": "absent", "message": "库里没有登录态", "error": None})
         done = threading.Event()
@@ -227,6 +214,7 @@ def test_开浏览器要等登录态自检出结果():
     server = types.SimpleNamespace(started=True, should_exit=False)
 
     def fake_open(url):
+        """记录浏览器打开的 URL。"""
         opened.append(url)
 
     original = cli.webbrowser.open
@@ -238,7 +226,6 @@ def test_开浏览器要等登录态自检出结果():
             daemon=True,
         )
         t.start()
-        # 自检还没出结果：浏览器不该开
         time.sleep(0.3)
         assert opened == []
 

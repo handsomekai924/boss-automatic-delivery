@@ -1,6 +1,6 @@
 """黑名单规则、规则重检与采集配置的 API / 服务测试。
 
-规矩：只用隔离库（``isolated_db``），不碰真 Chrome、真 LLM。
+规矩：只用隔离库（`isolated_db`），不碰真 Chrome、真 LLM。
 """
 
 from __future__ import annotations
@@ -19,10 +19,12 @@ from boss_web.services.blacklist_recheck import RecheckTaskManager, recheck_task
 
 @pytest.fixture
 def client():
+    """提供隔离库下的 TestClient。"""
     return TestClient(create_app())
 
 
 def make_job(job_id: str, *, job_name: str = "Python 开发", brand_name: str = "甲公司", job_desc: str = "") -> Job:
+    """造一条可入库的职位（可带描述）。"""
     item = {
         "encryptJobId": job_id,
         "jobName": job_name,
@@ -39,17 +41,16 @@ def make_job(job_id: str, *, job_name: str = "Python 开发", brand_name: str = 
 
 
 def save_jobs(*jobs: Job) -> JobStore:
+    """把职位批量写进库，回打开的 JobStore。"""
     store = JobStore()
     store.save_page(PageResult(page=1, jobs=tuple(jobs), has_more=False, raw_count=len(jobs)))
     return store
 
 
-# --------------------------------------------------------------------------- #
-# 规则 CRUD / 校验
-# --------------------------------------------------------------------------- #
 
 
 def test_company_rule_rejects_scope(client: TestClient):
+    """验证公司规则不许带 scope。"""
     resp = client.post(
         "/api/blacklist/rules",
         json={"rule_type": "company", "pattern": "甲公司", "match_mode": "exact", "scope": "both"},
@@ -59,6 +60,7 @@ def test_company_rule_rejects_scope(client: TestClient):
 
 
 def test_company_rule_accepts_empty_scope(client: TestClient):
+    """验证公司规则可带空 scope。"""
     resp = client.post(
         "/api/blacklist/rules",
         json={"rule_type": "company", "pattern": "甲公司", "match_mode": "exact", "scope": ""},
@@ -68,6 +70,7 @@ def test_company_rule_accepts_empty_scope(client: TestClient):
 
 
 def test_jd_rule_requires_scope(client: TestClient):
+    """验证 JD 规则必须带合法 scope。"""
     resp = client.post(
         "/api/blacklist/rules",
         json={"rule_type": "jd_keyword", "pattern": "996", "match_mode": "contains", "scope": "nope"},
@@ -82,6 +85,7 @@ def test_jd_rule_requires_scope(client: TestClient):
 
 
 def test_invalid_regex_rejected_when_enabled(client: TestClient):
+    """验证启用中的非法正则被拒。"""
     resp = client.post(
         "/api/blacklist/rules",
         json={"rule_type": "jd_keyword", "pattern": "([", "match_mode": "regex", "scope": "both", "enabled": True},
@@ -90,6 +94,7 @@ def test_invalid_regex_rejected_when_enabled(client: TestClient):
 
 
 def test_edit_preserves_disabled_flag(client: TestClient):
+    """验证编辑规则保留禁用标记。"""
     created = client.post(
         "/api/blacklist/rules",
         json={"rule_type": "company", "pattern": "乙公司", "match_mode": "exact", "enabled": False},
@@ -104,6 +109,7 @@ def test_edit_preserves_disabled_flag(client: TestClient):
 
 
 def test_delete_keeps_historical_hits(client: TestClient):
+    """验证删规则后历史命中仍可查。"""
     created = client.post(
         "/api/blacklist/rules",
         json={"rule_type": "company", "pattern": "丙公司", "match_mode": "exact"},
@@ -115,26 +121,25 @@ def test_delete_keeps_historical_hits(client: TestClient):
     assert any(h["brand_name"] == "丙公司" for h in hits)
 
 
-# --------------------------------------------------------------------------- #
-# 评估器
-# --------------------------------------------------------------------------- #
 
 
 def test_empty_company_name_is_not_a_hit_but_blocks():
+    """验证空公司名不命中但拦自动投递。"""
     rules = [{"rule_type": "company", "pattern": ".*", "match_mode": "regex", "enabled": True, "rule_id": "r1"}]
     assert blacklist.evaluate_company("", rules) == []
     assert blacklist.evaluate_company("   ", rules) == []
-    # 有名字时正则仍然正常命中
     assert blacklist.evaluate_company("随便什么公司", rules)
 
 
 def test_company_normalize_and_exact():
+    """验证公司名归一后精确匹配。"""
     rules = [{"rule_type": "company", "pattern": "甲公司", "match_mode": "exact", "enabled": True, "rule_id": "r1"}]
     assert blacklist.evaluate_company("  甲   公司  ", rules)
     assert not blacklist.evaluate_company("甲公司分公司", rules)
 
 
 def test_jd_scope_name_only_matches_without_desc():
+    """验证 scope=job_name 无描述也能命中。"""
     rules = [
         {
             "rule_type": "jd_keyword",
@@ -150,12 +155,10 @@ def test_jd_scope_name_only_matches_without_desc():
     assert not blacklist.evaluate_jd("Java 工程师", "", rules)
 
 
-# --------------------------------------------------------------------------- #
-# 规则重检
-# --------------------------------------------------------------------------- #
 
 
 def _wait_done(manager: RecheckTaskManager, timeout: float = 5.0) -> dict:
+    """等重检任务进入终态，回快照。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         snap = manager.snapshot()
@@ -166,6 +169,7 @@ def _wait_done(manager: RecheckTaskManager, timeout: float = 5.0) -> dict:
 
 
 def test_recheck_updates_state_and_keeps_analysis(client: TestClient):
+    """验证重检更新黑名单状态且不写分析表。"""
     store = save_jobs(
         make_job("j1", brand_name="甲公司", job_name="Python", job_desc="写代码"),
         make_job("j2", brand_name="正常公司", job_name="Java", job_desc="也写代码"),
@@ -186,7 +190,6 @@ def test_recheck_updates_state_and_keeps_analysis(client: TestClient):
         assert j1.auto_delivery_blocked is True
         assert j2.company_blacklisted is False
         assert j2.auto_delivery_blocked is False
-        # 分析表不应被重检写入
         import boss_db
 
         conn = boss_db.acquire()
@@ -201,10 +204,10 @@ def test_recheck_updates_state_and_keeps_analysis(client: TestClient):
 
 
 def test_recheck_rule_snapshot_frozen_at_start():
+    """验证开跑后改规则不影响本次快照。"""
     manager = RecheckTaskManager()
     task = manager.start(job_ids=["missing"])
     assert task.rules_snapshot is not None
-    # 启动后再改规则不影响已开始任务的快照内容
     before = tuple(task.rules_snapshot)
     blacklist.create_rule({"rule_type": "company", "pattern": "冻结测试", "match_mode": "exact"})
     assert tuple(task.rules_snapshot) == before
@@ -212,6 +215,7 @@ def test_recheck_rule_snapshot_frozen_at_start():
 
 
 def test_recheck_conflict_when_running():
+    """验证重检跑着时再启动冲突。"""
     manager = RecheckTaskManager()
     task = manager.start(job_ids=["a"])
     try:
@@ -223,6 +227,7 @@ def test_recheck_conflict_when_running():
 
 
 def test_recheck_paging_beyond_one_batch():
+    """验证重检跨批分页扫完全部职位。"""
     store = save_jobs(*[make_job(f"p{i}", brand_name=f"公司{i}") for i in range(8)])
     try:
         manager = RecheckTaskManager()
@@ -236,6 +241,7 @@ def test_recheck_paging_beyond_one_batch():
 
 
 def test_recheck_name_only_scope_checked_without_desc():
+    """验证仅职名 scope 无描述也能标黑。"""
     store = save_jobs(make_job("n1", job_name="前端 外包", brand_name="正常公司", job_desc=""))
     try:
         blacklist.create_rule(
@@ -259,6 +265,7 @@ def test_recheck_name_only_scope_checked_without_desc():
 
 
 def test_recheck_no_jd_rules_marks_checked_and_unblocked():
+    """验证无 JD 规则时标已检且不拦投递。"""
     store = save_jobs(make_job("c1", brand_name="正常公司", job_desc=""))
     try:
         manager = RecheckTaskManager()
@@ -273,13 +280,13 @@ def test_recheck_no_jd_rules_marks_checked_and_unblocked():
 
 
 def test_recheck_missing_company_blocks_auto_delivery():
+    """验证缺公司名仍拦自动投递。"""
     store = save_jobs(make_job("m1", brand_name="", job_desc="写代码"))
     try:
         manager = RecheckTaskManager()
         manager.start()
         _wait_done(manager)
         job = store.get_job("m1")
-        # Job.from_api 的 is_valid 可能拒掉空公司名；能入库才算
         if job is not None:
             assert job.auto_delivery_blocked is True
             assert job.company_blacklisted is False
@@ -288,6 +295,7 @@ def test_recheck_missing_company_blocks_auto_delivery():
 
 
 def test_recheck_status_not_found_raises():
+    """验证查不存在的重检任务会抛错。"""
     manager = RecheckTaskManager()
     with pytest.raises(Exception):
         manager.snapshot("br_nope")
@@ -301,14 +309,12 @@ def test_recheck_dedupes_hits_within_one_run():
             {"rule_type": "company", "pattern": "甲公司", "match_mode": "exact"}
         )
         manager = RecheckTaskManager()
-        # 同一个 job_id 传两次：既测去重，也防分页抖动
         manager.start(job_ids=["d1", "d1", "d1"])
         snap = _wait_done(manager)
         assert snap["status"] == "done"
         hits = [h for h in blacklist.list_hits(rule["rule_id"]) if h.get("task_id") == snap["task_id"]]
         assert len(hits) == 1
 
-        # 再跑一轮：新的一轮记新的一条（时间线保留）
         manager2 = RecheckTaskManager()
         manager2.start(job_ids=["d1"])
         snap2 = _wait_done(manager2)
@@ -321,6 +327,7 @@ def test_recheck_dedupes_hits_within_one_run():
 
 
 def test_recheck_skips_duplicate_jobs_in_one_run():
+    """验证同一轮重复 job_id 只处理一次。"""
     store = save_jobs(make_job("d2", brand_name="甲公司", job_desc=""))
     try:
         blacklist.create_rule({"rule_type": "company", "pattern": "甲公司", "match_mode": "exact"})
@@ -328,19 +335,16 @@ def test_recheck_skips_duplicate_jobs_in_one_run():
         manager.start(job_ids=["d2", "d2"])
         snap = _wait_done(manager)
         assert snap["status"] == "done"
-        # 同一职位只处理一次，进度不会重复计数
         assert snap["progress"]["done"] == 1
         assert snap["progress"]["total"] == 1
     finally:
         store.close()
 
 
-# --------------------------------------------------------------------------- #
-# 采集配置 API
-# --------------------------------------------------------------------------- #
 
 
 def test_collection_config_preserves_page_size(client: TestClient):
+    """验证采集配置保留 pageSize。"""
     payload = {
         "query": "python",
         "city": "101280100",
@@ -374,6 +378,7 @@ def test_collection_config_preserves_page_size(client: TestClient):
 
 
 def test_collection_config_reset(client: TestClient):
+    """验证采集配置重置为默认。"""
     client.put(
         "/api/collection/config",
         json={"query": "go", "pageSize": 20, "city": "101010100"},
@@ -384,13 +389,13 @@ def test_collection_config_reset(client: TestClient):
 
 
 def test_blacklist_recheck_api_endpoints(client: TestClient):
+    """验证重检接口起停与状态。"""
     idle = client.get("/api/blacklist/recheck/status").json()
     assert idle["status"] == "idle"
     started = client.post("/api/blacklist/recheck", json={"limit": 10})
     assert started.status_code == 200
     task_id = started.json()["task_id"]
     assert task_id
-    # 轮询到结束
     for _ in range(100):
         state = client.get("/api/blacklist/recheck/status").json()
         if state.get("status") in {"done", "error", "cancelled"}:
@@ -399,12 +404,10 @@ def test_blacklist_recheck_api_endpoints(client: TestClient):
     assert state["status"] in {"done", "error", "cancelled"}
 
 
-# --------------------------------------------------------------------------- #
-# 匹配汇总 / 抓取计数回归
-# --------------------------------------------------------------------------- #
 
 
 def test_match_auto_delivery_blocked_helper():
+    """验证自动投递拦截判定的各分支。"""
     from boss_web.services.match_task import _auto_delivery_blocked
 
     assert _auto_delivery_blocked({"company_blacklisted": True})
@@ -423,6 +426,7 @@ def test_match_auto_delivery_blocked_helper():
 
 
 def test_crawl_task_progress_does_not_double_count_finished():
+    """验证 finished 事件不重复累计进度。"""
     from boss_web.services.crawl_task import CrawlTask
 
     task = CrawlTask({})
@@ -435,6 +439,7 @@ def test_crawl_task_progress_does_not_double_count_finished():
 
 
 def test_crawl_task_detail_done_counts_empty():
+    """验证空描述详情也计入完成数。"""
     from boss_web.services.crawl_task import CrawlTask
 
     task = CrawlTask({})

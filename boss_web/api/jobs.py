@@ -1,4 +1,7 @@
-"""职位库：列表 / 详情 / 删除 / 统计 / 补抓描述。"""
+"""职位库：列表 / 详情 / 删除 / 统计 / 补抓描述。
+
+`fetch-descriptions` 必须注册在 `/{encrypt_job_id}` 之前，免得被动态路由吃掉。
+"""
 
 from __future__ import annotations
 
@@ -16,19 +19,28 @@ router = APIRouter()
 
 
 class DeleteBody(BaseModel):
+    """批量删除职位。"""
+
     ids: list[str] = Field(default_factory=list)
 
 
 class ClearBody(BaseModel):
+    """清空职位库。"""
+
     confirm: bool = False
     city: str | None = None
     keyword: str | None = None
 
 
 class FetchDescBody(BaseModel):
-    #: 本次最多补几条；0 = 全部没描述的
+    """补抓 JD 参数。
+
+    Attributes:
+        limit: 本次最多补几条；0 = 全部没描述的。
+        interval: 条间隔（秒）。0/不传 = 服务端默认 `DETAIL_INTERVAL`（1s），防风控。
+    """
+
     limit: int = Field(0, ge=0, le=5000)
-    #: 条间隔（秒）。0/不传 = 服务端默认 ``DETAIL_INTERVAL``（1s），防风控。
     interval: float = Field(0.0, ge=0.0, le=30.0)
 
 
@@ -41,6 +53,7 @@ def list_jobs(
     category: str | None = None,
     jd_status: str | None = None,
 ) -> dict[str, Any]:
+    """分页列出职位库。"""
     with JobStore() as store:
         items = store.list_jobs(
             limit=limit, offset=offset, city=city, keyword=keyword,
@@ -59,11 +72,10 @@ def list_jobs(
 
 @router.get("/stats")
 def stats() -> dict[str, Any]:
+    """职位库汇总统计与最近翻页日志。"""
     with JobStore() as store:
         summary = store.summary()
         summary["missing_desc"] = store.count_jobs_missing_desc()
-        # list_pages 回的是表原始列名（inserted_count），流水事件用的是 inserted
-        # ——这里统一成事件的键名，前端一套字段吃两种来源。
         pages_log = []
         for row in store.list_pages(limit=20):
             item = dict(row)
@@ -74,14 +86,11 @@ def stats() -> dict[str, Any]:
     return summary
 
 
-# ---- 手动补抓 JD：必须排在 /{encrypt_job_id} 之前，免得被动态路由吃掉 ----
-
-
 @router.post("/fetch-descriptions")
 def fetch_descriptions(body: FetchDescBody | None = None) -> dict[str, Any]:
     """对还没抓到描述的职位批量补 JD（后台任务）。
 
-    名单 = 一次没抓过的 + 抓过但 ``jd_status = 'failed'`` 的；回过空 JD 的不再撞。
+    名单 = 一次没抓过的 + 抓过但 `jd_status = 'failed'` 的；回过空 JD 的不再撞。
     """
     limit = (body.limit if body else 0) or 0
     interval = (body.interval if body else 0.0) or None
@@ -91,17 +100,20 @@ def fetch_descriptions(body: FetchDescBody | None = None) -> dict[str, Any]:
 
 @router.get("/fetch-descriptions/status")
 def fetch_descriptions_status() -> dict[str, Any]:
+    """补抓 JD 任务快照。"""
     return desc_tasks.snapshot()
 
 
 @router.post("/fetch-descriptions/cancel")
 def fetch_descriptions_cancel() -> dict[str, Any]:
+    """取消补抓 JD 任务。"""
     task = desc_tasks.cancel()
     return task.snapshot()
 
 
 @router.get("/{encrypt_job_id}")
 def get_job(encrypt_job_id: str) -> dict[str, Any]:
+    """按 id 取单条职位。"""
     with JobStore() as store:
         job = store.get_job(encrypt_job_id)
     if job is None:
@@ -111,6 +123,7 @@ def get_job(encrypt_job_id: str) -> dict[str, Any]:
 
 @router.delete("/{encrypt_job_id}")
 def delete_job(encrypt_job_id: str) -> dict[str, Any]:
+    """按 id 删单条职位。"""
     with JobStore() as store:
         ok = store.delete_job(encrypt_job_id)
     if not ok:
@@ -120,6 +133,7 @@ def delete_job(encrypt_job_id: str) -> dict[str, Any]:
 
 @router.post("/delete")
 def delete_many(body: DeleteBody) -> dict[str, Any]:
+    """批量删除职位。"""
     if not body.ids:
         raise ValidationWebError("没有选中任何职位")
     with JobStore() as store:
@@ -129,6 +143,7 @@ def delete_many(body: DeleteBody) -> dict[str, Any]:
 
 @router.post("/clear")
 def clear_jobs(body: ClearBody) -> dict[str, Any]:
+    """清空职位库（需 confirm）。"""
     if not body.confirm:
         raise ValidationWebError("需要 confirm=true 才能清空")
     with JobStore() as store:

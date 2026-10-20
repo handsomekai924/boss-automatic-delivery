@@ -1,19 +1,14 @@
 """搜索条件装配：把 todo.md 第二节的筛选维度拼成搜索接口的查询串。
 
 「JobSearchFilter」就是这一步——用户选好城市/求职类型/薪资/经验/学历/行业/规模
-之后，把这些选中值编成 ``/wapi/zpgeek/search/joblist.json`` 认的参数。
+之后，把这些选中值编成 `/wapi/zpgeek/search/joblist.json` 认的参数。
+参数名来自职位页 chunk 的 `getFormData()`，明细见 `notes/boss_filter/search.md`。
 
-参数名不是猜的，来自职位页 chunk ``job~1.59fdd3bf.js`` 的 ``getFormData()``::
-
-    {city, experience, payType, partTime, degree, industry, scale,
-     salary, jobType}          ← 数组用逗号 join，单项原样
-    + query / page / pageSize / scene / encryptExpectId
-
-对照同 chunk 的筛选状态 ``Q``：``payType/partTime/experience/degree/
-industry/scale/stage`` 是多选，``city/jobType/salary`` 是单选。
-
-选中值一律用 :class:`~boss_filter.models.FilterConditions` 里的 **code**
-（如薪资 10-20K = ``405``），不是显示名。code 从哪来见 :mod:`boss_filter`。
+Attributes:
+    FILTER_FILE_FIELDS: 配置文件里认的键 → `JobSearchFilter` 的字段。
+    _SINGLE_FIELDS: 单选字段（其余按多选收）。
+    _RAW_STR_FIELDS: 当成「纯字符串、不做 code 归一」处理的字段。
+    TEMPLATE_KEYS: 写模板时用的字段顺序（camelCase，跟站点查询串对齐）。
 """
 
 from __future__ import annotations
@@ -48,24 +43,13 @@ def _one(value: Any) -> str:
 class JobSearchFilter:
     """一次职位搜索的条件。
 
-    **code 而非显示名**：``city="101280100"``（广州），``salary="405"``（10-20K）。
+    code 而非显示名：`city="101280100"`（广州），`salary="405"`（10-20K）。
     多选维度收元组，单选维度收字符串。什么都不填 = 站点默认（当前城市全量）。
 
-    :param query: 搜索关键词，如「python」。空 = 不按关键词搜
-    :param city: 城市 code，如广州 ``101280100``。空 = 站点当前城市
-    :param job_type: 求职类型 code（单选），如全职 ``1901``
-    :param salary: 薪资档 code（单选），如 ``405`` = 10-20K
-    :param experience: 工作经验 code（多选），如 ``("104","105")``
-    :param degree: 学历要求 code（多选）
-    :param industry: 公司行业 code（多选）
-    :param scale: 公司规模 code（多选）
-    :param pay_type: 结算方式 code（多选，接口顺带回的辅助维度）
-    :param part_time: 兼职类型 code（多选）
-    :param stage: 融资阶段 code（多选）
-    :param encrypt_expect_id: 期望上下文 id（前端 ``lastExpectId``），空 = 不带。
-        它是**上下文标记不是检索维度**，见字段上的注释
-    :param page: 页码，**从 1 开始**
-    :param page_size: 每页条数（服务端默认 15）
+    Attributes:
+        encrypt_expect_id: 期望上下文 id（前端 `lastExpectId`），空 = 不带。
+            不算检索维度；实测是个性化/排序信号（见 `notes/boss_filter/search.md`）。
+        scene: 搜索场景；职位页搜索态固定传 1。
     """
 
     query: str = ""
@@ -80,38 +64,22 @@ class JobSearchFilter:
     part_time: tuple[str, ...] = ()
     stage: tuple[str, ...] = ()
 
-    #: 期望上下文（前端 ``lastExpectId``）。「期望 tab + 输入关键词」时前端会把
-    #: 最近一次选中的期望跟着关键词带进搜索流：``s.encryptExpectId = lastExpectId``。
-    #: 空 = 不带；非空 → :meth:`to_params` 输出 ``encryptExpectId``。
-    #: **不算检索维度**：:attr:`is_blank` 故意不把它算进去，免得「只带期望、
-    #: 没关键词」误判成搜索流，抢走本该走期望流的分支。
-    #: **实测（2026-10-13）**：带不带它结果集 9/10 重叠——是**个性化/排序
-    #: 信号**，不是范围限定。所以 UI 按「静默带出」处理（只写这个字段、
-    #: ``expect_kind`` 留空）是对的，别当成「限定在该期望内搜」。
     encrypt_expect_id: str = ""
 
     page: int = 1
     page_size: int = 15
 
-    #: 搜索场景。职位页搜索态固定传 1（见 chunk ``onSearch``）
     scene: int = 1
 
     def __post_init__(self) -> None:
+        """校验页码与每页条数。"""
         if self.page < 1:
             raise ValueError(f"页码从 1 开始，收到 {self.page}")
         if self.page_size < 1:
             raise ValueError(f"每页条数至少 1，收到 {self.page_size}")
 
-    # ------------------------------------------------------------------ #
-    # 装配
-    # ------------------------------------------------------------------ #
-
     def to_params(self) -> dict[str, str]:
-        """拼成搜索接口的查询串参数。**空值不进参数**，让站点走自己的默认。
-
-        单选维度（``city/jobType/salary``）空了就不传；多选维度拼逗号串，
-        全空同样不传。``query`` 为空时不传（区分「搜空串」和「不搜关键词」）。
-        """
+        """拼成搜索接口的查询串参数；空值不进参数，让站点走自己的默认。"""
         params: dict[str, str] = {
             "page": str(self.page),
             "pageSize": str(self.page_size),
@@ -143,8 +111,6 @@ class JobSearchFilter:
             if joined:
                 params[key] = joined
 
-        # 期望上下文（前端 lastExpectId）：「期望 tab + 输入关键词」时跟着关键词走。
-        # 空了就不传——它是上下文标记，不是检索维度。
         if self.encrypt_expect_id.strip():
             params["encryptExpectId"] = self.encrypt_expect_id.strip()
 
@@ -172,12 +138,9 @@ class JobSearchFilter:
 
     @property
     def is_blank(self) -> bool:
-        """True = 一个筛选维度都没选（关键词也没有），等于「不限」。
+        """是否一个筛选维度都没选（关键词也没有）。
 
-        **不把** :attr:`encrypt_expect_id` **算进去**——它是上下文标记，不是
-        检索维度。前端只有关键词/筛选（Y 类键）才进搜索流；把期望算进
-        ``is_blank`` 会让「只带期望、没关键词」误判成搜索流，抢走本该走期望流
-        的分支。
+        不把 `encrypt_expect_id` 算进去——它是上下文标记，不是检索维度。
         """
         return not any(
             (
@@ -194,10 +157,6 @@ class JobSearchFilter:
                 self.stage,
             )
         )
-
-    # ------------------------------------------------------------------ #
-    # 从筛选条件构造
-    # ------------------------------------------------------------------ #
 
     @classmethod
     def from_codes(
@@ -218,7 +177,7 @@ class JobSearchFilter:
         page: int = 1,
         page_size: int = 15,
     ) -> "JobSearchFilter":
-        """直接用 code 构造。code 的取值见 :class:`~boss_filter.models.FilterConditions`。"""
+        """直接用 code 构造。"""
         return cls(
             query=query,
             city=city,
@@ -239,10 +198,10 @@ class JobSearchFilter:
     def resolve(self, conditions: FilterConditions) -> "ResolvedSearchFilter":
         """把 code 换回可读名字，便于展示「当前按什么条件在搜」。
 
-        纯本地查表，不打接口。code 认不出来时名字留空串（不报错——
-        筛选表可能比用户手上的 code 新/旧，不该因此挡掉一次搜索）。
+        纯本地查表，不打接口。code 认不出来时名字留空串。
         """
         def _names(kind: str, codes: Iterable[str]) -> tuple[str, ...]:
+            """把一串 code 换成名字。"""
             out: list[str] = []
             for code in codes:
                 hit = conditions.find_option(kind, code)
@@ -250,13 +209,14 @@ class JobSearchFilter:
             return tuple(out)
 
         def _name(kind: str, code: str) -> str:
+            """把单个 code 换成名字。"""
             if not code:
                 return ""
             hit = conditions.find_option(kind, code)
             return hit.name if hit else ""
 
         def _industry_names(codes: Iterable[str]) -> tuple[str, ...]:
-            """行业是分组表，先摊平再查（``find_option`` 认的是字段名，行业没有单字段）。"""
+            """行业是分组表，先摊平再查。"""
             flat = {opt.code: opt.name for opt in conditions.industry_options()}
             return tuple(flat.get(code, "") for code in codes)
 
@@ -305,7 +265,9 @@ class ResolvedSearchFilter:
     page_size: int = 15
 
     def summary_lines(self) -> list[str]:
+        """人读摘要，每维一行。"""
         def _row(label: str, names: tuple[str, ...], codes: tuple[str, ...]) -> str:
+            """格式化一行「维度 + 名字（回退 code）」。"""
             pairs = [n or c for n, c in zip(names, codes)]
             return f"{label:<8} {'、'.join(pairs) if pairs else '不限'}"
 
@@ -323,6 +285,7 @@ class ResolvedSearchFilter:
         return rows
 
     def to_dict(self) -> dict[str, Any]:
+        """导出为 JSON 友好的 dict。"""
         return {
             "query": self.query,
             "city": {"code": self.city_code, "name": self.city_name},
@@ -345,14 +308,6 @@ class ResolvedSearchFilter:
         }
 
 
-# --------------------------------------------------------------------------- #
-# 配置文件：把筛选条件放磁盘，没有就留空
-# --------------------------------------------------------------------------- #
-
-#: 配置文件里认的键 → :class:`JobSearchFilter` 的字段。
-#: 单选维度收字符串，多选维度收数组（也兼容逗号串）。``page``/``scene``
-#: 是运行期的，不进配置。``encrypt_expect_id`` 是期望上下文（期望 + 关键词），
-#: **持久化要带上**，否则配置存一轮就丢。
 FILTER_FILE_FIELDS: tuple[tuple[str, str], ...] = (
     ("query", "query"),
     ("city", "city"),
@@ -374,15 +329,12 @@ FILTER_FILE_FIELDS: tuple[tuple[str, str], ...] = (
     ("pageSize", "page_size"),
 )
 
-#: 单选字段（其余按多选收）
 _SINGLE_FIELDS: frozenset[str] = frozenset(
     {"query", "city", "job_type", "salary", "encrypt_expect_id"}
 )
 
-#: 当成「纯字符串、不做 code 归一」处理的字段
 _RAW_STR_FIELDS: frozenset[str] = frozenset({"query", "encrypt_expect_id"})
 
-#: 写模板时用的字段顺序（camelCase，跟站点查询串对齐）
 TEMPLATE_KEYS: tuple[str, ...] = (
     "query",
     "city",
@@ -401,10 +353,10 @@ TEMPLATE_KEYS: tuple[str, ...] = (
 
 
 def filter_path(path: Path | str | None = None) -> Path:
-    """状态库路径：显式参数 → ``BOSS_DB`` → ``data/boss.db``。
+    """状态库路径：显式参数 → `BOSS_DB` → `data/boss.db`。
 
-    搜索条件是库里的一行（``doc('search_filter')``），不是单独的配置文件了。
-    用户点名的 JSON 文件走 :func:`search_filter_from_file`。
+    搜索条件是库里的一行（`doc('search_filter')`）；用户点名的 JSON 文件
+    走 `search_filter_from_file`。
     """
     return boss_db.resolve_db_path(path)
 
@@ -423,10 +375,10 @@ def _to_codes(value: Any) -> tuple[str, ...]:
 
 
 def search_filter_from_dict(data: Mapping[str, Any]) -> JobSearchFilter:
-    """把配置文件的内容装配成 :class:`JobSearchFilter`。
+    """把配置文件的内容装配成 `JobSearchFilter`。
 
     认 snake_case 和 camelCase 两种键名；缺的键、空值一律留空
-    （= 该维度「不限」）。``page``/``scene`` 不收——翻页是运行期的事。
+    （= 该维度「不限」）。`page`/`scene` 不收——翻页是运行期的事。
     """
     if not isinstance(data, Mapping):
         raise ValueError(f"筛选条件配置得是 JSON 对象，收到 {type(data).__name__}")
@@ -449,17 +401,14 @@ def search_filter_from_dict(data: Mapping[str, Any]) -> JobSearchFilter:
         else:
             fields[attr] = _to_codes(value)
 
-    # 同一字段给了两种键名（job_type 与 jobType）时，后写的胜出且要一致
     return JobSearchFilter(**fields)
 
 
 def search_filter_from_file(path: Path | str) -> JobSearchFilter:
-    """只读用户点名的 JSON 文件（CLI ``--filter my.json`` 用），**不写库**。
+    """只读用户点名的 JSON 文件（CLI `--filter my.json` 用），不写库。
 
-    这是「本次抓取就用这份条件」的运行期入参，不是持久状态，所以仍走文件。
-    格式同 :func:`search_filter_from_dict`。
-
-    :raises ValueError: 文件读不了、不是 JSON、或不是 JSON 对象
+    这是「本次抓取就用这份条件」的运行期入参，不是持久状态。
+    文件读不了、不是 JSON、或不是 JSON 对象时抛 `ValueError`。
     """
     p = Path(path)
     try:
@@ -479,28 +428,13 @@ def search_filter_from_file(path: Path | str) -> JobSearchFilter:
 
 
 def load_search_filter(path: Path | str | None = None) -> JobSearchFilter:
-    """从状态库读筛选条件。**库里没有就留空**（= 全部「不限」），不报错。
+    """从状态库读筛选条件；库里没有就留空（= 全部「不限」）。
 
-    库里存的是一个 JSON 对象，键跟站点查询串对齐，值留空 = 该维度「不限」::
+    Args:
+        path: 状态库路径；不传按 `filter_path` 定位。
 
-        {
-          "query": "python",
-          "city": "101280100",
-          "jobType": "",
-          "salary": "405",
-          "experience": ["104", "105"],
-          "degree": ["209"],
-          "industry": [],
-          "scale": [],
-          "pageSize": 15
-        }
-
-    code 取值见 :class:`~boss_filter.models.FilterConditions`，
-    ``python -m boss_filter export`` 能把整张表导出来对照。
-
-    :param path: 状态库路径；不传按 :func:`filter_path` 定位
-    :return: 库里有就按那行装配（可全空）；没有就 :class:`JobSearchFilter()` 全空
-    :raises ValueError: payload 不是 JSON 对象、或 pageSize 形状不对
+    Returns:
+        库里有就按那行装配（可全空）；没有就全空的 `JobSearchFilter`。
     """
     try:
         raw = boss_db.doc_get_raw(boss_db.DOC_SEARCH_FILTER, path)

@@ -1,14 +1,14 @@
 """版本更新检测：对着 Gitee 发行版比一版号，有新的就提示用户去下。
 
-**只查 Gitee**——GitHub 那边只提供下载入口，不参与版本判断（两边发版节奏
-可能不一致，以 Gitee 为准，见模块常量）。
+只查 Gitee；GitHub 只提供下载入口，不参与版本判断。忽略版本记的是「水位线」
+——比水位新的版本会重新弹出提示。
 
-为什么要自己存「忽略的版本」：用户点了「忽略此版本」后，只要最新版还停在被
-忽略的那一版就别再弹；等发了**更**新的版本，提示要重新出现。只点「取消」则
-什么都不记，下次打开页面照样弹。
-
-Gitee 的 ``/releases/latest`` 不可信——按 ``created_at`` 挑，tag 顺序一乱就
-返回旧版（实测 v1.1.0 已发布时它还回 v1.0.0）。所以走列表接口自己比大小。
+Attributes:
+    GITEE_RELEASES_PAGE: 提示框上「去下载」按钮的落点。
+    HTTP_TIMEOUT: 拉发行版列表的超时（秒）。
+    CACHE_TTL: 同一次运行内结果的有效期（秒）。
+    NOTES_LIMIT: 发行说明带进弹窗的最大字符数。
+    _cache: 最近一次检测结果（含失败），`checked_at` 为 0 表示还没测过。
 """
 
 from __future__ import annotations
@@ -32,32 +32,22 @@ GITEE_REPO = "boss-automatic-delivery"
 GITEE_RELEASES_API = (
     f"https://gitee.com/api/v5/repos/{GITEE_OWNER}/{GITEE_REPO}/releases?per_page=20"
 )
-#: 提示框上「去下载」按钮的落点
 GITEE_RELEASES_PAGE = f"https://gitee.com/{GITEE_OWNER}/{GITEE_REPO}/releases"
 GITHUB_RELEASES_PAGE = (
     f"https://github.com/{GITHUB_OWNER}/{GITEE_REPO}/releases"
 )
 
-#: 拉发行版列表的超时（秒）。用户开页面时同步调用，不能拖太久
 HTTP_TIMEOUT = 8.0
-#: 同一次运行内结果的有效期（秒）。开页面不会每次都撞 Gitee
 CACHE_TTL = 1800.0
-#: 发行说明只带开头一段进弹窗——Gitee 的 body 是整篇 Markdown，摆不下
 NOTES_LIMIT = 1200
 
 _VERSION_RE = re.compile(r"^\D*(\d+(?:\.\d+)*).*$")
 
 
-# --------------------------------------------------------------------------- #
-# 版本号比较
-# --------------------------------------------------------------------------- #
-
-
 def parse_version(raw: Any) -> tuple[int, ...] | None:
-    """``v1.2.3`` / ``1.2`` / ``V1.2.3-rc1`` → ``(1, 2, 3)``；认不出回 ``None``。
+    """`v1.2.3` / `1.2` / `V1.2.3-rc1` → `(1, 2, 3)`；认不出回 `None`。
 
-    允许缺段（``1.2`` 当 ``1.2.0``）、允许 ``v`` 前缀、忽略预发布后缀——预发布
-    在列表里另有 ``prerelease`` 标记，这里只管排序。
+    允许缺段（`1.2` 当 `1.2.0`）、允许 `v` 前缀、忽略预发布后缀。
     """
     text = str(raw or "").strip()
     if not text:
@@ -74,10 +64,12 @@ def parse_version(raw: Any) -> tuple[int, ...] | None:
 
 
 def compare_versions(a: Any, b: Any) -> int:
-    """比两串版本号：a>b → 1，a<b → -1，相等（或都认不出）→ 0。"""
+    """比两串版本号：a>b → 1，a<b → -1，相等（或都认不出）→ 0。
+
+    短的补零：`1.2` 与 `1.2.0` 算相等。
+    """
     pa = parse_version(a) or ()
     pb = parse_version(b) or ()
-    # 短的补零：``1.2`` 与 ``1.2.0`` 算相等
     n = max(len(pa), len(pb))
     pa = pa + (0,) * (n - len(pa))
     pb = pb + (0,) * (n - len(pb))
@@ -85,39 +77,46 @@ def compare_versions(a: Any, b: Any) -> int:
 
 
 def _normalize(raw: Any) -> str:
-    """展示用的版本号统一成「不带 v」的原始形，存忽略版本时也好比。"""
+    """展示用的版本号统一成「不带 v」的原始形。"""
     text = str(raw or "").strip()
     return text[1:] if text[:1] in ("v", "V") else text
 
 
-# --------------------------------------------------------------------------- #
-# 发行版数据
-# --------------------------------------------------------------------------- #
-
-
 @dataclass(frozen=True)
 class Asset:
-    #: Gitee 上的附件名（``BossAutoDelivery-1.1.3.zip``），用来挑更新包
+    """发行版上的一个下载附件。
+
+    Attributes:
+        name: Gitee 上的附件名（`BossAutoDelivery-1.1.3.zip`），用来挑更新包。
+        url: 下载直链。
+    """
+
     name: str
-    #: 下载直链
     url: str
 
 
 @dataclass(frozen=True)
 class Release:
-    #: 展示用版本号（去掉 ``v`` 前缀）
+    """一条发行版信息。
+
+    Attributes:
+        version: 展示用版本号（去掉 `v` 前缀）。
+        notes: 发行说明开头一段（Markdown 原文）。
+        assets: Gitee 上的资产（名字 + 直链，可能为空）。
+    """
+
     version: str
-    #: 发行说明开头一段（Markdown 原文，前端按纯文本摆）
     notes: str
-    #: Gitee 上的资产（名字 + 直链，可能为空）
     assets: tuple[Asset, ...]
 
 
 def pick_latest(releases: list[dict[str, Any]]) -> Release | None:
-    """从 Gitee 列表里挑**最高的正式版**。
+    """从 Gitee 列表里挑最高的正式版；没有可用条目回 `None`。
 
-    跳过 ``prerelease`` / 认不出版本号的条目；不看列表顺序——Gitee 返回顺序
-    跟新旧无关。
+    跳过 `prerelease` / 认不出版本号的条目，不看列表顺序。
+
+    Args:
+        releases: Gitee 发行版列表。
     """
     best: Release | None = None
     for item in releases or []:
@@ -147,9 +146,12 @@ def pick_latest(releases: list[dict[str, Any]]) -> Release | None:
 
 
 def pick_zip_asset(assets: Any) -> Asset | None:
-    """挑出更新用的 zip 附件：优先 ``BossAutoDelivery*.zip``，其次任意 ``*.zip``。
+    """挑出更新用的 zip 附件；没有则回 `None`。
 
-    名字为空（老接口只给直链）就看 URL 的最后一段。大小写不敏感。
+    优先 `BossAutoDelivery*.zip`，其次任意 `*.zip`。名字为空就看 URL 最后一段。
+
+    Args:
+        assets: `Asset` 或带 `name`/`url` 的字典序列。
     """
     items: list[Asset] = []
     for a in assets or []:
@@ -159,6 +161,7 @@ def pick_zip_asset(assets: Any) -> Asset | None:
             items.append(Asset(name=str(a.get("name") or ""), url=str(a.get("url") or "")))
 
     def _name_of(a: Asset) -> str:
+        """附件名；名字为空时取 URL 最后一段。"""
         if a.name:
             return a.name
         tail = (a.url or "").rstrip("/").rsplit("/", 1)[-1]
@@ -172,15 +175,14 @@ def pick_zip_asset(assets: Any) -> Asset | None:
 
 
 def can_self_update() -> bool:
-    """只有「装在本地目录里的 exe」能自更新：源码跑没有可替换的安装目录，
-    压缩包预览里跑（``is_temp_run``）解压目标是 %TEMP%，更新了也白搭。"""
+    """只有装在本地目录里的 exe 能自更新；源码跑或临时目录预览跑都回 `False`。"""
     from .. import runtime
 
     return bool(runtime.is_frozen()) and not runtime.is_temp_run()
 
 
 def fetch_latest_release() -> Release:
-    """去 Gitee 拉发行版列表并挑最新正式版。失败抛 :class:`UpdateCheckError`。"""
+    """去 Gitee 拉发行版列表并挑最新正式版；失败抛 `UpdateCheckError`。"""
     try:
         resp = requests.get(
             GITEE_RELEASES_API,
@@ -203,15 +205,10 @@ def fetch_latest_release() -> Release:
 
 
 class UpdateCheckError(Exception):
-    """检测失败。**不上抛到界面**，只进 ``error`` 字段与日志。"""
+    """检测失败。不上抛到界面，只进 `error` 字段与日志。"""
 
-
-# --------------------------------------------------------------------------- #
-# 缓存 + 忽略版本
-# --------------------------------------------------------------------------- #
 
 _lock = threading.Lock()
-#: 最近一次检测结果（含失败），``checked_at`` 为 0 表示还没测过
 _cache: dict[str, Any] = {
     "checked_at": 0.0,
     "release": None,
@@ -226,6 +223,7 @@ def reset_cache() -> None:
 
 
 def _fresh(seconds: float | None = None) -> bool:
+    """缓存是否还在 TTL 内。"""
     checked_at = float(_cache.get("checked_at") or 0.0)
     if checked_at <= 0:
         return False
@@ -236,13 +234,15 @@ def _fresh(seconds: float | None = None) -> bool:
 def refresh(*, force: bool = False) -> dict[str, Any]:
     """拿一份检测结果；缓存没过期就直接回，过期才真去打 Gitee。
 
-    **失败也缓存**——Gitee 一次连不上时，别让用户每开一页都卡 8 秒。
+    失败也缓存，避免用户每开一页都卡住等网络。
+
+    Args:
+        force: 为真则忽略缓存强制重测。
     """
     if not force and _fresh():
         return _snapshot()
 
     with _lock:
-        # 双检：等锁期间可能已经被别的线程测完了
         if not force and _fresh():
             return _snapshot()
         try:
@@ -256,6 +256,7 @@ def refresh(*, force: bool = False) -> dict[str, Any]:
 
 
 def _snapshot() -> dict[str, Any]:
+    """缓存内容的副本。"""
     release: Release | None = _cache.get("release")
     return {
         "checked_at": float(_cache.get("checked_at") or 0.0),
@@ -265,13 +266,14 @@ def _snapshot() -> dict[str, Any]:
 
 
 def schedule_startup_check(on_done: Any = None) -> None:
-    """启动时**后台**预热一次检测，开页面时就不用等网络。
+    """启动时后台预热一次检测，开页面时就不用等网络。
 
-    ``on_done(status)`` 是可选回调——CLI 拿它把「当前版本 / 发行版本 / 要不要
-    更新」打到控制台。守护线程 + 完全吞异常：版本检测永远不该拦住服务起来。
+    Args:
+        on_done: 可选回调 `on_done(status)`，CLI 用它打印版本信息。
     """
 
     def _run() -> None:
+        """后台线程体：预热一次并可选回调。"""
         try:
             status = build_status(force=True)
         except Exception:  # noqa: BLE001 - 预热失败静默，refresh 自己会记日志
@@ -288,17 +290,17 @@ def schedule_startup_check(on_done: Any = None) -> None:
 
 
 def schedule_periodic_check(interval: float = 300.0) -> None:
-    """每 ``interval`` 秒**后台**刷一次 Gitee 发行版，默认 5 分钟。
+    """每 `interval` 秒后台刷一次 Gitee 发行版，默认 5 分钟。
 
-    为什么放后端而不是让前端轮询：``CACHE_TTL`` 是 30 分钟，前端不带 ``force``
-    问到的是旧缓存；带 ``force`` 则开几个标签页就打几次 Gitee。这里一个进程
-    只打一次，前端只管读缓存。
+    放后端而不是让前端轮询：`CACHE_TTL` 是 30 分钟，前端带 `force` 会多打
+    Gitee。每一 tick 独立吞异常，版本检测永远不该拦住服务。
 
-    每一 tick 独立吞异常——Gitee 挂一轮不该把循环带走。守护线程 + 不返回句柄：
-    跟 :func:`schedule_startup_check` 一样，版本检测永远不该拦住服务。
+    Args:
+        interval: 刷新间隔（秒），下限夹到 5 秒。
     """
 
     def _run() -> None:
+        """后台线程体：按间隔反复刷新缓存。"""
         while True:
             try:
                 time.sleep(max(5.0, float(interval)))
@@ -314,10 +316,13 @@ def schedule_periodic_check(interval: float = 300.0) -> None:
 
 
 def cached_snapshot(*, path: Any = None) -> dict[str, Any]:
-    """读**缓存里**的检测结论，绝不打网络。
+    """读缓存里的检测结论，绝不打网络。
 
-    诊断页（系统设置 → 版本更新）用它：页面上还挂着更新日志，不能因为缓存
-    冷就卡 8 秒等 Gitee。要立刻测请走 ``GET /api/system/update?force=true``。
+    诊断页（系统设置 → 版本更新）用它；要立刻测请走
+    `GET /api/system/update?force=true`。
+
+    Args:
+        path: 状态库路径，用来读忽略版本水位线。
     """
     snap = _snapshot()
     release: Release | None = snap["release"]
@@ -347,18 +352,13 @@ def cached_snapshot(*, path: Any = None) -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------- #
-# 组装给前端的状态
-# --------------------------------------------------------------------------- #
-
-
 def load_ignored_version(path: Any = None) -> str:
-    """用户点过「忽略此版本」的**水位线**；没点过回空串。
+    """用户点过「忽略此版本」的水位线；没点过回空串。
 
-    存的是单个版本号而不是一串列表：每次忽略就是把水位抬到那一版，比水位
-    旧的忽略自动作废。连续忽略 ``v1.2.0`` 再忽略 ``v1.3.0`` ⇒ 水位 ``1.3.0``，
-    ``≤ 1.3.0`` 一律静音，``v1.4.0`` 才再弹。等价于「记一串忽略列表」，但：
-    不会长大、也不用担心中间版本回头骚扰用户。
+    存的是单个版本号：每次忽略把水位抬到那一版，比水位旧的忽略自动作废。
+
+    Args:
+        path: 状态库路径。
     """
     from .app_settings_store import load_settings
 
@@ -370,18 +370,27 @@ def load_ignored_version(path: Any = None) -> str:
 
 
 def save_ignored_version(version: Any, path: Any = None) -> str:
-    """记下要忽略的版本号。空串 = 撤销忽略。"""
+    """记下要忽略的版本号；空串 = 撤销忽略。
+
+    Args:
+        version: 要忽略到的版本号。
+        path: 状态库路径。
+    """
     from .app_settings_store import apply_ignored_update_version
 
     return apply_ignored_update_version(_normalize(version), path)
 
 
 def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
-    """前端 ``GET /api/system/update`` 的完整载荷。
+    """前端 `GET /api/system/update` 的完整载荷。
 
-    ``should_prompt`` 是弹窗的唯一开关：有更新**且**没被忽略掉才为真。
-    ``can_self_update`` 决定「立即更新」按钮露不露；``update_done`` 是自更新
-    跑完后新进程给重连页面的一次性回执（见 :mod:`boss_web.services.updater`）。
+    `should_prompt` 是弹窗的唯一开关：有更新且没被忽略掉才为真。
+    `can_self_update` 决定「立即更新」按钮露不露；`update_done` 是自更新
+    跑完后新进程给重连页面的一次性回执。
+
+    Args:
+        path: 状态库路径，用来读忽略版本水位线。
+        force: 为真则忽略缓存强制重测。
     """
     snap = refresh(force=force)
     release: Release | None = snap["release"]
@@ -390,8 +399,6 @@ def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
     current = _normalize(APP_VERSION)
     latest = release.version if release else None
     has_update = bool(latest) and compare_versions(latest, current) > 0
-    # 忽略是**水位线**：最新版不比水位新就不弹，比水位新就照弹。
-    # 连续忽略多个版本只留下最高那一版（见 load_ignored_version）。
     suppressed = bool(ignored) and latest is not None and compare_versions(latest, ignored) <= 0
 
     assets = list(release.assets) if release else []
@@ -421,7 +428,7 @@ def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
 
 
 def _load_done_marker() -> dict[str, Any] | None:
-    """更新完成回执（一次性）。import 放函数里避免 services 互相 import 成环。"""
+    """更新完成回执（一次性）；import 放函数里避免 services 互相 import 成环。"""
     from .updater import consume_done_marker
 
     return consume_done_marker()
@@ -430,8 +437,14 @@ def _load_done_marker() -> dict[str, Any] | None:
 def format_console_lines(status: dict[str, Any]) -> list[str]:
     """控制台按行打印：当前版本 / 发行版本 / 是否需要更新。
 
-    跟横幅左对齐（``键 13 列 + 值``）。检测失败也要把当前版本打全——用户报问题
-    时第一句就是「我这是哪一版」。有更新时追加两行下载地址。
+    跟横幅左对齐（`键 13 列 + 值`）。检测失败也要把当前版本打全；有更新时
+    追加两行下载地址。
+
+    Args:
+        status: `build_status` / `cached_snapshot` 的结果。
+
+    Returns:
+        可直接 `print` 的行列表。
     """
     current = _normalize(status.get("current") or APP_VERSION)
     latest = status.get("latest")

@@ -1,10 +1,11 @@
 """把底层技术异常翻译成人话，外加 Chrome 环境检测。
 
-``boss_jobs`` 抛的 ``StokenError`` 是给开发者看的——裸类名、``ws://127.0.0.1:9222/
-devtools/browser/<uuid>``、CDP 方法名。普通用户看到这些只会去问「这是啥」。
+只做翻译和探测，不改 `boss_jobs` 一行；错误从哪里冒出来就在哪里翻。
 
-这一层只做翻译和探测，**不改 ``boss_jobs`` 一行**：错误从哪里冒出来就在哪里翻
-（Web 端走异常处理器，后台线程直接调 :func:`humanize`）。
+Attributes:
+    _RULES: `(原文特征串, 给用户看的话)`。顺序敏感，第一条命中为准，更具体的排前面；
+        「找不到 Chrome」必须排在「BOSS_CHROME_BIN」之前，详见
+        `notes/boss_web/services/troubleshoot.md`。
 """
 
 from __future__ import annotations
@@ -15,16 +16,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: ``(原文里的特征串, 给用户看的话)``，**顺序敏感**：从上往下第一条命中为准，
-#: 所以更具体的规则要排在更泛的前面。
-#:
-#: ⚠️ 「找不到 Chrome」必须排在「BOSS_CHROME_BIN」**前面**：前者那句原文本身就
-#: 把环境变量当兜底方案提了一嘴（``…或用 BOSS_CHROME_BIN 指到 chrome…``），
-#: 排在后面的话永远轮不到它，用户拿到的提示会变成让他去设环境变量。
 _RULES: tuple[tuple[str, str], ...] = (
     (
-        # boss_jobs.http_from_session 抛的原文末尾是「先跑 `python -m boss_login
-        # login`」——那是命令行的说法。网页用户该去「登录」页，别把他支去终端。
         "本地没有登录态",
         "还没登录。先去「登录」页登录一次再回来。",
     ),
@@ -87,13 +80,8 @@ def humanize(exc: BaseException | str) -> str:
     return text
 
 
-# --------------------------------------------------------------------------- #
-# Chrome 检测
-# --------------------------------------------------------------------------- #
-
-
 def current_mode() -> str:
-    """当前生效的 Chrome 窗口档位（环境变量优先，否则 ``boss_jobs`` 的默认值）。"""
+    """当前生效的 Chrome 窗口档位（环境变量优先，否则 `boss_jobs` 的默认值）。"""
     from boss_jobs.cdp_stoken import CHROME_MODE_ENV, DEFAULT_CHROME_MODE
 
     env = os.environ.get(CHROME_MODE_ENV, "").strip().lower()
@@ -101,7 +89,7 @@ def current_mode() -> str:
 
 
 def chrome_status() -> dict[str, Any]:
-    """界面用的 Chrome 检测结果。**不启动任何东西**，探测失败也照常返回。"""
+    """界面用的 Chrome 检测结果。不启动任何东西，探测失败也照常返回。"""
     from boss_jobs.cdp_stoken import CHROME_MODES, find_chrome
 
     status: dict[str, Any] = {

@@ -1,4 +1,12 @@
-"""OpenAI 兼容的 Chat Completions 客户端（requests，无新依赖）。"""
+"""OpenAI 兼容的 Chat Completions 客户端（requests，无新依赖）。
+
+上游技术错误翻成用户能照着做的话，原文只进日志。
+
+Attributes:
+    _STATUS_HINTS: 状态码 → `(怎么了, 怎么办)`。
+    _SNIPPET_HINTS: 状态码认不出来时，从上游原文里嗅一嗅更准的原因。
+    HttpSender: 注入用的网络层签名，测试里替换成假的。
+"""
 
 from __future__ import annotations
 
@@ -16,21 +24,6 @@ from .llm_config_store import LLMConfig
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- #
-# 把上游的技术错误翻成人话
-# --------------------------------------------------------------------------- #
-#
-# ``requests`` 的异常原文长这样：::
-#
-#   HTTPSConnectionPool(host='api.deepseek.com', port=443): Max retries exceeded
-#   with url: /v1/chat/completions (Caused by ConnectTimeoutError(...))
-#
-# 上游的响应体里还会带两三百字英文报错。**这些一律不进界面**：原文写日志，
-# 用户看到的必须是「哪儿错了 + 怎么改」。
-#
-# 报错文本会被 ``tests/test_web_llm.py`` 钉住，改了这里就该同步改测试。
-
-#: 状态码 → ``(怎么了, 怎么办)``
 _STATUS_HINTS: dict[int, tuple[str, str]] = {
     400: ("对方没接受这次请求", "多半是模型名不对，回「AI 设置」重新拉一次模型列表再选。"),
     401: ("API Key 不对", "Key 可能复制漏了字符，或者已经被删掉。请重新复制一遍，注意别带上空格和换行。"),
@@ -40,7 +33,6 @@ _STATUS_HINTS: dict[int, tuple[str, str]] = {
     429: ("请求太频繁或超出额度", "等一两分钟再试。"),
 }
 
-#: 状态码认不出来时，从上游原文里嗅一嗅更准的原因
 _SNIPPET_HINTS: tuple[tuple[str, str], ...] = (
     ("insufficient balance", "账户余额不足，去 AI 服务那边充值后再试。"),
     ("invalid api key", "API Key 不对，请重新复制一次。"),
@@ -51,9 +43,8 @@ _SNIPPET_HINTS: tuple[tuple[str, str], ...] = (
 
 
 def _friendly_http_error(status: int, snippet: str) -> str:
-    """上游回 4xx / 5xx 时给用户看的话。**不含**上游响应体原文。"""
+    """上游回 4xx / 5xx 时给用户看的话。不含上游响应体原文。"""
     low = (snippet or "").lower()
-    # 先嗅原文：同一个状态码不同服务商给的原因不一样，原文比状态码更准
     for needle, text in _SNIPPET_HINTS:
         if needle in low:
             return text
@@ -75,18 +66,32 @@ def _friendly_network_error(exc: BaseException) -> str:
     return "连不上 AI 服务。请先确认这台电脑能正常上网。"
 
 
-#: 注入用的网络层签名，测试里替换成假的
 HttpSender = Callable[..., Any]
 
 
 @dataclass(frozen=True)
 class ChatResult:
+    """一次聊天的返回。
+
+    Attributes:
+        content: 模型回复正文。
+        finish_reason: 上游的结束原因；可能为空。
+    """
+
     content: str
     finish_reason: str | None = None
 
 
 class LLMClient:
+    """按配置调用 OpenAI 兼容接口的客户端。
+
+    Args:
+        config: LLM 配置。
+        http: 网络层；默认 `requests`，测试可注入假实现。
+    """
+
     def __init__(self, config: LLMConfig, *, http: HttpSender | None = None) -> None:
+        """初始化。"""
         self.config = config
         self._http = http or requests
 
@@ -98,6 +103,7 @@ class LLMClient:
         max_tokens: int | None = None,
         timeout: float | None = None,
     ) -> str:
+        """发起一轮对话，只回正文。"""
         return self.chat_with_metadata(
             messages,
             temperature=temperature,
@@ -113,6 +119,7 @@ class LLMClient:
         max_tokens: int | None = None,
         timeout: float | None = None,
     ) -> ChatResult:
+        """发起一轮对话，回正文与 `finish_reason`。"""
         cfg = self.config
         if not cfg.configured:
             raise ValidationWebError("AI 还没配置好——API Key / 接口地址 / 模型，三样都要填。")
@@ -157,6 +164,7 @@ class LLMClient:
         return ChatResult(content=str(content or ""), finish_reason=finish_reason)
 
     def test(self) -> dict[str, Any]:
+        """发一条极短探活消息，回延迟与模型名。"""
         started = time.time()
         reply = self.chat(
             [{"role": "user", "content": "请只回复两个字：正常"}],
@@ -171,7 +179,7 @@ class LLMClient:
         }
 
     def list_models(self) -> list[str]:
-        """打 ``GET /models`` 拉可用模型列表（OpenAI 兼容）。
+        """打 `GET /models` 拉可用模型列表（OpenAI 兼容）。
 
         顺序按接口返回；重名去重，空 id 丢掉。
         """

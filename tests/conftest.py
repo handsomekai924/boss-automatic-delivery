@@ -1,9 +1,9 @@
 """共享夹具：给集成测试和 CLI 测试提供同一个假服务端。
 
-一条规矩：**测试绝不碰真状态库、也绝不真拉 Chrome**。``isolated_db`` 把
-``BOSS_DB`` 指到临时目录，整套 ``load_*/save_*/clear_*`` 自动跟着走（它们
+一条规矩：测试绝不碰真状态库、也绝不真拉 Chrome。`isolated_db` 把
+`BOSS_DB` 指到临时目录，整套 `load_*/save_*/clear_*` 自动跟着走（它们
 都是调用时才解析路径），顺手把 CDP 换新换成假令牌。要真跑端到端，用
-``tools/wire_search.py``。
+`tools/wire_search.py`。
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ from tools.mock_server import BURNED_TICKETS, LAST_SMS_REQUEST, STORE, serve
 
 @pytest.fixture(scope="module")
 def server():
-    httpd = serve(port=0)  # 交给系统分配空闲端口
+    """起模块级假服务端，返回 base_url。"""
+    httpd = serve(port=0)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -29,6 +30,7 @@ def server():
 
 @pytest.fixture(autouse=True)
 def clean_store():
+    """每个用例前后清空 mock 服务端状态。"""
     import tools.mock_server as mock_server
 
     STORE.clear()
@@ -44,10 +46,10 @@ def clean_store():
 
 @pytest.fixture(autouse=True)
 def isolated_db(monkeypatch, tmp_path):
-    """一处隔离：整个测试跑在 ``tmp_path/boss.db`` 上，收尾把连接都关掉。
+    """把状态库指到 `tmp_path/boss.db`，CDP 换新换成假令牌。
 
-    ``fetch`` 默认会为 ``__zp_stoken__`` 起一台带调试口的 Chrome。那条路要真
-    浏览器，所以统一把换新动作换成假令牌（落盘仍然走真 ``StokenStore``）。
+    `fetch` 默认会为 `__zp_stoken__` 起一台带调试口的 Chrome。那条路要真
+    浏览器，所以统一把换新动作换成假令牌（落盘仍然走真 `StokenStore`）。
     """
     import boss_db
 
@@ -62,5 +64,5 @@ def isolated_db(monkeypatch, tmp_path):
 
 @pytest.fixture
 def client(server):
-    # retries=0：集成测试里不希望被重试掩盖问题
+    """提供不重试的登录客户端，免得重试掩盖问题。"""
     return ZhipinLoginClient(base_url=server, retries=0, timeout=5.0, sleeper=lambda _s: None)

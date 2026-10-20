@@ -9,6 +9,7 @@ from boss_jobs.store import JobStore
 
 
 def make_job(encrypt_job_id: str = "id-1", **overrides) -> Job:
+    """构造一条测试职位，默认字段可用 overrides 覆盖。"""
     defaults = dict(
         job_name="Python 开发",
         brand_name="示例科技",
@@ -33,12 +34,14 @@ def make_job(encrypt_job_id: str = "id-1", **overrides) -> Job:
 
 
 def make_page(jobs) -> PageResult:
+    """构造一页职位结果。"""
     jobs = tuple(jobs)
     return PageResult(page=1, jobs=jobs, has_more=True, raw_count=len(jobs), dropped=())
 
 
 @pytest.fixture
 def store(tmp_path):
+    """提供预置 3 条职位的 JobStore。"""
     with JobStore(tmp_path / "jobs.db") as s:
         s.save_page(
             make_page(
@@ -53,6 +56,7 @@ def store(tmp_path):
 
 
 def test_delete_job(store: JobStore):
+    """验证单删与重复删除的返回值。"""
     assert store.delete_job("a") is True
     assert store.count_jobs() == 2
     assert store.get_job("a") is None
@@ -60,19 +64,22 @@ def test_delete_job(store: JobStore):
 
 
 def test_delete_jobs_bulk(store: JobStore):
+    """验证批量删除只删存在的 id。"""
     assert store.delete_jobs(["a", "c", "ghost"]) == 2
     assert store.count_jobs() == 1
     assert store.delete_jobs([]) == 0
 
 
 def test_count_jobs_matching(store: JobStore):
+    """验证按城市/关键词计数。"""
     assert store.count_jobs_matching() == 3
     assert store.count_jobs_matching(city="广州") == 2
-    assert store.count_jobs_matching(keyword="前端") == 2  # 岗位名 + 公司名
+    assert store.count_jobs_matching(keyword="前端") == 2
     assert store.count_jobs_matching(city="广州", keyword="产品") == 1
 
 
 def test_clear_jobs_with_condition(store: JobStore):
+    """验证按条件清空职位。"""
     deleted = store.clear_jobs(city="广州")
     assert deleted == 2
     assert store.count_jobs() == 1
@@ -80,7 +87,7 @@ def test_clear_jobs_with_condition(store: JobStore):
 
 
 def test_clear_jobs_all(store: JobStore):
+    """验证无条件清空只清职位、不动分页记录。"""
     assert store.clear_jobs() == 3
     assert store.count_jobs() == 0
-    # 抓取流水保留
     assert store.count_pages() == 1

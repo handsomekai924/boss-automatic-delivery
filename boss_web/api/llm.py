@@ -38,20 +38,22 @@ class ModelsBody(BaseModel):
 
 @router.get("/config")
 def get_config() -> dict[str, Any]:
+    """读 LLM 配置（key 打码）。"""
     return load_config().masked()
 
 
 @router.put("/config")
 def put_config(body: ConfigBody) -> dict[str, Any]:
+    """写 LLM 配置。"""
     cfg = update_config(body.model_dump(exclude_none=True))
     return cfg.masked()
 
 
 @router.post("/models")
 def list_models(body: ModelsBody | None = None) -> dict[str, Any]:
-    """``GET {base_url}/models`` 的代理：拉可用模型名，给下拉框用。
+    """代理 `GET {base_url}/models`，拉可用模型名给下拉框用。
 
-    走 POST 是为了不把 API Key 塞进 URL（访问日志会记 query）。
+    走 POST 是为了不把 API Key 塞进 URL。
     """
     stored = load_config()
     body = body or ModelsBody()
@@ -74,6 +76,7 @@ def list_models(body: ModelsBody | None = None) -> dict[str, Any]:
 
 @router.post("/test")
 def test_connection() -> dict[str, Any]:
+    """用已保存配置做一次连通性测试；失败也回 200 带人话。"""
     client = LLMClient(load_config())
     try:
         return client.test()

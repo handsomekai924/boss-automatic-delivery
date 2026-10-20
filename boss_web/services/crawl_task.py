@@ -1,9 +1,14 @@
-"""后台抓取任务：线程跑 ``JobClient.crawl``，网页轮询进度。
+"""后台抓取任务：线程跑 `JobClient.crawl`，网页轮询进度。
 
-除了内存里的「当前任务」，每次 ``start()`` 还会落一行 ``crawl_tasks`` 档案，
-每页入库时把本批职位写进 ``crawl_task_jobs``——历史抓取可回看条件与结果，
-也能「对本批岗位一键发起匹配」。落库失败**不中断抓取**（任务本体优先），
-只在日志里告警「历史记录未保存」。
+除了内存里的「当前任务」，每次 `start()` 还会落一行 `crawl_tasks` 档案。
+落库失败不中断抓取，详见 `notes/boss_web/services/crawl_task.md`。
+
+Attributes:
+    ST_RUNNING: 任务状态：进行中。
+    ST_DONE: 任务状态：完成。
+    ST_ERROR: 任务状态：失败。
+    ST_CANCELLED: 任务状态：已取消。
+    BLANK_SEARCH_MSG: 搜索流条件全空时的报错。
 """
 
 from __future__ import annotations
@@ -31,9 +36,6 @@ ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
 
-#: 搜索流条件全空时的报错（推荐页 special/zone 已下线，「全部不限」没有检索语义了）。
-#: ``start()`` 走 :class:`ValidationWebError` 快速失败；万一漏进线程，
-#: ``_run`` 抛 :class:`ValueError` 由 :func:`humanize` 原样透传。
 BLANK_SEARCH_MSG = (
     "采集条件是空的：到「系统配置 → 采集配置」填关键词或筛选维度，或改用求职期望"
 )
@@ -44,8 +46,14 @@ def _search_filter_from(
 ) -> "JobSearchFilter":
     """从 snapshot 的 search payload 拼一次搜索流条件。
 
-    期望流分支也用它当基底（再交给 ``JobExpectFilter.from_search`` 搬维度），
-    免得两处各抄一份字段映射。
+    期望流分支也用它当基底（再交给 `JobExpectFilter.from_search` 搬维度）。
+
+    Args:
+        search: snapshot 里的 search payload。
+        encrypt_expect_id: 期望上下文 id。
+
+    Returns:
+        搜索流条件对象。
     """
     from boss_filter.search import JobSearchFilter
 
@@ -61,7 +69,6 @@ def _search_filter_from(
         pay_type=tuple(search.get("payType") or ()),
         part_time=tuple(search.get("partTime") or ()),
         stage=tuple(search.get("stage") or ()),
-        # 期望上下文跟着关键词走（前端 onSearch 的 lastExpectId）
         encrypt_expect_id=encrypt_expect_id,
     )
 
@@ -73,7 +80,17 @@ def _archive_start(
     created_at: float,
     params: Mapping[str, Any],
 ) -> bool:
-    """启动时插一行 ``crawl_tasks``。落库失败只告警，不挡抓取本体。"""
+    """启动时插一行 `crawl_tasks`。落库失败只告警，不挡抓取本体。
+
+    Args:
+        task_id: 任务 id。
+        source: 来源标识（expect / search）。
+        created_at: 创建时间戳。
+        params: 任务参数。
+
+    Returns:
+        是否落库成功。
+    """
     try:
         with JobStore() as store:
             store.create_crawl_task(
@@ -95,7 +112,13 @@ def _archive_finish(
     status: str,
     error: str = "",
 ) -> None:
-    """结束时回写状态与统计。落库失败只告警。"""
+    """结束时回写状态与统计。落库失败只告警。
+
+    Args:
+        task: 抓取任务。
+        status: 终态。
+        error: 错误文案。
+    """
     try:
         progress = dict(task.progress)
         with JobStore() as store:
@@ -115,7 +138,11 @@ def _archive_finish(
 
 
 def _archive_stats(task: "CrawlTask") -> None:
-    """进行中任务的中间统计落库（描述补抓 / 黑名单继续累进）。"""
+    """进行中任务的中间统计落库（描述补抓 / 黑名单继续累进）。
+
+    Args:
+        task: 抓取任务。
+    """
     try:
         with JobStore() as store:
             store.touch_crawl_task_stats(task.task_id, dict(task.progress))
@@ -124,9 +151,17 @@ def _archive_stats(task: "CrawlTask") -> None:
 
 
 def _progress_with_archive(task: "CrawlTask"):
-    """包一层 ``task.push``：每页入库后顺手把中间统计落库。"""
+    """包一层 `task.push`：每页入库后顺手把中间统计落库。
+
+    Args:
+        task: 抓取任务。
+
+    Returns:
+        进度回调函数。
+    """
 
     def _on_progress(payload: dict[str, Any]) -> None:
+        """转发进度并在翻页时落中间统计。"""
         task.push(payload)
         if payload.get("page") is not None:
             _archive_stats(task)
@@ -135,7 +170,25 @@ def _progress_with_archive(task: "CrawlTask"):
 
 
 class CrawlTask:
+    """内存里的抓取任务状态与事件流水。
+
+    Attributes:
+        task_id: 任务 id。
+        params: 启动参数。
+        status: 任务状态。
+        phase: 当前阶段。
+        created_at: 创建时间戳。
+        ended_at: 结束时间戳。
+        error: 错误文案。
+        stopped_reason: 停止原因。
+        progress: 累计进度计数。
+        events: 最近事件流水。
+        cancel_flag: 取消标记。
+        lock: 状态锁。
+    """
+
     def __init__(self, params: dict[str, Any]) -> None:
+        """初始化。"""
         self.task_id = uuid.uuid4().hex[:12]
         self.params = params
         self.status = ST_RUNNING
@@ -160,14 +213,16 @@ class CrawlTask:
         self.lock = threading.Lock()
 
     def push(self, payload: dict[str, Any]) -> None:
+        """记一条事件并按事件类型累进计数。
+
+        Args:
+            payload: 事件载荷。
+        """
         with self.lock:
             self.events.append({"at": time.time(), **payload})
             event = payload.get("event")
-            # 终态 / 瞬时事件只进流水，不再累加计数（finished 带的是累计值，会重复加）
             terminal = {"finished", "error", "cancel_requested", "stoken", "rules_snapshot"}
             if event not in terminal:
-                # 只有翻页回调才带 page（见 JobClient.crawl 的 _push）；
-                # stoken / detail_* 这些不算页
                 if payload.get("page") is not None:
                     self.progress["pages"] = self.progress.get("pages", 0) + 1
                 for key in (
@@ -195,6 +250,11 @@ class CrawlTask:
                 self.progress["blacklist_skipped"] = self.progress.get("blacklist_skipped", 0) + 1
 
     def snapshot(self) -> dict[str, Any]:
+        """当前状态副本。
+
+        Returns:
+            含 task_id / status / progress / 最近事件的 dict。
+        """
         with self.lock:
             return {
                 "task_id": self.task_id,
@@ -211,17 +271,39 @@ class CrawlTask:
 
 
 class CrawlTaskManager:
-    """同一时刻只跑一个抓取任务。"""
+    """同一时刻只跑一个抓取任务。
+
+    Attributes:
+        _lock: 任务槽锁。
+        _task: 当前任务。
+    """
 
     def __init__(self) -> None:
+        """初始化。"""
         self._lock = threading.Lock()
         self._task: CrawlTask | None = None
 
     def current(self) -> CrawlTask | None:
+        """当前任务；没有则 `None`。
+
+        Returns:
+            当前任务或 `None`。
+        """
         with self._lock:
             return self._task
 
     def snapshot(self, task_id: str | None = None) -> dict[str, Any]:
+        """查询进度快照。
+
+        Args:
+            task_id: 可选，校验是否就是当前任务。
+
+        Returns:
+            任务快照；空闲时为 idle。
+
+        Raises:
+            NotFoundError: 指定 task_id 不是当前任务。
+        """
         task = self.current()
         if task is None:
             return {"task_id": None, "status": "idle"}
@@ -240,10 +322,26 @@ class CrawlTaskManager:
         detail_interval: float | None = None,
         store_blacklisted: bool | None = None,
     ) -> CrawlTask:
+        """启动一次抓取并起后台线程。
+
+        Args:
+            max_pages: 最大页数。
+            interval: 翻页间隔。
+            start_page: 起始页。
+            use_search: 兼容字段，现一律按搜索流处理。
+            fetch_details: 是否补抓描述。
+            detail_interval: 详情间隔。
+            store_blacklisted: 黑名单命中是否入库。
+
+        Returns:
+            新建的抓取任务。
+
+        Raises:
+            ValidationWebError: 搜索流条件全空。
+            ConflictError: 已有抓取任务在跑。
+        """
         config_snapshot = load_snapshot()
         saved = config_snapshot.collection
-        # 旧「推荐页」（use_search=false）已移除：兼容字段一律当搜索流，
-        # 传 false 也归一成 true 并留一条警告。
         if use_search is False:
             logger.warning("旧「推荐页」配置已移除，改用关键词搜索")
         params = {
@@ -256,7 +354,6 @@ class CrawlTaskManager:
             "store_blacklisted": bool(saved["store_blacklisted"] if store_blacklisted is None else store_blacklisted),
             "config_snapshot": config_snapshot.to_dict(),
         }
-        # 快速失败：搜索流条件全空就别开线程了（推荐页 special/zone 已下线）
         if not str(saved.get("expect_kind") or "").strip():
             if _search_filter_from(config_snapshot.search).is_blank:
                 raise ValidationWebError(BLANK_SEARCH_MSG)
@@ -278,7 +375,6 @@ class CrawlTaskManager:
             })
             self._task = task
 
-        # 历史档案：启动就落一行，后面每页归属 / 结束回写都在这行上累进
         _archive_start(task.task_id, source=source, created_at=task.created_at, params=params)
 
         thread = threading.Thread(
@@ -288,6 +384,17 @@ class CrawlTaskManager:
         return task
 
     def cancel(self, task_id: str | None = None) -> CrawlTask:
+        """请求取消当前任务。
+
+        Args:
+            task_id: 可选，校验是否就是当前任务。
+
+        Returns:
+            被取消的任务。
+
+        Raises:
+            NotFoundError: 没有在跑的抓取任务。
+        """
         task = self.current()
         if task is None or (task_id and task.task_id != task_id):
             raise NotFoundError("没有在跑的抓取任务")
@@ -295,9 +402,12 @@ class CrawlTaskManager:
         task.push({"event": "cancel_requested"})
         return task
 
-    # ------------------------------------------------------------------ #
-
     def _run(self, task: CrawlTask) -> None:
+        """线程体：建客户端、选流、跑 crawl 并回写终态。
+
+        Args:
+            task: 抓取任务。
+        """
         params = task.params
         try:
             task.phase = "client"
@@ -309,8 +419,6 @@ class CrawlTaskManager:
             search = snapshot_data.get("search") or {}
             collection = snapshot_data.get("collection") or {}
             expect_kind = str(collection.get("expect_kind") or "").strip()
-            # 期望 id 在 config_snapshot.search 里（search_payload() 写出），
-            # collection 上那份是同值的副本；两边都认，优先 collection。
             encrypt_expect_id = str(
                 collection.get("encrypt_expect_id") or search.get("encryptExpectId") or ""
             ).strip()
@@ -321,21 +429,14 @@ class CrawlTaskManager:
             search_filter = None
             if expect_kind:
                 task.phase = "filter"
-                # 共享筛选维度直接从 search payload 搬（一份条件两用），
-                # 期望主参数单独给。from_search 不搬 query/scene——期望流永远
-                # 不带关键词；query 非空且 expect_kind 已选时以 expect_kind 为准
-                # （期望流优先），UI 上应提示「关键词在期望流下不生效」。
                 expect_filter = JobExpectFilter.from_search(
                     _search_filter_from(search),
                     kind=expect_kind,
                     encrypt_expect_id=encrypt_expect_id,
                     mix_expect_type=mix_expect_type,
-                    # temp_expect 时把 cfg.expect_info 塞进 expect_info（from_search 透传）
                     expect_info=expect_info,
                 )
             else:
-                # 两条流二选一：没选期望就走搜索（旧 use_search=false 的
-                # 推荐页 special/zone 已移除，不再有第三条流兜底）
                 task.phase = "filter"
                 search_filter = _search_filter_from(
                     search, encrypt_expect_id=encrypt_expect_id
@@ -343,7 +444,6 @@ class CrawlTaskManager:
                 if search_filter.is_blank:
                     raise ValueError(BLANK_SEARCH_MSG)
 
-            # 搜索流 / 期望流都要 __zp_stoken__，可能拉真 Chrome，先把状态亮出来
             task.phase = "stoken"
             task.push({"event": "stoken", "message": "正在准备搜索令牌（可能拉起 Chrome）…"})
 
@@ -354,12 +454,15 @@ class CrawlTaskManager:
             has_jd_rules = any(r.get("rule_type") == "jd_keyword" and r.get("enabled") for r in rules)
 
             def company_matches(job: Any) -> list[dict[str, Any]]:
+                """公司名黑名单命中结果。"""
                 return [m.to_dict() for m in evaluate_company(job.brand_name, rules)]
 
             def jd_matches(job: Any, text: str) -> list[dict[str, Any]]:
+                """职位描述黑名单命中结果。"""
                 return [m.to_dict() for m in evaluate_jd(job.job_name, text, rules)]
 
             def record_hit(job: Any, hit: Mapping[str, Any], *, action: str, jd_status: str) -> None:
+                """把一次黑名单命中写库。"""
                 match = RuleMatch(
                     rule={k: v for k, v in hit.items() if k not in {"matched_text", "source"}},
                     matched_text=str(hit.get("matched_text") or ""),
@@ -418,7 +521,6 @@ class CrawlTaskManager:
             logger.exception("抓取任务 %s 失败", task.task_id)
             with task.lock:
                 task.status = ST_ERROR
-                # 线程不走 FastAPI 的异常处理器，人话化得在这儿做
                 task.error = humanize(exc)
                 task.ended_at = time.time()
             task.push({"event": "error", "message": task.error})

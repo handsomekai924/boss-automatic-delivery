@@ -1,8 +1,13 @@
 """简历原文与分析结果的落库。
 
-简历原文存 ``resume`` 行的 ``content_md``，解析结果整包进 ``meta``；
-匹配分析存 ``analysis`` 行（带职位快照，删库也能回看）。库是
-``data/boss.db``——跟登录态 / 搜索条件 / 职位同一个。
+原文存 `resume` 行的 `content_md`，解析结果进 `meta`；匹配分析存 `analysis` 行。
+库是 `data/boss.db`——跟登录态 / 搜索条件 / 职位同一个。
+
+Attributes:
+    SECTION_ALIASES: 章节标题别名 → 规范名。
+    DELIVER_SENDING: 发送状态：进行中。
+    DELIVER_OK: 发送状态：成功。
+    DELIVER_FAILED: 发送状态：失败。
 """
 
 from __future__ import annotations
@@ -22,7 +27,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ResumeDraft:
-    """规则解析出的简历骨架。"""
+    """规则解析出的简历骨架。
+
+    Attributes:
+        resume_id: 简历 id。
+        title: 标题。
+        source_path: 来源路径。
+        created_at: 创建时间戳。
+        raw: 简历原文。
+        sections: 规范章节 → 正文。
+        other_sections: 未归类章节 → 正文。
+        skills: 技能标签。
+        basic: 基本信息（姓名 / 电话 / 邮箱）。
+        summary: 摘要。
+    """
 
     resume_id: str
     title: str
@@ -36,13 +54,13 @@ class ResumeDraft:
     summary: str = ""
 
     def to_dict(self, *, include_raw: bool = False) -> dict[str, Any]:
+        """转字典；默认不带原文。"""
         data = asdict(self)
         if not include_raw:
             data.pop("raw", None)
         return data
 
 
-#: 章节标题别名 → 规范名
 SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "基本信息": ("基本信息", "个人信息", "联系信息", "联系方式"),
     "求职意向": ("求职意向", "求职目标", "期望岗位", "求职期望"),
@@ -55,13 +73,15 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _norm_heading(text: str) -> str:
+    """标题去空白与装饰符，方便别名比对。"""
     return re.sub(r"[\s:：*#]+", "", text or "").strip()
 
 
 def parse_markdown(text: str) -> tuple[dict[str, str], dict[str, str], list[str]]:
     """按 Markdown 标题切章节。
 
-    :return: ``(sections, other_sections, parse_notes)``
+    Returns:
+        `(sections, other_sections, parse_notes)`。
     """
     lines = (text or "").replace("\r\n", "\n").split("\n")
     buckets: list[tuple[str, list[str]]] = [("_body", [])]
@@ -92,7 +112,6 @@ def parse_markdown(text: str) -> tuple[dict[str, str], dict[str, str], list[str]
             if canonical:
                 break
         if canonical:
-            # 同名章节往后面追加，不覆盖
             if canonical in sections and body:
                 sections[canonical] = sections[canonical] + "\n\n" + body
             else:
@@ -110,13 +129,13 @@ _SKILL_SPLIT = re.compile(r"[、,，/|;；\n]+")
 
 
 def extract_skills(sections: dict[str, str]) -> list[str]:
+    """从「技能标签」章节抽出技能列表。"""
     raw = sections.get("技能标签", "")
     skills: list[str] = []
     for line in raw.split("\n"):
         line = line.strip()
         if not line:
             continue
-        # 去掉列表符号
         line = re.sub(r"^[-*+]\s+", "", line)
         line = re.sub(r"^\d+[.、)]\s+", "", line)
         for token in _SKILL_SPLIT.split(line):
@@ -132,6 +151,7 @@ _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 
 def extract_basic(sections: dict[str, str]) -> dict[str, str]:
+    """从章节正文里抠姓名 / 电话 / 邮箱。"""
     blob = "\n".join(sections.values())
     basic: dict[str, str] = {}
     phone = _PHONE.search(blob)
@@ -148,6 +168,7 @@ def extract_basic(sections: dict[str, str]) -> dict[str, str]:
 
 
 def parse_resume(text: str, *, resume_id: str, title: str, source_path: str, created_at: float) -> ResumeDraft:
+    """规则切章节，组装简历骨架。"""
     sections, others, _notes = parse_markdown(text)
     return ResumeDraft(
         resume_id=resume_id,
@@ -163,17 +184,13 @@ def parse_resume(text: str, *, resume_id: str, title: str, source_path: str, cre
     )
 
 
-# --------------------------------------------------------------------------- #
-# 存储（状态库 data/boss.db）
-# --------------------------------------------------------------------------- #
-
-
 def _source_name(filename: str) -> str:
+    """把上传文件名收成安全的库内标题。"""
     return re.sub(r"[^\w.\-]+", "_", filename or "resume.md")[:60] or "resume.md"
 
 
 def _draft_from_row(row: Any) -> ResumeDraft:
-    """``resume`` 行 → :class:`ResumeDraft`（章节等嵌套字段在 ``meta`` 里）。"""
+    """`resume` 行 → `ResumeDraft`（章节等嵌套字段在 `meta` 里）。"""
     resume_id = str(row["resume_id"])
     try:
         meta = json.loads(str(row["meta"] or "{}"))
@@ -191,11 +208,9 @@ def _draft_from_row(row: Any) -> ResumeDraft:
 
 
 def save_resume(text: str, *, filename: str = "resume.md") -> ResumeDraft:
-    """**只存原文**（``content_md`` + 文件名）。
+    """只存原文（`content_md` + 文件名）。
 
-    LLM 解析由 :mod:`boss_web.services.resume_parser` 单独跑、单独落
-    ``meta.llm``（见 :func:`save_llm_parse`）；规则切章节退居幕后，只在读原文时
-    轻量分段，不再当作解析结果写库。
+    LLM 解析单独跑、单独落 `meta.llm`；规则切章节只在读原文时轻量分段。
     """
     resume_id = "rs_" + uuid.uuid4().hex[:10]
     safe = _source_name(filename)
@@ -227,6 +242,7 @@ def save_resume(text: str, *, filename: str = "resume.md") -> ResumeDraft:
 
 
 def load_resume(resume_id: str) -> ResumeDraft:
+    """读一份简历骨架；不存在抛 `FileNotFoundError`。"""
     conn = boss_db.acquire()
     row = conn.execute(
         "SELECT * FROM resume WHERE resume_id = ?", (resume_id,)
@@ -237,6 +253,7 @@ def load_resume(resume_id: str) -> ResumeDraft:
 
 
 def list_resumes() -> list[dict[str, Any]]:
+    """列出简历摘要；LLM 结果只报「解析过没有」。"""
     conn = boss_db.acquire()
     rows = conn.execute(
         "SELECT * FROM resume ORDER BY created_at DESC"
@@ -250,7 +267,6 @@ def list_resumes() -> list[dict[str, Any]]:
         if not isinstance(meta, dict):
             meta = {}
         meta.pop("raw", None)
-        # 列表只报「解析过没有」，别把整包 LLM 结果塞进列表响应
         llm = meta.get("llm")
         if isinstance(llm, dict):
             meta["llm"] = {
@@ -266,22 +282,17 @@ def list_resumes() -> list[dict[str, Any]]:
 
 
 def delete_resume(resume_id: str) -> bool:
+    """删除简历；删到了返回 True。"""
     conn = boss_db.acquire()
     with conn:
         cur = conn.execute("DELETE FROM resume WHERE resume_id = ?", (resume_id,))
     return cur.rowcount > 0
 
 
-# --------------------------------------------------------------------------- #
-# LLM 固定模板解析结果（meta.llm）
-# --------------------------------------------------------------------------- #
-
-
 def save_llm_parse(resume_id: str, llm_payload: dict[str, Any]) -> dict[str, Any]:
-    """把 LLM 解析结果写进 ``meta.llm``，回写后的 ``llm`` 整包。
+    """把 LLM 解析结果写进 `meta.llm`，回写后的 `llm` 整包。
 
-    ``llm_payload`` 形状：``{"parsed_at", "model", "data"}``。
-    **只覆盖 ``meta.llm``**，其余 meta 键（title/source_name/…）原样保留。
+    只覆盖 `meta.llm`，其余 meta 键原样保留。
     """
     conn = boss_db.acquire()
     row = conn.execute(
@@ -305,7 +316,7 @@ def save_llm_parse(resume_id: str, llm_payload: dict[str, Any]) -> dict[str, Any
 
 
 def load_llm_parse(resume_id: str) -> dict[str, Any] | None:
-    """读 ``meta.llm``；没有解析过 → ``None``。简历不存在 → ``FileNotFoundError``。"""
+    """读 `meta.llm`；没有解析过 → `None`。简历不存在 → `FileNotFoundError`。"""
     conn = boss_db.acquire()
     row = conn.execute(
         "SELECT meta FROM resume WHERE resume_id = ?", (resume_id,)
@@ -323,13 +334,14 @@ def load_llm_parse(resume_id: str) -> dict[str, Any] | None:
 
 
 def _top_score(matches: Any) -> float:
-    """matches 里的最高分（没有 / 全不是数字 → 0），跟 analysis 行的 ``top_score`` 列同口径。"""
+    """matches 里的最高分（没有 / 全不是数字 → 0），跟 analysis 行的 `top_score` 列同口径。"""
     scores = [m.get("match_score") or 0 for m in (matches or []) if isinstance(m, dict)]
     scores = [s for s in scores if isinstance(s, (int, float))]
     return float(max(scores) if scores else 0.0)
 
 
 def save_analysis(payload: dict[str, Any]) -> str:
+    """新插一条分析结果；返回 analysis_id。"""
     analysis_id = str(payload.get("analysis_id") or ("an_" + uuid.uuid4().hex[:10]))
     payload["analysis_id"] = analysis_id
     matches = payload.get("matches") or []
@@ -357,6 +369,7 @@ def save_analysis(payload: dict[str, Any]) -> str:
 
 
 def load_analysis(analysis_id: str) -> dict[str, Any]:
+    """读整包分析 payload；不存在抛 `FileNotFoundError`。"""
     conn = boss_db.acquire()
     row = conn.execute(
         "SELECT payload FROM analysis WHERE analysis_id = ?", (analysis_id,)
@@ -369,9 +382,8 @@ def load_analysis(analysis_id: str) -> dict[str, Any]:
 def _patch_match(analysis_id: str, encrypt_job_id: str, **fields: Any) -> dict[str, Any]:
     """改 payload 里某一条 match 的字段，回改后的那条。
 
-    找不到 analysis → ``FileNotFoundError``；找不到那条 match → ``KeyError``。
-    招呼语、发送结果与单条重跑都走这里——一次读改写，别开两套。
-    **只 UPDATE 已有行，不新插**；``top_score`` 列跟着 matches 重新收敛。
+    找不到 analysis → `FileNotFoundError`；找不到那条 match → `KeyError`。
+    只 UPDATE 已有行，不新插；`top_score` 列跟着 matches 重新收敛。
     """
     payload = load_analysis(analysis_id)
     matches = payload.get("matches")
@@ -396,10 +408,9 @@ def _patch_match(analysis_id: str, encrypt_job_id: str, **fields: Any) -> dict[s
 
 
 def update_match_result(analysis_id: str, encrypt_job_id: str, **fields: Any) -> dict[str, Any]:
-    """单条重跑匹配后回写那条 match——**只改不增**：只 UPDATE 已有 analysis 行。
+    """单条重跑匹配后回写那条 match——只改不增。
 
-    只覆盖传进来的分析字段；职位快照（``job_name`` / ``security_id`` / …）与
-    发送状态等原有数据原样复用，既不新插 analysis，也不新插 match 条目。
+    只覆盖传进来的分析字段；职位快照与发送状态等原有数据原样复用。
     """
     return _patch_match(analysis_id, encrypt_job_id, **fields)
 
@@ -409,7 +420,6 @@ def update_greeting(analysis_id: str, encrypt_job_id: str, greeting: str) -> dic
     return _patch_match(analysis_id, encrypt_job_id, greeting=greeting)
 
 
-#: 发送状态（写进 match 的 ``deliver_status``）
 DELIVER_SENDING = "sending"
 DELIVER_OK = "ok"
 DELIVER_FAILED = "failed"
@@ -425,8 +435,7 @@ def update_delivery(
 ) -> dict[str, Any]:
     """把一次发送的结果写回某条 match，回改后的那条。
 
-    ``delivered_at`` 只在**成功**时给（前端拿它判断「已发送、别重发」）；
-    失败就留空串状态，行内显示原因。
+    `delivered_at` 只在成功时给；失败就留空串状态，行内显示原因。
     """
     fields: dict[str, Any] = {
         "deliver_status": deliver_status,
@@ -438,6 +447,7 @@ def update_delivery(
 
 
 def list_analyses() -> list[dict[str, Any]]:
+    """列出分析摘要（不含整包 payload）。"""
     conn = boss_db.acquire()
     rows = conn.execute(
         "SELECT analysis_id, resume_id, resume_title, created_at, job_count, "
@@ -459,6 +469,7 @@ def list_analyses() -> list[dict[str, Any]]:
 
 
 def delete_analysis(analysis_id: str) -> bool:
+    """删除分析；删到了返回 True。"""
     conn = boss_db.acquire()
     with conn:
         cur = conn.execute("DELETE FROM analysis WHERE analysis_id = ?", (analysis_id,))

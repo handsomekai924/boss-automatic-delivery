@@ -1,17 +1,7 @@
 """兜底来源：写死的选项表 + 解析已保存 HTML。
 
-todo.md 第二节的说明：
-
-    以上筛选项应优先通过 BOSS 直聘接口获取。如果接口不可用，也可以基于我提供
-    的已保存 HTML 静态文件进行分析提取，并将可选值直接写死在项目中作为兜底方案。
-
-所以这里两件事：
-  1. :data:`boss_filter.tables` 里那套写死表（从线上接口 / 已存 HTML 抄下来的）；
-  2. :func:`parse_html_conditions` —— 现场从 ``.saved_web`` 那份页面再解析一遍，
-     用来校对写死表有没有过期，或在接口挂掉时现场凑一份。
-
-公司行业现在走 ``/wapi/zpCommon/data/industry.json``（见 :mod:`boss_filter.client`）；
-写死表 :data:`boss_filter.tables.INDUSTRY_GROUPS` 是兜底，HTML 解析器仅供离线校对。
+接口不可用时用 `boss_filter.tables` 的写死表；`parse_html_conditions`
+可现场从 `.saved_web` 页面再解析一遍，用来校对写死表或离线凑一份。
 """
 
 from __future__ import annotations
@@ -35,16 +25,11 @@ from .models import (
 )
 
 
-# --------------------------------------------------------------------------- #
-# 写死表 → FilterConditions
-# --------------------------------------------------------------------------- #
-
-
 def build_fallback_conditions() -> FilterConditions:
     """用项目内写死的常量表拼出一份可用的筛选条件。
 
-    城市树太大（线上约 900KB）不适合写死，兜底只有热点城市，且放在
-    ``hot_cities``；``cities`` 留空，调用方看到空的城市维度就知道该去打接口。
+    城市树太大不适合写死，兜底只有热点城市，且放在 `hot_cities`；
+    `cities` 留空，调用方看到空的城市维度就知道该去打接口。
     """
     return FilterConditions(
         cities=(),
@@ -63,23 +48,19 @@ def build_fallback_conditions() -> FilterConditions:
 
 
 def _industry_groups_from_tables() -> tuple[IndustryGroup, ...]:
+    """把写死的行业分组表转成 `IndustryGroup`。"""
     return tuple(
         IndustryGroup(name=group_name, options=options_from_rows(rows))
         for group_name, rows in tables.INDUSTRY_GROUPS
     )
 
 
-# --------------------------------------------------------------------------- #
-# HTML 解析
-# --------------------------------------------------------------------------- #
-
-
 def parse_html_conditions(html: str) -> FilterConditions:
     """从职位页 HTML 里抠出筛选下拉的可选值。
 
     能解析出 6 个维度（求职类型 / 薪资 / 经验 / 学历 / 行业 / 规模）。
-    **城市不在页面里**——城市弹层是点开才渲染的，存盘的 HTML 没有它，所以
-    返回对象的 ``cities`` 为空，``hot_cities`` 用写死表补上（同兜底）。
+    城市不在页面里（城市弹层点开才渲染），所以返回对象的 `cities` 为空，
+    `hot_cities` 用写死表补上。
     """
     if not html or not isinstance(html, str):
         raise FilterDataError("HTML 内容为空，无法解析筛选项")
@@ -111,15 +92,13 @@ def parse_html_conditions(html: str) -> FilterConditions:
 
 
 def parse_html_industries(html: str) -> tuple[IndustryGroup, ...]:
-    """只解析行业下拉：分组名取 ``<span class="label">``，组内取 ``ka="sel-industry-N"``。
+    """只解析行业下拉：分组名取 `<span class="label">`，组内取 `ka="sel-industry-N"`。
 
-    分组边界按标签切分，不依赖 ``</li>`` 的具体嵌套——存盘页和裁剪片段的
-    收尾标签不一定一致。
+    分组边界按标签切分，不依赖 `</li>` 的具体嵌套。
     """
     idx = html.find(HTML_INDUSTRY_MARKER)
     if idx < 0:
         return ()
-    # 行业块的终点是筛选条收尾（清空按钮）——比配一堆嵌套 div 稳。
     end = html.find('ka="empty-filter"', idx)
     block = html[idx:] if end < 0 else html[idx:end]
 
@@ -137,7 +116,7 @@ def parse_html_industries(html: str) -> tuple[IndustryGroup, ...]:
 
 
 def load_saved_html(path: str | Path | None = None) -> str:
-    """读入已保存的职位页 HTML。默认读项目根下的 ``.saved_web/…``。"""
+    """读入已保存的职位页 HTML。默认读项目根下的 `.saved_web/…`。"""
     target = Path(path) if path is not None else _default_html_path()
     if not target.is_file():
         raise FilterDataError(f"找不到已保存的 HTML: {target}")
@@ -150,14 +129,16 @@ def conditions_from_html(path: str | Path | None = None) -> FilterConditions:
 
 
 def _default_html_path() -> Path:
-    """默认 HTML 路径：相对项目根（``boss_filter`` 的上一级）。"""
+    """默认 HTML 路径：相对项目根（`boss_filter` 的上一级）。"""
     root = Path(__file__).resolve().parent.parent
     return root / DEFAULT_SAVED_HTML
 
 
 def _clean(text: str) -> str:
+    """把文本里的连续空白压成单个空格并 strip。"""
     return re.sub(r"\s+", " ", text or "").strip()
 
 
 def city_node(code: str, name: str, **kwargs) -> CityNode:  # pragma: no cover - 便捷构造
+    """便捷构造 `CityNode`。"""
     return CityNode(code=str(code), name=str(name), **kwargs)

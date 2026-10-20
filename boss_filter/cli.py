@@ -5,7 +5,7 @@
     python -m boss_filter show --fallback           # 不打接口，只用写死表
     python -m boss_filter export --out filters.json # 导出完整选项表
 
-接口路径未核实或线上已变更时，用 ``--base-url`` / ``--endpoint-conditions``
+接口路径未核实或线上已变更时，用 `--base-url` / `--endpoint-conditions`
 临时覆盖。
 """
 
@@ -23,13 +23,13 @@ from .config import BASE_URL
 from .errors import FilterApiError, FilterDataError, FilterError, FilterTransportError
 from .models import FilterConditions
 
-#: 退出码，便于脚本判断失败原因
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构造命令行参数解析器。"""
     parser = argparse.ArgumentParser(
         prog="boss_filter",
         description="BOSS直聘职位筛选条件获取（城市/求职类型/薪资/经验/学历/行业/规模）",
@@ -71,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """命令行入口，返回退出码。"""
     args = build_parser().parse_args(argv)
     _setup_logging(args.verbose)
 
@@ -95,12 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     return handlers[args.command](args, conditions)
 
 
-# --------------------------------------------------------------------------- #
-# 子命令
-# --------------------------------------------------------------------------- #
-
-
 def _cmd_show(args: argparse.Namespace, conditions: FilterConditions) -> int:
+    """展示筛选条件摘要。"""
     if args.json:
         json.dump(conditions.to_dict(), sys.stdout, ensure_ascii=False, indent=2)
         print()
@@ -115,6 +112,7 @@ def _cmd_show(args: argparse.Namespace, conditions: FilterConditions) -> int:
 
 
 def _cmd_export(args: argparse.Namespace, conditions: FilterConditions) -> int:
+    """导出完整筛选选项表到文件或标准输出。"""
     text = json.dumps(conditions.to_dict(), ensure_ascii=False, indent=2)
     if args.out == "-":
         print(text)
@@ -126,12 +124,8 @@ def _cmd_export(args: argparse.Namespace, conditions: FilterConditions) -> int:
     return EXIT_OK
 
 
-# --------------------------------------------------------------------------- #
-# 装配
-# --------------------------------------------------------------------------- #
-
-
 def _load_conditions(args: argparse.Namespace) -> FilterConditions:
+    """按命令行参数拿到筛选条件。"""
     if getattr(args, "fallback", False):
         from .fallback import build_fallback_conditions
 
@@ -155,13 +149,10 @@ def _load_conditions(args: argparse.Namespace) -> FilterConditions:
     return get_filter_conditions(client=client, use_fallback=True)
 
 
-# --------------------------------------------------------------------------- #
-# 展示辅助
-# --------------------------------------------------------------------------- #
-
-
 def _print_detail(conditions: FilterConditions) -> None:
+    """逐项列出各维度的可选值。"""
     def dump(title: str, options) -> None:
+        """打印一个维度的选项列表。"""
         print(f"[{title}]")
         for opt in options:
             extra = ""
@@ -183,6 +174,7 @@ def _print_detail(conditions: FilterConditions) -> None:
 
 
 def _setup_logging(verbose: bool) -> None:
+    """配置日志级别与格式。"""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",

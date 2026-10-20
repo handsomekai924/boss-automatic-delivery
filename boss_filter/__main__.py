@@ -1,4 +1,4 @@
-"""``python -m boss_filter`` 入口。"""
+"""`python -m boss_filter` 入口。"""
 
 import sys
 
@@ -6,7 +6,7 @@ from .cli import main
 
 
 def _force_utf8_streams() -> None:
-    """Windows 控制台默认 GBK，中文/符号会直接 UnicodeEncodeError。"""
+    """把标准流重配成 UTF-8，避免 Windows GBK 控制台编码报错。"""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:

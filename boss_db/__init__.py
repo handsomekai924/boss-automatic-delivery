@@ -1,23 +1,15 @@
 """统一状态库（SQLite）。
 
-以前登录态、搜索条件、stoken、LLM 配置、简历、分析各自躺在 ``*.json`` 里，
-职位另有一份 ``jobs.db``。现在**只有一份库** ``data/boss.db``：
+单例文档进 `doc` 整包 JSON，简历/分析/职位建真表。路径覆盖：显式 `path` →
+环境变量 `BOSS_DB` → `data/boss.db`；用户点名的 JSON 文件读写不走这里。
 
-``doc``
-    单例文档（会话 / 搜索条件 / stoken / LLM 配置 / 投递配置）。它们本身就是「一份文档」，
-    字段由各模块自己的 dataclass 管，所以整包存 JSON，不拆列。
-    payload 就是当年那个文件的正文，迁移 = 把文本搬进一行。
-
-``resume`` / ``analysis``
-    实体集合，有 CRUD、要按时间排序、要按 id 删——真正的表。
-    嵌套字段（章节、匹配结果）整包进 JSON 列，和 ``jobs.job_labels`` 一个惯例。
-
-``jobs`` / ``fetch_pages``
-    职位与抓取流水，DDL 从 :mod:`boss_jobs.store` 原样搬来。
-
-路径覆盖顺序：显式 ``path`` → 环境变量 ``BOSS_DB`` → ``data/boss.db``。
-用户点名的 JSON 文件读写不走这里（``boss_filter export --out``、
-``search_filter_from_file`` 那类）。
+Attributes:
+    SCHEMA_DOC: `doc` 表里存迁移闸门的行名。
+    _MIGRATED_FLAG: 迁移闸门字段。
+    _DEPRECATED_ENV: 已废弃的环境变量，设了只提醒、不认。
+    _conns: 路径 → 该路径下所有已开连接（`close_db` / `close_all` 收尾用）。
+    _migrate_lock: 迁移串行锁。
+    _COLUMN_MIGRATIONS: 补列迁移表：表名 → {列名: 建列 DDL 片段}。
 """
 
 from __future__ import annotations
@@ -34,22 +26,16 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-#: 项目根（``F:\boss``），与各包自己的 ``PROJECT_ROOT`` 同源
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
-#: 运行时数据目录
 DATA_DIR: Final[Path] = PROJECT_ROOT / "data"
 
-#: 默认状态库
 DEFAULT_DB_PATH: Final[Path] = DATA_DIR / "boss.db"
 
-#: 覆盖库路径的环境变量
 DB_ENV: Final[str] = "BOSS_DB"
 
-#: ``doc`` 表里存迁移闸门的行名
 SCHEMA_DOC: Final[str] = "schema"
 
-#: 单例文档的名字
 DOC_SESSION: Final[str] = "session"
 DOC_SEARCH_FILTER: Final[str] = "search_filter"
 DOC_STOKEN: Final[str] = "stoken"
@@ -58,10 +44,8 @@ DOC_DELIVER_CONFIG: Final[str] = "deliver_config"
 DOC_APP_SETTINGS: Final[str] = "app_settings"
 DOC_COLLECTION_CONFIG: Final[str] = "collection_config"
 
-#: 迁移闸门字段
 _MIGRATED_FLAG: Final[str] = "legacy_imported"
 
-#: 已废弃的环境变量（设了就提醒一声，不认）
 _DEPRECATED_ENV: Final[tuple[str, ...]] = ("BOSS_SEARCH_FILTER", "BOSS_STOKEN_STORE")
 _warned_env: set[str] = set()
 
@@ -240,16 +224,10 @@ CREATE INDEX IF NOT EXISTS idx_crawl_task_jobs_job ON crawl_task_jobs(encrypt_jo
 """
 
 
-# --------------------------------------------------------------------------- #
-# 路径
-# --------------------------------------------------------------------------- #
-
-
 def resolve_db_path(path: Path | str | None = None) -> Path:
-    """显式 ``path`` → ``BOSS_DB`` → ``data/boss.db``。
+    """显式 `path` → `BOSS_DB` → `data/boss.db`；`:memory:` 原样透传。
 
-    ``":memory:"`` 原样透传（测试用内存库）。
-    调用时才解析，绝不把默认值冻在签名里——这样测试只改一个环境变量就能全局隔离。
+    调用时才解析，不把默认值冻在签名里——测试只改一个环境变量就能全局隔离。
     """
     for env in _DEPRECATED_ENV:
         if os.environ.get(env) and env not in _warned_env:
@@ -263,20 +241,9 @@ def resolve_db_path(path: Path | str | None = None) -> Path:
     return DEFAULT_DB_PATH
 
 
-# --------------------------------------------------------------------------- #
-# 连接（线程本地 + 进程内跟踪：sqlite3.Connection 不是并发安全的）
-#
-# FastAPI 线程池会并发跑同步端点。以前 `_conns` 只缓存一个连接给所有线程共用，
-# 并发 execute/fetch 会把 sqlite3 内部状态搅乱——轻则 InterfaceError（bad parameter
-# or other API misuse），重则 Row 变成残缺元组（IndexError: tuple index out of range）。
-# 现在每个线程各自持连接：文件库靠 WAL 并发读写，":memory:" 同线程内共享一份。
-# --------------------------------------------------------------------------- #
-
 _lock = threading.Lock()
-#: key → 该路径下所有已开连接（close_db / close_all 收尾用）
 _conns: dict[str, list[sqlite3.Connection]] = {}
 _local = threading.local()
-#: 迁移要串行跑：web 线程池会并发 ``connect`` 同一个默认库
 _migrate_lock = threading.Lock()
 
 
@@ -291,20 +258,16 @@ def _thread_conns() -> dict[str, sqlite3.Connection]:
 
 @contextmanager
 def db(path: Path | str | None = None, *, migrate: bool = True) -> Iterator[sqlite3.Connection]:
-    """借当前线程的连接，用完不 close（线程复用）。
-
-    每个线程各自持连接——``sqlite3.Connection`` 不是并发安全的，
-    共享一个连接在 FastAPI 线程池下会炸（见上方注释）。
-    """
+    """借当前线程的连接，用完不 close（线程复用）。"""
     conn = acquire(path, migrate=migrate)
     try:
         yield conn
     finally:
-        pass  # 连接留在本线程缓存里
+        pass
 
 
 def acquire(path: Path | str | None = None, *, migrate: bool = True) -> sqlite3.Connection:
-    """拿**当前线程**的连接（缓存命中就不重开）。调用方不用 close。"""
+    """拿当前线程的连接（缓存命中就不重开）。调用方不用 close。"""
     resolved = resolve_db_path(path)
     key = str(resolved)
 
@@ -327,7 +290,7 @@ def connect(path: Path | str | None = None, *, migrate: bool = True) -> sqlite3.
 
 
 def close_db(path: Path | str | None = None) -> None:
-    """关掉该路径下所有线程的连接（测试里让 ``tmp_path`` 能被清理掉）。"""
+    """关掉该路径下所有线程的连接（测试里让 `tmp_path` 能被清理掉）。"""
     key = str(resolve_db_path(path))
     with _lock:
         conns = _conns.pop(key, [])
@@ -353,8 +316,6 @@ def close_all() -> None:
     _local.conns = {}
 
 
-#: 补列迁移表：``表名 → {列名: 建列 DDL 片段}``。``CREATE TABLE IF NOT EXISTS``
-#: 对已存在的表不会补列，老库升级只能靠 ALTER；PRAGMA 查缺再补，幂等。
 _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     "jobs": {
         "job_desc": "TEXT NOT NULL DEFAULT ''",
@@ -394,6 +355,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
 
 
 def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
+    """打开连接并建表/补列；只对默认库做历史迁移。"""
     is_memory = str(resolved) == ":memory:"
     created = False
     if not is_memory:
@@ -417,37 +379,31 @@ def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
     if not is_memory:
         try:
             os.chmod(resolved, 0o600)
-        except OSError:  # Windows 上可能不认，无所谓
+        except OSError:
             pass
         if created:
             logger.info("状态库已建：%s", resolved)
 
-    # 只认默认库：测试/自定义库路径下绝不会去动项目根那几个真账本
     if migrate and not is_memory and resolved == DEFAULT_DB_PATH:
         with _migrate_lock:
             migrate_legacy(conn, resolved)
     return conn
 
 
-# --------------------------------------------------------------------------- #
-# 单例文档
-# --------------------------------------------------------------------------- #
-
-
 def doc_get_raw(name: str, path: Path | str | None = None) -> str | None:
-    """读 payload 的原始文本（给要自己报 ``ValueError`` 的调用方用）。"""
+    """读 payload 的原始文本（给要自己报 `ValueError` 的调用方用）。"""
     conn = acquire(path)
     row = conn.execute("SELECT payload FROM doc WHERE name = ?", (name,)).fetchone()
     return None if row is None else str(row["payload"])
 
 
 def doc_get(name: str, path: Path | str | None = None) -> dict[str, Any] | None:
-    """读一份单例文档。没有 / payload 坏了 → ``None``（调用方按「没有」处理）。"""
+    """读一份单例文档。没有 / payload 坏了 → `None`（调用方按「没有」处理）。"""
     return _decode_payload(doc_get_raw(name, path))
 
 
 def doc_set(name: str, payload: Mapping[str, Any] | list[Any] | str, path: Path | str | None = None) -> Path:
-    """写一份单例文档。``payload`` 可以是对象，也可以是已经序列化好的字符串。"""
+    """写一份单例文档。`payload` 可以是对象，也可以是已经序列化好的字符串。"""
     resolved = resolve_db_path(path)
     text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
     conn = acquire(resolved)
@@ -470,6 +426,7 @@ def doc_delete(name: str, path: Path | str | None = None) -> bool:
 
 
 def _decode_payload(raw: Any) -> dict[str, Any] | None:
+    """把 payload 文本解成 dict；坏 JSON / 非对象按「没有」处理。"""
     if raw is None:
         return None
     try:
@@ -480,24 +437,21 @@ def _decode_payload(raw: Any) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-# --------------------------------------------------------------------------- #
-# 一次性迁移
-# --------------------------------------------------------------------------- #
-
-
 def migrate_legacy(
     conn: sqlite3.Connection,
     db_path: Path,
     *,
     legacy_root: Path | None = None,
 ) -> dict[str, int]:
-    """把历史 JSON 账本 / ``jobs.db`` 迁进库。幂等：跑第二次是 no-op。
+    """把历史 JSON 账本 / `jobs.db` 迁进库；幂等，跑第二次是 no-op。
 
-    :param legacy_root: 旧账本所在的根目录（默认项目根）。测试里指到临时目录，
-        免得把真账本搬走。
+    Args:
+        conn: 目标库连接。
+        db_path: 目标库路径（打日志用）。
+        legacy_root: 旧账本所在的根目录（默认项目根）。测试里指到临时目录。
 
-    迁成功的 JSON 源文件会删掉；``jobs.db`` 只改名成 ``jobs.db.migrated``，留个后路。
-    单条失败只 warning，不挡别的条。
+    Returns:
+        各类迁移条数（没迁的键为 0 或省略）。
     """
     root = Path(legacy_root) if legacy_root is not None else PROJECT_ROOT
     gate = _decode_payload(_raw_row(conn, SCHEMA_DOC) or "")
@@ -516,12 +470,10 @@ def migrate_legacy(
     }
     data_dir = root / "data"
 
-    # 职位库单独走一步：ATTACH 的库在事务里 DETACH 会被锁住，必须自己 commit 完再 detach
     counts["jobs"], counts["fetch_pages"] = _import_jobs_db(conn, root / "jobs.db")
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        # --- 单例文档 ---
         for name, src in (
             (DOC_SESSION, root / "session.json"),
             (DOC_SEARCH_FILTER, root / "search_filter.json"),
@@ -532,7 +484,7 @@ def migrate_legacy(
                 continue
             try:
                 text = src.read_text(encoding="utf-8")
-                json.loads(text)  # 校验一下，坏文件不搬
+                json.loads(text)
             except (OSError, ValueError) as exc:
                 logger.warning("迁移跳过 %s：%s", src, exc)
                 continue
@@ -543,7 +495,6 @@ def migrate_legacy(
             counts[name] = 1
             _unlink_quiet(src)
 
-        # --- 简历 / 分析 ---
         counts["resume"] = _import_resumes(conn, data_dir / "resumes")
         counts["analysis"] = _import_analyses(conn, data_dir / "analyses")
 
@@ -570,11 +521,13 @@ def migrate_legacy(
 
 
 def _raw_row(conn: sqlite3.Connection, name: str) -> str | None:
+    """读 `doc` 某行的原始 payload 文本。"""
     row = conn.execute("SELECT payload FROM doc WHERE name = ?", (name,)).fetchone()
     return None if row is None else str(row["payload"])
 
 
 def _import_resumes(conn: sqlite3.Connection, folder: Path) -> int:
+    """把 `data/resumes` 下的简历文件迁进 `resume` 表；返回迁入条数。"""
     if not folder.is_dir():
         return 0
     n = 0
@@ -610,6 +563,7 @@ def _import_resumes(conn: sqlite3.Connection, folder: Path) -> int:
 
 
 def _import_analyses(conn: sqlite3.Connection, folder: Path) -> int:
+    """把 `data/analyses` 下的分析 JSON 迁进 `analysis` 表；返回迁入条数。"""
     if not folder.is_dir():
         return 0
     n = 0
@@ -650,9 +604,9 @@ def _import_analyses(conn: sqlite3.Connection, folder: Path) -> int:
 
 
 def _import_jobs_db(conn: sqlite3.Connection, legacy: Path) -> tuple[int, int]:
+    """把旧 `jobs.db` 迁进库；返回 `(职位数, 抓取页数)`。目标库已有职位时只挪走旧文件。"""
     if not legacy.exists():
         return 0, 0
-    # 目标库里已经有职位就别搬了（避免重复），只把旧文件挪开
     have = conn.execute("SELECT count(*) AS n FROM jobs").fetchone()["n"]
     if have:
         _rename_quiet(legacy, legacy.with_name(legacy.name + ".migrated"))
@@ -665,7 +619,6 @@ def _import_jobs_db(conn: sqlite3.Connection, legacy: Path) -> tuple[int, int]:
         jobs = int(conn.execute(f"SELECT count(*) AS n FROM {alias}.jobs").fetchone()["n"])
         pages = int(conn.execute(f"SELECT count(*) AS n FROM {alias}.fetch_pages").fetchone()["n"])
         conn.execute("BEGIN IMMEDIATE")
-        # 显式列名 + COALESCE：旧库里可能有 NULL，目标列是 NOT NULL DEFAULT ''
         conn.execute(
             "INSERT OR IGNORE INTO jobs (encrypt_job_id, job_name, brand_name, location, "
             "salary_desc, job_experience, job_degree, brand_industry, brand_scale_name, "
@@ -713,6 +666,7 @@ def _import_jobs_db(conn: sqlite3.Connection, legacy: Path) -> tuple[int, int]:
 
 
 def _unlink_quiet(path: Path) -> None:
+    """删文件；失败只 warning。"""
     try:
         path.unlink()
     except OSError as exc:
@@ -720,13 +674,15 @@ def _unlink_quiet(path: Path) -> None:
 
 
 def _rmdir_quiet(path: Path) -> None:
+    """删空目录；还有别的文件就留着。"""
     try:
         path.rmdir()
     except OSError:
-        pass  # 还有别的文件就留着
+        pass
 
 
 def _rename_quiet(src: Path, dst: Path) -> None:
+    """改名（目标已存在则先删）；失败只 warning。"""
     try:
         if dst.exists():
             dst.unlink()

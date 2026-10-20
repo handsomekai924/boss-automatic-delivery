@@ -1,8 +1,6 @@
 """环境自检与 Chrome 引导。
 
-非技术用户最需要的就是这一组：程序把库建到哪了、Chrome 有没有装、需不需要把
-取令牌的窗口切成可见。全部**懒检测**——不阻塞启动，用户装完 Chrome 点一下
-「重新检测」就行，不必重启。
+懒检测：不阻塞启动，用户装完 Chrome 点「重新检测」即可。
 """
 
 from __future__ import annotations
@@ -26,17 +24,32 @@ logger = logging.getLogger(__name__)
 
 
 class ChromeModeBody(BaseModel):
-    #: ``visible`` / ``offscreen`` / ``hidden`` / ``headless``；空串 = 跟随默认
+    """Chrome 窗口档位请求体。
+
+    Attributes:
+        mode: `visible` / `offscreen` / `hidden` / `headless`；空串 = 跟随默认。
+    """
+
     mode: str = Field("", description="Chrome 窗口档位")
 
 
 class IgnoreUpdateBody(BaseModel):
-    #: 要忽略的版本号（``v`` 前缀可有可无）；空串 = 撤销忽略
+    """忽略版本请求体。
+
+    Attributes:
+        version: 要忽略的版本号（`v` 前缀可有可无）；空串 = 撤销忽略。
+    """
+
     version: str = Field("", description="要忽略的版本号，空串表示撤销")
 
 
 class ApplyUpdateBody(BaseModel):
-    #: 目标版本号（``v`` 前缀可有可无）；空串 = 接受服务端当下最新的那一版
+    """立即更新请求体。
+
+    Attributes:
+        version: 目标版本号（`v` 前缀可有可无）；空串 = 接受服务端当下最新的那一版。
+    """
+
     version: str = Field("", description="要更新到的版本号，空串表示最新版")
 
 
@@ -51,7 +64,6 @@ def health() -> dict[str, Any]:
         "version": APP_VERSION,
         "data_dir": str(data_dir),
         "db": str(boss_db.resolve_db_path()),
-        # exe 在 %TEMP% 下跑 = 用户直接在压缩包预览里双击了，数据会丢
         "temp_run": runtime.is_temp_run(),
         "writable": runtime.is_writable(data_dir),
         "portable": runtime.is_frozen() and runtime.is_writable(data_dir),
@@ -66,7 +78,7 @@ def chrome() -> dict[str, Any]:
 
 @router.post("/chrome/mode")
 def set_chrome_mode(body: ChromeModeBody) -> dict[str, Any]:
-    """切换取令牌窗口的档位，**立即生效**（不用重启）。"""
+    """切换取令牌窗口的档位，立即生效（不用重启）。"""
     from boss_jobs.cdp_stoken import CHROME_MODES
 
     raw = (body.mode or "").strip().lower()
@@ -84,11 +96,7 @@ def set_chrome_mode(body: ChromeModeBody) -> dict[str, Any]:
 
 @router.post("/chrome/open")
 def open_chrome() -> dict[str, Any]:
-    """用**可见**窗口拉起取令牌的 Chrome。
-
-    给「账号被风控、需要人工拖一次滑块」的场景用：默认档位是 hidden，窗口连
-    任务栏里都没有，用户根本够不着。
-    """
+    """用可见窗口拉起取令牌的 Chrome（风控滑块场景）；失败抛 `EnvironmentWebError`。"""
     from boss_jobs.cdp_stoken import StokenError, launch_chrome
 
     try:
@@ -104,20 +112,14 @@ def open_chrome() -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------- #
-# 版本更新
-# --------------------------------------------------------------------------- #
-
-
 @router.get("/update")
 def update_status(force: bool = False) -> dict[str, Any]:
-    """当前版本 / Gitee 上的最新版 / 要不要弹窗。
+    """当前版本 / 最新版 / 要不要弹窗；`should_prompt` = 有更新且没被忽略压住。
 
-    ``should_prompt`` = 有更新**且**没被「忽略此版本」压住。检测失败时 ``latest``
-    为空、``error`` 带人话，**不报 500**——版本检测不该把页面搞挂。
+    检测失败时 `latest` 为空、`error` 带人话，不报 500。
     """
     body = update_check.build_status(force=force)
-    body["version"] = APP_VERSION  # 兼容只想要「当前版本号」的调用方
+    body["version"] = APP_VERSION
     return body
 
 
@@ -134,14 +136,7 @@ def ignore_update(body: IgnoreUpdateBody) -> dict[str, Any]:
 
 @router.get("/update/log")
 def update_log(tail: int = updater.LOG_TAIL_BYTES) -> dict[str, Any]:
-    """更新过程日志 + 诊断信息，给「系统设置 → 版本更新」就地看。
-
-    用户不会开 ``%TEMP%``，出错时要能在页面上直接看到原因、截图发给开发者。
-    **永远 200**：文件不存在 / 被 bat 锁着都是数据，不是接口错误。
-
-    ``diagnostics`` 只读缓存（:func:`update_check.cached_snapshot`），不打 Gitee——
-    诊断页不能卡 8 秒等网络。
-    """
+    """更新过程日志 + 诊断信息，永远 200；诊断只读缓存 `update_check.cached_snapshot`。"""
     limit = max(1, min(int(tail or updater.LOG_TAIL_BYTES), updater.LOG_TAIL_MAX))
     files, hint = updater.read_update_logs(tail_bytes=limit)
     snap = update_check.cached_snapshot()
@@ -188,8 +183,7 @@ def update_log(tail: int = updater.LOG_TAIL_BYTES) -> dict[str, Any]:
 def apply_update(body: ApplyUpdateBody) -> dict[str, Any]:
     """点「立即更新」：确认 zip 能拿到后立刻返回，进度全走 WS。
 
-    **不做破坏性的事**：真删/真换交给 bat，而 bat 自己还会再验一次 zip。
-    这里只负责把「要更新到哪一版、包从哪下」交出去。
+    不做破坏性的事；真删/真换交给 bat。环境不支持时抛 `ConflictError`。
     """
     if not runtime.is_frozen():
         raise ConflictError("开发/源码模式不支持自动更新，请用 git 拉最新代码。")
@@ -232,8 +226,7 @@ def apply_update(body: ApplyUpdateBody) -> dict[str, Any]:
 async def update_ws(ws: WebSocket) -> None:
     """推送自更新进度。连接先给一帧快照，之后只出不进。
 
-    swap 阶段这个连接**一定会断**（服务在换自己）；前端靠同端口重连 +
-    ``update_done`` 回执接着走，见 ``static/js/update.js``。
+    swap 阶段这个连接一定会断（服务在换自己）；前端靠同端口重连接着走。
     """
     await ws.accept()
     loop = asyncio.get_running_loop()

@@ -1,12 +1,8 @@
 """职位列表的线上接口客户端。
 
-调的是真实 wapi 路径（见 :mod:`boss_jobs.config`），不是界面模拟。
-登录态复用 ``boss_login`` 落盘的 Cookie（状态库 ``doc('session')``）——
-职位列表**要登录**，Cookie 过期时接口回 code 7。
-
-核心是 :meth:`JobClient.crawl`：**抓一页 → 立刻清洗 → 立刻入库 → 睡够间隔
-→ 再要下一页**。清洗和入库从不攒批，睡眠是硬间隔，用来压请求频率、
-避开风控；中途挂掉时已入库的页不丢。
+调的是真实 wapi 路径（见 `boss_jobs.config`），不是界面模拟。
+登录态复用 `boss_login` 落盘的 Cookie；核心是 `JobClient.crawl` 的
+「抓一页 → 立刻清洗 → 立刻入库 → 睡够间隔 → 下一页」。
 """
 
 from __future__ import annotations
@@ -40,18 +36,23 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CrawlBlacklistContext:
-    """Immutable rule view supplied by the web crawl task.
+    """web 抓取任务提供的不可变规则视图。
 
-    The jobs client deliberately knows nothing about the web application's rule
-    tables.  Callbacks return serialisable match snapshots; the client owns the
-    ordering of company-before-detail and JD-after-detail decisions.
+    职位客户端不碰 web 规则表；回调返回可序列化的命中快照。
+
+    Attributes:
+        task_id: 抓取任务号。
+        store_blacklisted: 命中是否入库保留。
+        has_jd_rules: 是否有 JD 规则。
+        jd_scopes: JD 规则匹配范围（`job_name` / `job_desc` / `both`）。
+        company_matches: 公司规则匹配回调。
+        jd_matches: JD 规则匹配回调。
+        record_hit: 命中记录回调。
     """
 
     task_id: str = ""
     store_blacklisted: bool = True
     has_jd_rules: bool = False
-    #: JD 规则的匹配范围（``job_name`` / ``job_desc`` / ``both``）。
-    #: 旧调用方可省略，此时按 ``both`` 处理（需要 JD 正文才能算检查完成）。
     jd_scopes: tuple[str, ...] = ()
     company_matches: Callable[[Any], list[dict[str, Any]]] | None = None
     jd_matches: Callable[[Any, str], list[dict[str, Any]]] | None = None
@@ -59,7 +60,7 @@ class CrawlBlacklistContext:
 
 
 def _jd_scope_flags(context: "CrawlBlacklistContext | None") -> tuple[bool, bool]:
-    """``(can_check_name, requires_desc)``：按规则 scope 判断这轮能不能检查 JD。"""
+    """按规则 scope 判断这轮能不能检查 JD，返回 `(can_check_name, requires_desc)`。"""
     if context is None or not context.has_jd_rules:
         return False, False
     scopes = set(context.jd_scopes or ()) or {"both"}
@@ -70,7 +71,21 @@ def _jd_scope_flags(context: "CrawlBlacklistContext | None") -> tuple[bool, bool
 
 @dataclass(frozen=True)
 class CrawlStats:
-    """一次翻页抓取的累计结果。"""
+    """一次翻页抓取的累计结果。
+
+    Attributes:
+        run_id: 本次运行 id。
+        pages: 抓取页数。
+        raw_count: 接口条数。
+        kept_count: 洗后条数。
+        dropped_count: 丢弃条数。
+        inserted: 新增条数。
+        updated: 更新条数。
+        skipped: 跳过条数。
+        company_hits: 公司规则命中数。
+        jd_hits: JD 规则命中数。
+        stopped_reason: 停止原因。
+    """
 
     run_id: str
     pages: int = 0
@@ -86,6 +101,7 @@ class CrawlStats:
 
     def add(self, result: PageResult, outcome: SaveOutcome, *, skipped: int = 0,
             company_hits: int = 0, jd_hits: int = 0) -> "CrawlStats":
+        """把一页结果累加进统计，返回新的 `CrawlStats`。"""
         return CrawlStats(
             run_id=self.run_id,
             pages=self.pages + 1,
@@ -101,6 +117,7 @@ class CrawlStats:
         )
 
     def with_reason(self, reason: str) -> "CrawlStats":
+        """返回带上停止原因的统计副本。"""
         return CrawlStats(
             run_id=self.run_id,
             pages=self.pages,
@@ -116,6 +133,7 @@ class CrawlStats:
         )
 
     def summary_lines(self) -> list[str]:
+        """人读摘要行（CLI / 日志用）。"""
         return [
             f"运行 id   {self.run_id}",
             f"抓取页数  {self.pages}",
@@ -129,12 +147,18 @@ class CrawlStats:
 
 @dataclass
 class CrawlReport:
-    """一次 crawl 跑完的明细：统计 + 每页流水。"""
+    """一次 crawl 跑完的明细：统计 + 每页流水。
+
+    Attributes:
+        stats: 累计统计。
+        pages: 每页清洗结果。
+    """
 
     stats: CrawlStats
     pages: list[PageResult] = field(default_factory=list)
 
     def summary_lines(self) -> list[str]:
+        """人读摘要行（转给 `stats`）。"""
         return self.stats.summary_lines()
 
 
@@ -142,8 +166,9 @@ class CrawlReport:
 class JobDetail:
     """一次职位详情调用的清洗结果。
 
-    :param job_desc: 清洗后的 JD 正文（可能为空串——有的职位就是没写）
-    :param raw: 整包响应，便于排查字段名对不上
+    Attributes:
+        job_desc: 清洗后的 JD 正文（可能为空串）。
+        raw: 整包响应，便于排查字段名对不上。
     """
 
     job_desc: str
@@ -151,21 +176,20 @@ class JobDetail:
 
     @property
     def has_desc(self) -> bool:
+        """是否抓到了 JD 正文。"""
         return bool(self.job_desc)
 
 
 @dataclass(frozen=True)
 class GreetResult:
-    """一次打招呼（``friend/add.json``）的结果。
+    """一次打招呼（`friend/add.json`）的结果。
 
-    接口回 ``code 0`` 即算成功（失败会由 :meth:`JobClient._request_json` 抛
-    :class:`~boss_jobs.errors.JobApiError`，所以能构造出这个对象就是成功了）。
+    只表示「会话建起来了」，不表示「话发出去了」；真投递用
+    `JobClient.deliver_greeting`。
 
-    **注意它只表示「会话建起来了」，不表示「话发出去了」**：这条接口不带正文。
-    要真投递招呼语，用 :meth:`JobClient.deliver_greeting`。
-
-    :param message: 服务端回的话术（成功时通常是无意义文案，留作日志）
-    :param raw: 整包响应，便于排查
+    Attributes:
+        message: 服务端回的话术（留作日志）。
+        raw: 整包响应，便于排查。
     """
 
     message: str = ""
@@ -174,15 +198,16 @@ class GreetResult:
 
 @dataclass(frozen=True)
 class BossData:
-    """会话对象的身份信息（``GET /wapi/zpchat/geek/getBossData``）。
+    """会话对象的身份信息。
 
-    聊天消息的 ``to`` 要的是**数字 uid**，不是 ``encryptBossId``，这里就是那次换算。
+    聊天消息的 `to` 要数字 uid，这里就是 `encryptBossId` 的换算结果。
 
-    :param uid: boss 的数字 uid（响应里的 ``bossId``），消息的 ``to.uid``
-    :param source: boss 来源（``bossSource``），消息的 ``to.source``
-    :param name: boss 昵称（日志/展示用）
-    :param encrypt_boss_id: 加密 id（原样带回，省得调用方再拼）
-    :param raw: ``zpData.data`` 整包
+    Attributes:
+        uid: boss 的数字 uid，消息的 `to.uid`。
+        source: boss 来源，消息的 `to.source`。
+        name: boss 昵称（日志/展示用）。
+        encrypt_boss_id: 加密 id（原样带回）。
+        raw: `zpData.data` 整包。
     """
 
     uid: int
@@ -194,12 +219,13 @@ class BossData:
 
 @dataclass(frozen=True)
 class GreetingDelivery:
-    """一次「真·打招呼」的结果（见 :meth:`JobClient.deliver_greeting`）。
+    """一次「真·打招呼」的结果。
 
-    :param boss_uid: 消息发给了谁（数字 uid）
-    :param boss_source: 对端的 source
-    :param temp_id: 本地消息 id（就是这一帧的 ``mid`` / ``cmid``）
-    :param text: 实际发出去的正文
+    Attributes:
+        boss_uid: 消息发给了谁（数字 uid）。
+        boss_source: 对端的 source。
+        temp_id: 本地消息 id（这一帧的 `mid`）。
+        text: 实际发出去的正文。
     """
 
     boss_uid: int
@@ -211,26 +237,24 @@ class GreetingDelivery:
 class JobClient:
     """职位列表客户端。
 
-    :param base_url: 站点地址
-    :param endpoints: 覆盖 :data:`config.ENDPOINTS` 里的路径（探路/测试用）
-    :param http: 带 ``request()`` 的会话对象，默认新建 ``requests.Session``
-    :param timeout: 单次请求超时（秒）
-    :param retries: 失败重试次数（网络层 / 5xx）
-    :param backoff: 重试退避基数（秒），按 2 的幂递增
-    :param sleeper: 可替换的 sleep（测试里注入 no-op）
-    :param page_interval: 翻页硬间隔（秒），默认 1.0，防风控
-    :param stoken_provider: ``__zp_stoken__`` 自动获取器（见 :mod:`boss_jobs.cdp_stoken`）。
-        每次搜索前会 ``ensure()`` 判过期、过期了自己换新；撞上 code 37 时会
-        ``ensure(force=True)`` 强制再换一枚重试。不传就按老规矩报错。
-    :param chat_host / chat_port / chat_path: 聊天 MQTT 网关（见
-        :mod:`boss_jobs.chat`），默认取 :mod:`boss_jobs.config` 里的值。
-    :param chat_timeout: 聊天通道等 CONNACK 的超时（秒）
-    :param chat_push_wait: 连上后等那帧**会话同步**的超时（秒）——发消息的
-        ``mid`` 基数从里面取（见 :func:`boss_jobs.chat.max_message_id`）
-    :param chat_flush_wait: 正文发出去之后再停多久才断（秒）
-    :param chat_puback_wait: 正文发完顺带等 PUBACK 的超时（秒）——**只记日志**：
-        这条网关对文本帧不回 PUBACK，等不到是常态、不算失败（见
-        :attr:`boss_jobs.config.CHAT_PUBACK_WAIT`）
+    Args:
+        base_url: 站点地址。
+        endpoints: 覆盖 `config.ENDPOINTS` 里的路径（探路/测试用）。
+        http: 带 `request()` 的会话对象，默认新建 `requests.Session`。
+        timeout: 单次请求超时（秒）。
+        retries: 失败重试次数（网络层 / 5xx）。
+        backoff: 重试退避基数（秒），按 2 的幂递增。
+        headers: 额外请求头。
+        sleeper: 可替换的 sleep（测试里注入 no-op）。
+        page_interval: 翻页硬间隔（秒），防风控。
+        stoken_provider: `__zp_stoken__` 自动获取器（见 `boss_jobs.cdp_stoken`）。
+        chat_host: 聊天 MQTT 网关主机。
+        chat_port: 聊天 MQTT 网关端口。
+        chat_path: 聊天 WebSocket path。
+        chat_timeout: 聊天通道等 CONNACK 的超时（秒）。
+        chat_push_wait: 等会话同步（`mid` 基数）的超时（秒）。
+        chat_puback_wait: 发完顺带等 PUBACK 的超时（秒）；等不到是常态。
+        chat_flush_wait: 正文发完再停多久才断（秒）。
     """
 
     def __init__(
@@ -254,6 +278,7 @@ class JobClient:
         chat_puback_wait: float = C.CHAT_PUBACK_WAIT,
         chat_flush_wait: float = C.CHAT_FLUSH_WAIT,
     ) -> None:
+        """初始化。"""
         self.base_url = base_url.rstrip("/")
         self.endpoints = {**C.ENDPOINTS, **(endpoints or {})}
         self.timeout = timeout
@@ -269,39 +294,23 @@ class JobClient:
         self.chat_push_wait = chat_push_wait
         self.chat_puback_wait = chat_puback_wait
         self.chat_flush_wait = chat_flush_wait
-        #: 本批的聊天连接（:meth:`open_chat` 懒建，:meth:`close_chat` 断）
         self._chat: ChatSocket | None = None
-        #: 整批一份聊天凭据（``getUserInfo`` + ``get/wt``）。一帧一条连接、
-        #: 发完就断，凭据却是会话级的——别每条都重打这两发。
         self._chat_credentials: ChatCredentials | None = None
-        #: 上一条见过的最大消息 id，重建连接时当 ``mid`` 基数带过去（不然
-        #: 每条都要重新等那帧会话同步）。见 :meth:`open_chat`。
         self._chat_mid_base: int = 0
 
         self._http = http or requests.Session()
         merged = {**C.DEFAULT_HEADERS, **(headers or {})}
         if hasattr(self._http, "headers"):
             self._http.headers.update(merged)
-        else:  # 简易假会话：退化成每次请求都带
+        else:
             self._default_headers = merged
 
 
     def fetch_search_page(self, search_filter: Any, *, page: int | None = None) -> PageResult:
-        """按 :class:`~boss_filter.search.JobSearchFilter` 抓**一页搜索结果**并清洗。
+        """按搜索条件抓一页搜索结果并清洗。
 
-        打的是 ``/wapi/zpgeek/search/joblist.json``（见 :data:`config.ENDPOINTS`）——
-        **关键词 + 筛选条件**的搜索流。与之相对的是
-        :meth:`fetch_expect_page` 那条求职期望流（同一批筛选维度，但不带关键词）。
-
-        每次进来都先让 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`
-        **判一次 ``__zp_stoken__`` 过期**：没过期直接用，过期了自动拉 Chrome
-        （CDP）让站点自己算一枚、落盘、再带上去打接口。撞上安全网关
-        （code 37）时还会**强制**换一枚重试，不需要人工回浏览器拷。
-
-        :param search_filter: ``JobSearchFilter``；只要能出 ``to_params()`` 也行
-        :param page: 覆盖条件里的页码（翻页时省得自己改条件）
-        :raises JobApiError: code 37 且自动补令牌也救不回来时，会明说缺 ``__zp_stoken__``；
-            code 36 是账号风控，要人机验证
+        走 `search/joblist.json`；每次先补 `__zp_stoken__`，
+        撞 code 37 时自动换新重试。条件页码可被 `page` 覆盖。
         """
         if page is not None:
             search_filter = search_filter.for_page(page)
@@ -314,16 +323,7 @@ class JobClient:
     def fetch_expect_list(self) -> ExpectList:
         """拉当前账号的求职期望列表（推荐 / 兼职 / 我的期望）。
 
-        打的是 ``/wapi/zpgeek/pc/recommend/expect/list.json``（元数据接口，
-        不返回职位）。前端是 GET（``ZV``）。**实测（2026-10-13）**：把
-        ``__zp_stoken__`` 从 cookie 里摘掉也回 code 0——**只要登录 Cookie**，
-        所以这里刻意走裸 :meth:`_get_json`，不换
-        :meth:`_get_json_with_stoken_retry`（换上去反而多拉一次 Chrome）。
-
-        响应字段名不对称（``expectList[].encryptId`` vs
-        ``partTimeExpectList[].encryptExpectId``），解析见
-        :func:`boss_jobs.models.clean_expects`。本账号期望列表是空的，
-        对称性没被真数据定案，解析侧双键名都认。
+        只要登录 Cookie，刻意走裸 `_get_json`，不换 stoken 重试。
         """
         payload = self._get_json(
             self.endpoints["job_expect_list"],
@@ -333,17 +333,9 @@ class JobClient:
         return clean_expects(payload)
 
     def fetch_expect_page(self, expect_filter: Any, *, page: int | None = None) -> PageResult:
-        """期望流一页（``recommend/job/list.json``）。与 :meth:`fetch_search_page`
-        同级：**走 stoken 重试**（这条接口在安全网关后面，缺令牌回 code 37），
-        不能走裸 :meth:`_get_json`。
+        """求职期望流一页（`recommend/job/list.json`）。
 
-        **实测（2026-10-13）**：GET 回 code 0 / 15 条 / ``hasMore=true``；
-        同参数 POST 回 code 10「未知请求方法」。所以这里是 GET，别照前端
-        ``hc`` 封装切 POST form。
-
-        :param expect_filter: :class:`boss_filter.expect.JobExpectFilter`；
-            只要能出 ``to_params()``/``for_page()`` 也行
-        :param page: 覆盖条件里的页码（翻页时省得自己改条件）
+        与 `fetch_search_page` 同级，走 stoken 重试；只走 GET。
         """
         if page is not None:
             expect_filter = expect_filter.for_page(page)
@@ -356,6 +348,7 @@ class JobClient:
         return clean_page(payload, page=int(params.get("page", 1)))
 
     def _get_json_with_stoken_retry(self, path: str, params: dict[str, Any], action: str) -> Any:
+        """带 stoken 重试的 GET JSON。"""
         return self._request_with_stoken_retry(
             lambda suffix: self._get_json(path, params=params, action=action + suffix),
             action=action,
@@ -367,18 +360,9 @@ class JobClient:
         *,
         action: str,
     ) -> dict[str, Any]:
-        """打一发；撞 code 37 时**先歇一下拿同一枚重试**，还不行才强制换新。
+        """打一发；撞 code 37 先退避重试，还不行才强制换新。
 
-        37 有两类原因：令牌不对、或者**请求太快 / 被安全网关拦着**。
-        连环 code 37 时换新**没用**——刚换的令牌一样被拒，
-        这时正确动作是**别再撞**，而不是多打一发。所以：
-
-        - 先退避 2s 拿同一枚重试（「太快了」这一支）；
-        - 还 37 再 ``ensure(force=True)``；**没真换到新令牌**（换新冷却中）
-          就不再打第三发，把上一个 37 抛给调用方去停整批。
-
-        :param call: 收一个后缀（拼进日志/action）并真的打一发；GET 搜索、POST
-            打招呼都走这儿，重试策略一处维护。
+        换新冷却中没换到令牌就不再打第三发，把 37 抛给上层停批。
         """
         self._ensure_stoken()
         try:
@@ -413,6 +397,7 @@ class JobClient:
         return call("（补令牌后）")
 
     def _get_cookie(self, name: str) -> str:
+        """读会话 cookiejar 里的一枚 Cookie；读不到回空串。"""
         jar = getattr(self._http, "cookies", None)
         if jar is None:
             return ""
@@ -425,10 +410,7 @@ class JobClient:
             return ""
 
     def _ensure_stoken(self, *, force: bool = False) -> None:
-        """有 :attr:`stoken_provider` 就先补一枚没过期的 ``__zp_stoken__``。
-
-        详情接口跟搜索一样站在安全网关后面，缺令牌回 code 37。
-        """
+        """有 `stoken_provider` 就先补一枚没过期的 `__zp_stoken__`。"""
         if self.stoken_provider is None:
             return
         token = self.stoken_provider.ensure(force=force)
@@ -438,16 +420,7 @@ class JobClient:
     def fetch_job_detail(self, *, security_id: str, lid: str) -> JobDetail:
         """拉一条职位详情，抽出 JD 正文。
 
-        打的是 ``/wapi/zpgeek/job/detail.json``（见 :data:`config.ENDPOINTS`），
-        query 只带 ``securityId`` + ``lid``（调用方 ``tc({securityId, lid})`` 就这
-        两参形态）。列表接口不回 JD，正文在 ``zpData.jobInfo.postDescription``。
-
-        详情跟搜索一样要 ``__zp_stoken__``（缺了回 code 37），所以这里也走
-        :meth:`_get_json_with_stoken_retry`（撞 37 先退避再换新）。
-
-        :param security_id: 职位的 ``securityId``（列表 item 里有）
-        :param lid: 列表 item / 页级 ``lid``
-        :raises JobApiError: code 37 且自动补令牌也救不回来、code 36 账号风控等
+        query 只带 `securityId` + `lid`；也走 stoken 重试。
         """
         if not security_id:
             raise ValueError("security_id 不能为空")
@@ -461,9 +434,9 @@ class JobClient:
     def fetch_job_detail_for(
         self, job: Any, *, store: JobStore | None = None
     ) -> JobDetail:
-        """对一条 :class:`~boss_jobs.models.Job` 抓详情并**立刻写回** ``job_desc``。
+        """对一条 `Job` 抓详情并立刻写回 `job_desc`。
 
-        单条失败往上抛，调用方决定要不要继续下一条（抓取流程里会只记流水）。
+        单条失败往上抛，调用方决定要不要继续。
         """
         detail = self.fetch_job_detail(security_id=job.security_id, lid=job.lid)
         if store is not None:
@@ -471,6 +444,7 @@ class JobClient:
         return detail
 
     def _set_cookie(self, name: str, value: str) -> None:
+        """把一枚 Cookie 稳稳写进会话（先清同名）。"""
         from .stoken import put_cookie
 
         jar = getattr(self._http, "cookies", None)
@@ -489,35 +463,10 @@ class JobClient:
         session_id: str = "",
         extra: Mapping[str, Any] | None = None,
     ) -> GreetResult:
-        """发一条打招呼（``POST /wapi/zpgeek/friend/add.json``）。
+        """发一条打招呼（`friend/add.json`）：只建会话，不投递正文。
 
-        **这条只建会话、不投递正文**——body 里带
-        ``greeting`` 服务端直接忽略，回 ``code 0`` 但聊天框还是空的。
-        真正的招呼语正文要走聊天通道（:meth:`deliver_greeting`，见
-        :mod:`boss_jobs.chat`）。
-
-        形态：query 带 ``securityId`` / ``jobId`` / ``lid``，body 走
-        ``x-www-form-urlencoded`` 透传 ``encryptBossId`` / ``sessionId``。
-
-        跟搜索 / 详情一样要 ``__zp_stoken__``，走同一套「先退避再换新」的重试。
-
-        :param security_id: 职位的 ``securityId``（列表 item 里有，**整串**别截断）
-        :param encrypt_job_id: 职位加密 id（``jobId`` 参数）
-        :param lid: 列表 / 详情里的 ``lid``，有就带
-        :param encrypt_boss_id: ``raw_json.encryptBossId``（
-            :attr:`~boss_jobs.models.Job.encrypt_boss_id`）
-        :param session_id: 详情响应下发的 ``zpData.sessionId``，有就带
-        :param extra: 额外的 form 字段（透传，值为 ``None`` 的丢掉）
-        :raises JobApiError: code 36（账号风控，要人工处理）、code 1/7（登录失效）
-            等非成功码
-
-        **「开聊提醒」会自动模拟点击确认**：``friend/add`` 回 ``code 1`` +
-        ``chatRemindDialog``（blockLevel 0 的提示弹窗，content 像「您今天已与
-        120 位 BOSS 沟通，还剩 30 次沟通机会哦」）时，照站点前端那条链路
-        补两发——弹窗埋点 ``addf-limit-popup-c``，再带 ``cid=1`` 重打一次
-        ``friend/add``（chunk ``1326.ad80b1c8.js`` 的 ``commonAction``）。
-        确认后能建会话就回 :class:`GreetResult`，把剩下的沟通次数用掉；
-        确认完还被拦才抛出来（话术仍是弹窗那句原话）。
+        撞「开聊提醒」弹窗时会自动模拟点击确认（埋点 + `cid=1` 重打），
+        把剩余沟通次数用掉；确认完还被拦才抛出来。
         """
         if not security_id:
             raise ValueError("security_id 不能为空")
@@ -549,8 +498,6 @@ class JobClient:
             if not exc.is_chat_remind:
                 raise
             if exc.is_chat_limit_exhausted:
-                # 已明确达到今日上限时，首次响应就是终态；不要再模拟确认，
-                # 否则会额外打一发 friend/add 并把原始配额文案覆盖掉。
                 raise
             payload = self._confirm_chat_remind(
                 exc,
@@ -568,19 +515,9 @@ class JobClient:
         body: Mapping[str, Any],
         action: str,
     ) -> dict[str, Any]:
-        """「开聊提醒」弹窗的**模拟点击确认**，回确认后 ``friend/add`` 的响应。
+        """「开聊提醒」弹窗的模拟点击确认。
 
-        站点前端（chunk ``1326.ad80b1c8.js``）点弹窗上的「好」时干三件事：
-
-        1. 弹窗 ``created`` 时埋点 ``POST /wapi/zpCommon/actionLog/geek/chatremind.json``
-           body ``{action: "addf-limit-popup-c", ba: <弹窗 ba>}``；
-        2. ``commonAction`` 里 ``remindType > 262144``（实测 524288）且按钮
-           ``actionType == 11`` 时，**带 ``cid=1`` 再打一次 ``friend/add``**
-           （这就是「确认」本体——不带 ``cid`` 服务端一直弹窗）；
-        3. 再埋点 ``addf-limit-popup-connect`` + ``ba`` + ``p8=11``。
-
-        埋点两发**失败不挡确认**（少打一发埋点不影响建会话）；``friend/add``
-        那发才是判据。确认后仍弹窗就把原异常抛回去，让上层按话术记这条。
+        补两发埋点并带 `cid=1` 重打一次 `friend/add`；埋点失败不挡确认。
         """
         dialog = exc.chat_remind or {}
         ba = str(dialog.get("ba") or "")
@@ -615,11 +552,7 @@ class JobClient:
         return payload
 
     def _log_chat_remind(self, data: Mapping[str, Any]) -> None:
-        """补一发「开聊提醒」弹窗埋点；**失败不抛**，别挡确认。
-
-        这条要 ``zp_token`` 头（cookie ``bst``），见
-        :data:`boss_jobs.config.ZP_TOKEN_HEADER`。
-        """
+        """补一发「开聊提醒」弹窗埋点；失败不抛。"""
         try:
             self._request_json(
                 "POST",
@@ -632,7 +565,7 @@ class JobClient:
 
 
     def fetch_wt(self) -> str:
-        """取 MQTT 密码：``GET /wapi/zppassport/get/wt`` → ``zpData.wt2``。"""
+        """取 MQTT 密码：`get/wt` → `zpData.wt2`。"""
         payload = self._get_json(self.endpoints["get_wt"], action="取聊天凭据 wt")
         wt = str((payload.get("zpData") or {}).get("wt2") or "")
         if not wt:
@@ -640,10 +573,9 @@ class JobClient:
         return wt
 
     def fetch_me(self) -> ChatCredentials:
-        """取自己的聊天身份：``token``（MQTT 用户名）+ ``userId``/``name``。
+        """取自己的聊天身份（token + userId）并打包登录 Cookie。
 
-        另外把会话 Cookie 一起打包——聊天 WebSocket 握手**必须带 Cookie**
-        （不带回直接 HTTP 403）。
+        聊天 WebSocket 握手必须带 Cookie。
         """
         payload = self._get_json(self.endpoints["get_user_info"], action="取登录用户")
         data = payload.get("zpData") or {}
@@ -660,14 +592,9 @@ class JobClient:
         )
 
     def fetch_boss_data(self, encrypt_boss_id: str) -> BossData:
-        """把 ``encryptBossId`` 换成**聊天要用的数字 uid**。
+        """把 `encryptBossId` 换成聊天要用的数字 uid。
 
-        打 ``GET /wapi/zpchat/geek/getBossData?bossId={encryptBossId}``
-        （query 参数就叫 ``bossId``，但值是那串加密 id）。回 ``zpData.data``：
-        ``bossId``（数字 uid）、``bossSource``（消息里的 ``to.source``）。
-
-        **要先 :meth:`greet` 建了会话才查得到**——没会话回 code 1
-        「聊天的Boss不存在」/「非好友关系」。
+        要先 `greet` 建了会话才查得到。
         """
         if not encrypt_boss_id:
             raise ValueError("encrypt_boss_id 不能为空")
@@ -689,15 +616,9 @@ class JobClient:
         )
 
     def fetch_chat_history(self, boss_uid: int | str) -> list[dict[str, Any]]:
-        """回读某个会话的历史消息（``GET /wapi/zpchat/geek/historyMsg``）。
+        """回读某个会话的历史消息。
 
-        :param boss_uid: **对方的数字 uid**（``getBossData`` 的 ``bossId``），
-            **不是** ``encryptBossId``——传加密串回
-            **code 19「参数值错误」**，传数字 uid 回 code 0。
-
-        **拿它核对送达是不行的**：对有消息、且刚确认送达的
-        会话，这个接口回 ``code 0`` + 空 ``zpData``（连 ``messages`` 都没有）。
-        所以它现在只当「能不能读到历史」的探针留着，**不作为发送判据**。
+        当不了送达判据；传对方数字 uid，不是 encryptBossId。
         """
         payload = self._get_json_with_stoken_retry(
             self.endpoints["chat_history"],
@@ -710,16 +631,7 @@ class JobClient:
     def open_chat(self, credentials: ChatCredentials | None = None) -> ChatSocket:
         """拿到一条聊天 MQTT 连接；已连上就复用，断了就重建。
 
-        一帧一条连接：:meth:`~boss_jobs.chat.ChatSocket.send_text` 发完就主动
-        断（网关自己也约 150ms 就掐线），所以「复用连接」基本不发生——真正
-        要复用的是**凭据**和 **``mid`` 基数**：
-
-        - 凭据（``getUserInfo`` + ``get/wt`` 两发 HTTP）整批取一次，存在
-          :attr:`_chat_credentials`；token/wt 是会话级的，重取只是白打两发。
-        - 上一条见过的最大消息 id 带给新连接当 ``mid`` 基数
-          （:attr:`_chat_mid_base`），第二条起就不用再等那帧会话同步。
-
-        :param credentials: 显式给一份就用它（并顶掉缓存）；不给走缓存 / 现取
+        整批复用凭据与 `mid` 基数，不复用半死连接。
         """
         if self._chat is not None and self._chat.connected:
             return self._chat
@@ -744,11 +656,7 @@ class JobClient:
         return self._chat
 
     def _stash_chat_state(self, chat: ChatSocket) -> None:
-        """收下这条连接见过的 ``mid`` 基数，重建时带给下一条。
-
-        基数必须单调不减（网关按「id 太旧」毙帧，见 :mod:`boss_jobs.chat`
-        模块头），所以只往上抬、不往下走。
-        """
+        """收下这条连接见过的 `mid` 基数，重建时带给下一条（只抬不降）。"""
         seen = int(getattr(chat, "max_msg_id", 0) or 0)
         if seen > self._chat_mid_base:
             logger.debug("mid 基数抬到 %d（带给下一条连接）", seen)
@@ -771,40 +679,10 @@ class JobClient:
         greeting: str = "",
         session_id: str = "",
     ) -> GreetingDelivery:
-        """**真·打招呼**：建会话 → 换 boss uid → MQTT 发正文。
+        """真·打招呼：建会话 → 换 boss uid → MQTT 发正文。
 
-        三步走（每步都能单独失败，失败往上抛，调用方记这条发送失败）：
-
-        1. :meth:`greet` —— ``friend/add.json`` 建会话（幂等，已建过也无妨）；
-        2. :meth:`fetch_boss_data` —— ``encryptBossId`` → 数字 ``uid`` / ``source``；
-        3. :meth:`open_chat` + :meth:`~boss_jobs.chat.ChatSocket.send_text`
-           —— MQTT 发正文。
-
-        第 3 步的**成功判据是「帧发出去了」**（PUBLISH 无异常、``rc == 0``），
-        **不是「等到 PUBACK」**：这条网关对文本帧根本不回 PUBACK，发完约 150ms
-        直接把连接关掉——**这是它的常态，不是拒收**（那几发
-        站点上都显示「[送达]」，见 :mod:`boss_jobs.chat` 模块头）。所以
-        :meth:`~boss_jobs.chat.ChatSocket.send_text` 只把 PUBACK 记进日志，
-        等不到不抛。``mid`` 由 :class:`boss_jobs.chat.ChatSocket` 自己算
-        （基数取服务端推的会话同步里的最大消息 id，见
-        :func:`boss_jobs.chat.max_message_id`；整批内上一条的基数会带过来，
-        第二条起不再等那帧同步），调用方不用管。
-
-        **不再回读聊天记录核对**：``GET /wapi/zpchat/geek/historyMsg`` 对这条
-        账号返回 ``code 0`` + 空 ``zpData``——**有消息、刚确认送达的会话也读不
-        出来**，拿它当判据只会把成功报成失败。
-
-        ``to.name`` 用会话对象的 ``encryptUid``（同源的 ``encryptBossId``）：
-        跟站点一样有值就写、空串就不写这个字段。日志里的耗时拆成「建会话 /
-        换 uid / 开通道 / 发帧」，其中「开通道」含取凭据（缓存命中就没有）
-        + MQTT 握手，「发帧」里再拆等推送与收尾停顿
-        （:attr:`ChatSocket.last_send_stats`）。
-
-        :param greeting: 招呼语正文。**空的不发**（抛 :class:`ChatSendError`）——
-            站点那条 ``friend/add`` 只建会话，不带正文的「打招呼」在 App 里
-            看着像打了、聊天框其实是空的。
-        :raises ChatSendError: 正文为空 / 换不到 boss uid / 通道发失败
-        :raises JobApiError: 建会话那步的登录态失效 / 账号风控
+        成功判据是「帧发出去了」，不是「等到 PUBACK」。
+        正文为空抛 `ChatSendError`；建会话失败抛 `JobApiError`。
         """
         text = (greeting or "").strip()
         if not text:
@@ -851,7 +729,7 @@ class JobClient:
         )
 
     def _cookie_header(self) -> str:
-        """把会话 Cookie 拼成握手用的 ``Cookie`` 头值。"""
+        """把会话 Cookie 拼成握手用的 `Cookie` 头值。"""
         jar = getattr(self._http, "cookies", None)
         if jar is None:
             return ""
@@ -881,48 +759,28 @@ class JobClient:
         blacklist_context: CrawlBlacklistContext | None = None,
         task_id: str = "",
     ) -> CrawlReport:
-        """分页抓取职位，**每页即时清洗入库**，页与页之间硬睡一会。
+        """分页抓取职位，每页即时清洗入库，页与页之间硬睡一会。
 
-        :param store: 已打开的职位库；不传则按 ``db_path``（或默认路径）现开
-        :param max_pages: 最多翻几页；0 = 翻到接口回空页
-        :param page_interval: 覆盖构造时的翻页间隔（秒）
-        :param start_page: 起始页码，续跑时用
-        :param db_path: 不传 ``store`` 时的库路径
-        :param expect_filter: ``JobExpectFilter``（或任何能出 ``to_params()``/``for_page()``）。
-            **给了就走期望流** ``/wapi/zpgeek/pc/recommend/job/list.json``，
-            期望主参数 + 共享筛选维度照搬（**永远不带关键词**）。
-        :param search_filter: ``JobSearchFilter``（或任何能出 ``to_params()``/``for_page()``）。
-            **给了就走搜索流** ``/wapi/zpgeek/search/joblist.json``，条件照搬；
-            现在还可以带 ``encrypt_expect_id``（期望 + 关键词组合，前端
-            ``onSearch`` 的 ``lastExpectId`` 行为），参数走 ``to_params()`` 自然带出。
-            筛选条件一般从配置文件读，见 :func:`boss_filter.load_search_filter`。
-        :param on_progress: 每页入库后回调 ``{page, raw_count, kept_count,
-            inserted, updated, has_more, stopped_reason?}``；网页控制台用来推进度。
-            ``enrich_details`` 开着时还会穿插 ``{event: "detail_*", …}`` 事件
-            （**不带** ``page`` / 计数键，不会把页数搅浑）。
-        :param should_stop: 翻页前（含起始页）调一次；返回 ``True`` 则协作式收手，
-            已入库的页保留。适合后台任务的取消按钮。
-        :param enrich_details: 每页入库后顺带补 JD（默认关，网页抓取流程会开）。
-            单条详情失败只发一条 ``detail_error`` 事件，**不**中断列表抓取。
-        :param detail_interval: 补详情的条间隔（秒），默认 :data:`config.DETAIL_INTERVAL`
-        :param task_id: 抓取任务号；非空时 ``fetch_pages`` 与 ``crawl_task_jobs``
-            都记到这个任务上（历史抓取任务的「本批岗位」快照）
-        :return: :class:`CrawlReport`（统计 + 每页明细）
+        Args:
+            store: 已打开的职位库；不传则按 `db_path` 现开。
+            max_pages: 最多翻几页；0 = 翻到接口回空页。
+            page_interval: 覆盖构造时的翻页间隔（秒）。
+            start_page: 起始页码，续跑时用。
+            db_path: 不传 `store` 时的库路径。
+            search_filter: 搜索流条件；给了就走 `search/joblist.json`。
+            expect_filter: 期望流条件；给了就走 `recommend/job/list.json`。
+            on_progress: 每页入库后的进度回调。
+            should_stop: 翻页前调一次；返回 True 则协作式收手。
+            enrich_details: 每页入库后顺带补 JD。
+            detail_interval: 补详情的条间隔（秒）。
+            blacklist_context: 规则评估上下文；给了就边抓边筛。
+            task_id: 抓取任务号，非空时记到任务归属表。
 
-        **两条流二选一，优先级 expect > search**（调用方保证互斥，这里再兜一层）：
+        Returns:
+            `CrawlReport`（统计 + 每页明细）。
 
-        1. ``expect_filter`` 非空 → 期望流 ``recommend/job/list.json``
-        2. 否则 ``search_filter`` 非空 → 搜索流 ``search/joblist.json``
-        3. 两个都不给 → 抛 :class:`ValueError`
-
-        推荐页 ``special/zone`` 那条流 **2026-10-13 已移除**（实测回 code 7，
-        推荐 tab 场景改由期望流 ``kind=recommend`` 承担），不再有「无筛选抓全站」。
-
-        分页 / 清洗 / 入库 / 黑名单逻辑两条流**全部复用**。
-
-        收手判据：接口回空页，或「**不满页**且 ``hasMore=false``」。
-        ``hasMore`` 在 page=1 上不可靠（常回 ``false`` 却还有后续页），所以不单独
-        信它。下一页若已被 ``max_pages`` 拦下，也不再多等那一个页间隔。
+        两条流二选一（expect 优先），两个都不给抛 `ValueError`。
+        收手判据：空页，或不满页且 `hasMore=false`。
         """
         interval = self.page_interval if page_interval is None else max(0.0, page_interval)
         detail_gap = (
@@ -930,7 +788,6 @@ class JobClient:
         )
         use_expect = expect_filter is not None
         use_search = search_filter is not None
-        # 推荐页 special/zone 已移除，两个 filter 都不给就没有检索语义了
         if not use_expect and not use_search:
             raise ValueError(
                 "必须提供 expect_filter 或 search_filter："
@@ -944,6 +801,7 @@ class JobClient:
         reason = "抓到空页"
 
         def _push(result: PageResult, outcome: SaveOutcome, extra: dict[str, Any] | None = None) -> None:
+            """把一页进度回调出去。"""
             if on_progress is None:
                 return
             payload: dict[str, Any] = {
@@ -961,6 +819,7 @@ class JobClient:
             on_progress(payload)
 
         def _push_detail(payload: dict[str, Any]) -> None:
+            """把详情进度事件回调出去。"""
             if on_progress is None:
                 return
             on_progress({"run_id": run_id, **payload})
@@ -976,14 +835,11 @@ class JobClient:
                     reason = f"达到 max_pages={max_pages}"
                     break
 
-                # 两条流二选一，优先级：expect > search
                 if use_expect:
                     result = self.fetch_expect_page(expect_filter, page=page)
                 else:
                     result = self.fetch_search_page(search_filter, page=page)
                 if blacklist_context is None:
-                    # Preserve the established ordinary crawl contract: persist
-                    # the list page first, then enrich its already-stored rows.
                     outcome = store.save_page(result, task_id=task_id)
                     report.pages.append(result)
                     stats = stats.add(result, outcome)
@@ -1010,7 +866,6 @@ class JobClient:
                                           "job_name": job.job_name, "brand_name": job.brand_name})
                             continue
                         if hits:
-                            # 入库并标记：命中要进审计流水（action=stored），后面 save/汇总都用本轮结果
                             for h in hits:
                                 if blacklist_context.record_hit:
                                     blacklist_context.record_hit(
@@ -1039,8 +894,6 @@ class JobClient:
                             should_stop=should_stop, blacklist_context=blacklist_context,
                         )
                     else:
-                        # 不补 JD 时也要落完整安全快照：未查完的规则/缺公司名保守拦自动投递。
-                        # 纯名称规则不依赖正文，这里就地查；需要正文的规则只能标「未检查」。
                         can_check_name, requires_desc = _jd_scope_flags(blacklist_context)
                         has_jd_rules = bool(blacklist_context.has_jd_rules)
                         name_only = has_jd_rules and can_check_name and not requires_desc
@@ -1062,7 +915,6 @@ class JobClient:
                                 continue
                             missing_company = not str(j.brand_name or "").strip()
                             if name_hits:
-                                # 公司命中可能已先落过快照，这里合并而不是覆盖
                                 prior = tuple(j.matched_rule_snapshot or ())
                                 merged = prior + tuple(hits for hits in name_hits if hits not in prior)
                                 j = replace(
@@ -1073,7 +925,6 @@ class JobClient:
                                     matched_rule_ids=tuple(str(h.get("rule_id") or "") for h in merged),
                                     matched_rule_snapshot=merged,
                                 )
-                            # Job.from_api 的默认值是 pending；有规则却查不了时改记 unchecked
                             if has_jd_rules and not checked:
                                 next_status = "unchecked"
                             else:
@@ -1098,7 +949,6 @@ class JobClient:
                         )
 
                     outcome = store.save_page(page_result, task_id=task_id)
-                    # UPSERT 故意不覆盖安全列；这里按本轮评估显式回写，重抓才能刷新旧状态
                     for job in page_result.jobs:
                         store.update_blacklist_state(
                             job.encrypt_job_id,
@@ -1151,8 +1001,12 @@ class JobClient:
         should_stop: Callable[[], bool] | None = None,
         blacklist_context: CrawlBlacklistContext | None = None,
     ) -> tuple[PageResult, int]:
-        """Fetch details and evaluate JD rules before the page is persisted."""
+        """补抓 JD 并在落库前做规则评估。
+
+        返回 `(本页结果, JD 命中数)`；单条失败只记流水，不中断列表抓取。
+        """
         def _emit(payload: dict[str, Any]) -> None:
+            """发一条详情事件。"""
             if on_detail is not None:
                 on_detail(payload)
 
@@ -1164,7 +1018,6 @@ class JobClient:
         for index, job in enumerate(result.jobs):
             existing = store.get_job(job.encrypt_job_id)
             if job.encrypt_job_id in already:
-                # The list endpoint is not authoritative for JD or blacklist state.
                 job = replace(
                     job,
                     job_desc=existing.job_desc if existing else job.job_desc,
@@ -1194,7 +1047,6 @@ class JobClient:
                         if can_check_jd
                         else []
                     )
-                    # 本轮规则结果覆盖旧 jd_keyword 快照：规则删了/不再命中要清掉
                     if hits:
                         job = replace(
                             job,
@@ -1250,9 +1102,6 @@ class JobClient:
                         jd_rule_checked=False,
                         auto_delivery_blocked=True,
                     )
-                    # Persist immediately for the legacy save-before-enrich path.
-                    # For a blacklist crawl the candidate may not exist yet; its
-                    # complete state is written by the later filtered save_page.
                     store.update_job_desc(
                         job.encrypt_job_id,
                         "",
@@ -1268,7 +1117,6 @@ class JobClient:
                         consecutive_37 += 1
                         if consecutive_37 >= C.BROWSER_CHECK_GIVEUP:
                             _emit({"event": "detail_stopped", "reason": f"连续 {consecutive_37} 次撞安全网关 code 37，已停补 JD"})
-                            # Mark remaining candidates as incomplete without more requests.
                             kept.append(job)
                             kept.extend(replace(rest, jd_status="pending", auto_delivery_blocked=True)
                                         for rest in result.jobs[index + 1:])
@@ -1280,7 +1128,6 @@ class JobClient:
                     can_check_desc = bool(detail.job_desc) and requires_desc
                     can_check_jd = can_check_name or can_check_desc
                     has_jd_rules = bool(blacklist_context and blacklist_context.has_jd_rules)
-                    # 无 JD 规则 → 无需检查；有规则时：有正文可全查，或纯名称规则不需要正文
                     checked = (not has_jd_rules) or bool(detail.job_desc) or (can_check_name and not requires_desc)
                     jd_status = "completed" if detail.job_desc else "empty"
                     job = replace(job, job_desc=detail.job_desc, detail_fetched_at=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), jd_status=jd_status,
@@ -1316,12 +1163,10 @@ class JobClient:
                 if interval > 0 and done < len(result.jobs):
                     self._sleep(interval)
 
-            # 公司命中只认本轮规则结果，不沿用库里旧快照（规则删了要能翻案）
             company_hits: list[dict[str, Any]] = []
             if blacklist_context and blacklist_context.company_matches:
                 company_hits = blacklist_context.company_matches(job)
             has_jd_rules = bool(blacklist_context and blacklist_context.has_jd_rules)
-            # JD 命中同理：本轮有 JD 规则才认快照里的 jd_keyword，否则清掉陈旧命中
             jd_hits_now = (
                 [dict(hit) for hit in job.matched_rule_snapshot if hit.get("rule_type") == "jd_keyword"]
                 if has_jd_rules
@@ -1335,7 +1180,6 @@ class JobClient:
             can_check_name, requires_desc = _jd_scope_flags(blacklist_context)
             checked = (not has_jd_rules) or bool(job.job_desc) or (can_check_name and not requires_desc)
             requires_jd = has_jd_rules
-            # 公司名缺失无法确认安全，保守拦自动投递（不算命中）
             missing_company = not str(job.brand_name or "").strip()
             blocked = bool(
                 company_blacklisted
@@ -1369,9 +1213,7 @@ class JobClient:
     ) -> Iterator[PageResult]:
         """只翻页不入库，页与页之间照样睡（离线分析/测试用）。
 
-        路由与 :meth:`crawl` 同款两分支：给了 ``expect_filter`` 走期望流，否则
-        走搜索流。两个都不给抛 :class:`ValueError`（推荐页 ``special/zone``
-        已移除，没有第三条流兜底）。
+        路由与 `crawl` 同款两分支；两个 filter 都不给抛 `ValueError`。
         """
         use_expect = expect_filter is not None
         if not use_expect and search_filter is None:
@@ -1407,6 +1249,7 @@ class JobClient:
         params: Mapping[str, Any] | None = None,
         action: str = "",
     ) -> dict[str, Any]:
+        """GET 一发 JSON。"""
         return self._request_json("GET", path, params=params, action=action)
 
     def _request_json(
@@ -1420,11 +1263,7 @@ class JobClient:
     ) -> dict[str, Any]:
         """打一发（GET / POST…）并把业务码翻译成异常。
 
-        ``data`` 非空时按 ``application/x-www-form-urlencoded`` 发（``requests``
-        对 dict 的默认行为），打招呼那条 POST 用得上。
-
-        每发都补 ``zp_token`` 头（cookie ``bst``）——站点 axios 拦截器对**所有**
-        请求都贴这个；「开聊提醒」确认侧的埋点缺了直接 code 121「请求不合法」。
+        每发都补 `zp_token` 头；`data` 非空时按 form 发。
         """
         url = self.base_url + path
         headers = dict(getattr(self, "_default_headers", None) or {})
@@ -1473,9 +1312,6 @@ class JobClient:
 
             code = _biz_code(payload)
             if code != C.CODE_OK:
-                # 顶层 message 常常只是个短标签（「开聊提醒」），真话在
-                # zpData.bizData.chatRemindDialog.content 那类嵌套里——见
-                # format_api_message。
                 message = format_api_message(payload)
                 raise JobApiError(code, message or f"{action or path} 返回异常码 {code}", raw=payload)
 
@@ -1484,33 +1320,17 @@ class JobClient:
         raise last_error or JobTransportError(f"{action or path} 请求失败")
 
 
-
-
 def http_from_session(
     session_path: Path | str | None = None,
     *,
     http: Any | None = None,
     stoken: str | None = None,
 ) -> Any:
-    """用 ``boss_login`` 落盘的登录态搭一个会话。
+    """用 `boss_login` 落盘的登录态搭一个会话。
 
-    Cookie 直接灌进 ``requests.Session``；没有可用登录态时抛
-    :class:`JobApiError`，把「查了哪儿、为什么不算」说清楚（跟
-    ``boss_login.whoami`` 同一个规矩）。
-
-    ``__zp_stoken__``（安全网关令牌）的取值顺序：
-
-    1. 显式传进来的 ``stoken``
-    2. ``doc('session')`` 的 ``cookies.__zp_stoken__``
-    3. 环境变量 :data:`config.STOKEN_ENV`（``BOSS_ZP_STOKEN``）
-
-    都没有就**先不带**——搜索类接口会回 code 37，由
-    :func:`create_client` 挂上的 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`
-    拉 Chrome（CDP）让站点自己算一枚补上（见 :mod:`boss_jobs.cdp_stoken`）。
-
-    写 ``__zp_stoken__`` 时走 :func:`boss_jobs.stoken.put_cookie`：它会把上面
-    ``cookies.set`` 不带 domain 写进去的同名旧 Cookie 清掉，否则请求头里会同时
-    出现两枚，服务端照旧的那枚拒。
+    没有可用登录态时抛 `JobApiError`。`__zp_stoken__` 取值顺序：
+    显式传入 → 库里的 cookies → 环境变量；都没有就先不带，
+    由 `CdpStokenProvider` 自动补。
     """
     from boss_login.session import load_session
 
@@ -1554,15 +1374,10 @@ def create_client(
     auto_stoken: bool = True,
     **kwargs: Any,
 ) -> JobClient:
-    """一步拿到带登录态的 :class:`JobClient`。
+    """一步拿到带登录态的 `JobClient`。
 
-    ``auto_stoken=True``（默认）时挂上 :class:`~boss_jobs.cdp_stoken.CdpStokenProvider`：
-    每次搜索前判一次 ``__zp_stoken__`` 过期，过期了自动拉 Chrome（CDP）换新并
-    落盘（``doc('stoken')`` + 镜像进 ``doc('session')``）。这是**真浏览器**自算，
-    不是 Node 硬算——后者指纹对不上，服务端不认，见 :mod:`boss_jobs.cdp_stoken`。
-
-    会话路径总要解析一份传给 provider（``None`` 也要落到 ``BOSS_DB`` →
-    ``data/boss.db``），不能靠它「不给就不镜像」的契约——否则落盘会漏。
+    `auto_stoken=True` 时挂上 `CdpStokenProvider` 自动补
+    `__zp_stoken__`（真 Chrome 算，不是 Node 硬算）。
     """
     import boss_db
 
@@ -1585,9 +1400,8 @@ def create_client(
     )
 
 
-
-
 def _biz_code(payload: Mapping[str, Any]) -> int:
+    """从响应里取业务码；取不到回 -1。"""
     raw = payload.get("code", payload.get("status", C.CODE_OK))
     try:
         return int(raw)

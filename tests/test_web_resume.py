@@ -42,6 +42,7 @@ SAMPLE = """# 张三
 
 
 def test_parse_markdown_sections():
+    """验证 Markdown 分节识别覆盖主要章节。"""
     sections, others, notes = parse_markdown(SAMPLE)
     assert "基本信息" in sections
     assert "工作经历" in sections
@@ -52,13 +53,15 @@ def test_parse_markdown_sections():
 
 
 def test_parse_markdown_alias_and_missing():
+    """验证章节别名归一与缺失章节进 notes。"""
     text = "# 履历\n\n## 个人总结\n我觉得还行\n"
     sections, _others, notes = parse_markdown(text)
-    assert "自我评价" in sections  # 别名命中
+    assert "自我评价" in sections
     assert any("工作经历" in n for n in notes)
 
 
 def test_extract_skills():
+    """验证从技能标签章节抽出技能词。"""
     sections, _, _ = parse_markdown(SAMPLE)
     skills = extract_skills(sections)
     assert "Python" in skills
@@ -68,6 +71,7 @@ def test_extract_skills():
 
 
 def test_extract_basic():
+    """验证从基本信息抽出姓名/电话/邮箱。"""
     sections, _, _ = parse_markdown(SAMPLE)
     basic = extract_basic(sections)
     assert basic["phone"] == "13800138000"
@@ -76,6 +80,7 @@ def test_extract_basic():
 
 
 def test_parse_resume_bundle():
+    """验证 parse_resume 组装草稿且 to_dict 默认不含 raw。"""
     draft = parse_resume(
         SAMPLE,
         resume_id="rs_x",

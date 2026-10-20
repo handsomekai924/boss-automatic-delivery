@@ -6,17 +6,19 @@ from typing import Any
 
 
 class WebError(Exception):
-    """业务可读错误，前端直接把 ``message`` 摆出来。"""
+    """业务可读错误，前端直接把 `message` 摆出来。"""
 
     status_code = 400
     code = "web_error"
 
     def __init__(self, message: str, *, detail: Any = None) -> None:
+        """初始化。"""
         super().__init__(message)
         self.message = message
         self.detail = detail
 
     def payload(self) -> dict[str, Any]:
+        """组装 `{ok, code, message[, detail]}` 响应体。"""
         body: dict[str, Any] = {"ok": False, "code": self.code, "message": self.message}
         if self.detail is not None:
             body["detail"] = self.detail
@@ -24,16 +26,22 @@ class WebError(Exception):
 
 
 class NotFoundError(WebError):
+    """资源不存在，404。"""
+
     status_code = 404
     code = "not_found"
 
 
 class ConflictError(WebError):
+    """状态冲突，409。"""
+
     status_code = 409
     code = "conflict"
 
 
 class ValidationWebError(WebError):
+    """入参校验失败，422。"""
+
     status_code = 422
     code = "invalid"
 
@@ -48,8 +56,7 @@ class UpstreamError(WebError):
 class EnvironmentWebError(WebError):
     """本机环境不满足（没装 Chrome、端口被占、目录不可写），503。
 
-    和 :class:`UpstreamError` 分开是因为**该谁去修不一样**：上游错了等一会儿
-    就好，环境错了得让用户照提示去装/去关。
+    和 `UpstreamError` 分开是因为该谁去修不一样：上游等一会儿就好，环境要去装/去关。
     """
 
     status_code = 503

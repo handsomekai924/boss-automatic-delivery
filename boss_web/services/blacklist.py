@@ -1,4 +1,15 @@
-"""Blacklist rules, immutable evaluation snapshots, and audit persistence."""
+"""黑名单规则、不可变评估快照与命中流水持久化。
+
+规则分「公司」与「JD 关键词」两类；评估结果与命中记录都落状态库
+`doc('blacklist_rules')` / `doc('blacklist_hits')`。
+
+Attributes:
+    COMPANY: 公司规则类型标识。
+    JD_KEYWORD: JD 关键词规则类型标识。
+    COMPANY_MODES: 公司规则允许的匹配方式。
+    JD_MODES: JD 规则允许的匹配方式。
+    JD_SCOPES: JD 规则允许的匹配范围。
+"""
 
 from __future__ import annotations
 
@@ -26,6 +37,21 @@ JD_SCOPES = frozenset({"job_name", "job_desc", "both"})
 
 @dataclass(frozen=True)
 class Rule:
+    """一条黑名单规则。
+
+    Attributes:
+        rule_id: 规则 id。
+        rule_type: `company` 或 `jd_keyword`。
+        pattern: 匹配模式（全公司名 / 关键词 / 正则）。
+        match_mode: 匹配方式（`exact` / `contains` / `regex`）。
+        scope: JD 规则的匹配范围；公司规则为空。
+        description: 备注。
+        enabled: 是否启用。
+        last_error: 最近一次运行期匹配错误。
+        created_at: 创建时间文本。
+        updated_at: 最近更新时间文本。
+    """
+
     rule_id: str
     rule_type: str
     pattern: str
@@ -38,6 +64,7 @@ class Rule:
     updated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """转普通字典，`enabled` 强制成 bool。"""
         data = asdict(self)
         data["enabled"] = bool(self.enabled)
         return data
@@ -45,25 +72,32 @@ class Rule:
 
 @dataclass(frozen=True)
 class RuleMatch:
+    """一次规则命中。
+
+    Attributes:
+        rule: 命中的规则字典。
+        matched_text: 实际命中的片段。
+        source: 命中来源字段（`brand_name` / `job_name` / `job_desc`）。
+    """
+
     rule: dict[str, Any]
     matched_text: str
     source: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """规则字典并上命中片段与来源。"""
         return {**self.rule, "matched_text": self.matched_text, "source": self.source}
 
 
 def now_text() -> str:
+    """当前本地时间的 `YYYY-MM-DD HH:MM:SS` 文本。"""
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
 def normalize_company(value: Any) -> str:
-    """Normalize cosmetic company-name differences without broad deletion."""
+    """归一化公司名，只去掉排版噪音，不扩大删除面。"""
     text = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
-    # 内部空白都是排版噪音：「甲 公司」和「甲公司」应视为同一家
     text = re.sub(r"\s+", "", text)
-    # Common full-width punctuation has already been handled by NFKC. Treat
-    # visually equivalent separators alike, but retain meaningful characters.
     text = re.sub(r"[·•・∙]", "·", text)
     text = re.sub(r"[\-_—–－]+", "-", text)
     text = re.sub(r"[（）()]", "(", text)
@@ -74,6 +108,14 @@ def normalize_company(value: Any) -> str:
 def validate_rule_payload(
     rule_type: str, pattern: str, match_mode: str, scope: str = ""
 ) -> None:
+    """校验规则字段；不合法时抛 `ValueError`。
+
+    Args:
+        rule_type: `company` 或 `jd_keyword`。
+        pattern: 匹配模式，不能为空。
+        match_mode: 匹配方式，必须落在对应类型允许的集合里。
+        scope: JD 规则的匹配范围；公司规则必须为空。
+    """
     if rule_type not in {COMPANY, JD_KEYWORD}:
         raise ValueError("rule_type 必须是 company 或 jd_keyword")
     if not str(pattern or "").strip():
@@ -93,6 +135,7 @@ def validate_rule_payload(
 
 
 def _rule_from_row(row: Any) -> Rule:
+    """把数据库行转成 `Rule`。"""
     return Rule(
         rule_id=str(row["rule_id"]),
         rule_type=str(row["rule_type"]),
@@ -110,6 +153,16 @@ def _rule_from_row(row: Any) -> Rule:
 def list_rules(
     *, rule_type: str | None = None, enabled: bool | None = None, path: Path | str | None = None
 ) -> list[dict[str, Any]]:
+    """按条件列规则，每条附 `hit_count`。
+
+    Args:
+        rule_type: 只看这一类规则。
+        enabled: 只看启用 / 停用的规则。
+        path: 状态库路径。
+
+    Returns:
+        按创建时间倒序的规则字典列表。
+    """
     conn = boss_db.acquire(path)
     sql = "SELECT * FROM blacklist_rules"
     where: list[str] = []
@@ -136,16 +189,39 @@ def list_rules(
 
 
 def list_enabled_rules(*, path: Path | str | None = None) -> list[dict[str, Any]]:
+    """只列启用中的规则。
+
+    Args:
+        path: 状态库路径。
+
+    Returns:
+        启用中的规则字典列表。
+    """
     return list_rules(enabled=True, path=path)
 
 
 def get_rule(rule_id: str, path: Path | str | None = None) -> dict[str, Any] | None:
+    """按 id 取一条规则；不存在回 `None`。
+
+    Args:
+        rule_id: 规则 id。
+        path: 状态库路径。
+    """
     conn = boss_db.acquire(path)
     row = conn.execute("SELECT * FROM blacklist_rules WHERE rule_id = ?", (rule_id,)).fetchone()
     return _rule_from_row(row).to_dict() if row else None
 
 
 def create_rule(payload: Mapping[str, Any], path: Path | str | None = None) -> dict[str, Any]:
+    """新建规则；字段不合法时抛 `ValueError`。
+
+    Args:
+        payload: 规则字段，可带 `rule_id`；也兼容 `type` / `mode` 别名。
+        path: 状态库路径。
+
+    Returns:
+        入库后的规则字典。
+    """
     rule_type = str(payload.get("rule_type") or payload.get("type") or "")
     pattern = str(payload.get("pattern") or "").strip()
     mode = str(payload.get("match_mode") or payload.get("mode") or "")
@@ -174,11 +250,20 @@ def create_rule(payload: Mapping[str, Any], path: Path | str | None = None) -> d
 
 
 def update_rule(rule_id: str, payload: Mapping[str, Any], path: Path | str | None = None) -> dict[str, Any]:
+    """合并更新规则；不存在抛 `KeyError`，字段不合法抛 `ValueError`。
+
+    Args:
+        rule_id: 要更新的规则 id。
+        payload: 要改的字段；`hit_count` 只作响应字段，不会写库。
+        path: 状态库路径。
+
+    Returns:
+        更新后的规则字典。
+    """
     old = get_rule(rule_id, path)
     if old is None:
         raise KeyError(rule_id)
     merged = {**old, **dict(payload), "rule_id": rule_id}
-    # hit_count is response-only and must not enter validation/storage.
     rule_type = str(merged.get("rule_type") or merged.get("type") or "")
     pattern = str(merged.get("pattern") or "").strip()
     mode = str(merged.get("match_mode") or merged.get("mode") or "")
@@ -205,6 +290,16 @@ def update_rule(rule_id: str, payload: Mapping[str, Any], path: Path | str | Non
 
 
 def set_rule_enabled(rule_id: str, enabled: bool, path: Path | str | None = None) -> dict[str, Any]:
+    """启用 / 停用规则；不存在抛 `KeyError`。
+
+    Args:
+        rule_id: 规则 id。
+        enabled: 目标启用状态。
+        path: 状态库路径。
+
+    Returns:
+        更新后的规则字典。
+    """
     rule = get_rule(rule_id, path)
     if rule is None:
         raise KeyError(rule_id)
@@ -220,6 +315,15 @@ def set_rule_enabled(rule_id: str, enabled: bool, path: Path | str | None = None
 
 
 def delete_rule(rule_id: str, path: Path | str | None = None) -> bool:
+    """删除规则。
+
+    Args:
+        rule_id: 规则 id。
+        path: 状态库路径。
+
+    Returns:
+        是否真的删掉了行。
+    """
     conn = boss_db.acquire(path)
     with conn:
         cur = conn.execute("DELETE FROM blacklist_rules WHERE rule_id = ?", (rule_id,))
@@ -227,6 +331,7 @@ def delete_rule(rule_id: str, path: Path | str | None = None) -> bool:
 
 
 def _find(pattern: str, mode: str, text: str) -> str:
+    """按匹配方式在文本里找模式；命中回片段，否则回空串。"""
     if mode == "contains":
         return pattern if pattern in text else ""
     if mode == "exact":
@@ -236,7 +341,7 @@ def _find(pattern: str, mode: str, text: str) -> str:
 
 
 def _record_rule_error(rule_id: Any, error: Exception) -> None:
-    """Persist a runtime regex failure without changing historical hit rows."""
+    """把运行期正则失败记到规则上，不动历史命中行。"""
     if not rule_id:
         return
     try:
@@ -251,18 +356,23 @@ def _record_rule_error(rule_id: Any, error: Exception) -> None:
 
 
 def evaluate_company(brand_name: str, rules: Iterable[Mapping[str, Any]]) -> list[RuleMatch]:
+    """对品牌名跑一遍公司规则。
+
+    Args:
+        brand_name: 公司 / 品牌名；归一化后为空则不算命中。
+        rules: 规则集合，只取启用中的 `company` 规则。
+
+    Returns:
+        命中列表。
+    """
     normalized = normalize_company(brand_name)
     result: list[RuleMatch] = []
-    # 公司名缺失无法比对：不算命中（自动投递由调用方按「状态不完整」保守拦截）
     if not normalized:
         return result
     for rule in rules:
         if not rule.get("enabled") or rule.get("rule_type") != COMPANY:
             continue
         try:
-            # The configured pattern is the left-hand side.  Passing the
-            # candidate as both arguments makes every exact rule match every
-            # company and makes regex rules execute the company name itself.
             hit = _find(
                 str(rule.get("pattern") or ""),
                 str(rule.get("match_mode") or ""),
@@ -280,6 +390,16 @@ def evaluate_company(brand_name: str, rules: Iterable[Mapping[str, Any]]) -> lis
 def evaluate_jd(
     job_name: str, job_desc: str, rules: Iterable[Mapping[str, Any]]
 ) -> list[RuleMatch]:
+    """对职位名与描述跑一遍 JD 规则。
+
+    Args:
+        job_name: 职位名。
+        job_desc: 职位描述。
+        rules: 规则集合，只取启用中的 `jd_keyword` 规则。
+
+    Returns:
+        命中列表；同一规则最多记一条。
+    """
     result: list[RuleMatch] = []
     for rule in rules:
         if not rule.get("enabled") or rule.get("rule_type") != JD_KEYWORD:
@@ -303,6 +423,22 @@ def save_hit(
     match: RuleMatch | None = None, action: str = "stored", jd_status: str = "", error: str = "",
     path: Path | str | None = None,
 ) -> str:
+    """写一条命中 / 拦截流水。
+
+    Args:
+        task_id: 所属任务 id。
+        job_id: 职位 id。
+        job_name: 职位名。
+        brand_name: 公司名。
+        match: 命中详情；`None` 时只记岗位与动作。
+        action: 动作标识。
+        jd_status: JD 状态。
+        error: 失败原因。
+        path: 状态库路径。
+
+    Returns:
+        新流水的 `log_id`。
+    """
     rule = match.rule if match else {}
     log_id = "bh_" + uuid.uuid4().hex[:12]
     conn = boss_db.acquire(path)
@@ -320,6 +456,16 @@ def save_hit(
 
 
 def list_hits(rule_id: str | None = None, *, limit: int = 100, path: Path | str | None = None) -> list[dict[str, Any]]:
+    """列命中流水，最近的在前。
+
+    Args:
+        rule_id: 只看这一条规则；`None` 看全部。
+        limit: 最多返回几条。
+        path: 状态库路径。
+
+    Returns:
+        流水字典列表。
+    """
     conn = boss_db.acquire(path)
     if rule_id:
         rows = conn.execute("SELECT * FROM blacklist_hits WHERE rule_id=? ORDER BY created_at DESC LIMIT ?", (rule_id, limit)).fetchall()
@@ -329,4 +475,5 @@ def list_hits(rule_id: str | None = None, *, limit: int = 100, path: Path | str 
 
 
 def snapshot_rules(rules: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """把规则集合冻成可入库的字典列表。"""
     return [dict(rule) for rule in rules]

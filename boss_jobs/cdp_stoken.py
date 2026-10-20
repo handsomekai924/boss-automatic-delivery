@@ -1,83 +1,23 @@
-"""``__zp_stoken__`` 的**真浏览器**获取：Chrome CDP 拉起 → 站点自算 → 落盘 + 过期判断。
+"""用真 Chrome 经 CDP 让站点自算 `__zp_stoken__`，并落盘、判过期。
 
-为什么不用 Node 硬算
---------------------------------------------------------------------------------
-:mod:`boss_jobs.stoken` 那条「拿挑战 → 下 ``security-js`` → Node 跑 ``ABC.z``」
-链路**算法是对的**，但服务端不认：``ABC.z`` 会顺手采一遍浏览器环境指纹
-（canvas / plugins / screen / localStorage 设备 id …）编进 token，
-光板 Node 的外壳跟真实 Chrome 对不上，打过去就是 ``code 37``。
+只读自拉 Chrome 调试口里的 Cookie，不解密；滑块/风控不在此处理。细节见 `notes/boss_jobs/cdp_stoken.md`。
 
-所以这里换一条路：**让真 Chrome 自己把 token 算出来**。
-Chrome 本来就是站点的原生环境，指纹、时区、UA 全自洽，不需要逆向、
-不需要补指纹，更不需要碰 cookie 加密（Chrome 127+ 的
-``app_bound_encrypted_key`` 那套也不用动）。
-
-做法（CDP = Chrome DevTools Protocol）
---------------------------------------------------------------------------------
-1. 找一台 Chrome（``BOSS_CHROME_BIN`` / 常见安装路径 / PATH）。
-2. 先试连已有的调试端口 ``127.0.0.1:9222``；连不上就用**独立的 user-data-dir**
-   拉起一台（``--remote-debugging-port`` 在默认 profile 上会被 Chrome 拒绝，
-   这里专门开一个 ``.chrome_profile``，跟日常那台 Chrome 互不打架）。
-3. ``Storage.setCookies`` 把状态库里 ``doc('session')`` 的登录 Cookie 灌进去
-   ——免得每次都要手工登一遍。
-4. ``Target.createTarget`` 打开 ``https://www.zhipin.com/web/geek/jobs``，
-   让站点自己的前端把 ``__zp_stoken__`` 算出来写进 Cookie（3840 分钟）。
-5. 轮询 ``Storage.getCookies`` 把它读出来，连同 ``expires`` 一起落到
-   状态库的 ``doc('stoken')`` 行。
-
-⚠️ 边界
---------------------------------------------------------------------------------
-* **只读 Cookie，不解密 Cookie。** 读靠 CDP 调试口，那台 Chrome 是自己拉起来的，
-  用户知情。不去抠 Chrome 的 ``Cookies`` SQLite，更不去注入进程解
-  ``app_bound_encrypted_key``。
-* **拉起来的 Chrome 默认留着**（本进程内下次复用，秒连；``BOSS_CDP_KEEP=0``
-  则抓完就关）。**但进程一退就关**——见下面的「退出收尾」。
-* **复用的那台绝不动。** 用户自己开的 Chrome（手动带了调试口）不在我们的册子上，
-  退出时不会去关它。
-* **滑块/风控（code 36）不在这里处理。** 拿不到 token 就如实报错，
-  让用户自己去浏览器过人机，客户端不去绕。
-
-窗口可见性（``BOSS_CHROME_MODE``）
---------------------------------------------------------------------------------
-**默认 ``hidden``**：拉 Chrome 只是为了让站点自己算令牌，用户没必要被弹一脸窗口。
-
-* ``hidden``——屏幕外起 + Win32 ``SW_HIDE``，连任务栏/Alt+Tab 里都没有（**默认**）。
-* ``visible``——照常显示。**要人工过滑块/人机验证时得用这个**：
-  隐藏的窗口人够不着（任务栏里也没有），只能靠这个档位把它叫出来。
-* ``offscreen``——屏幕外，但 ``IsWindowVisible`` 仍为真，还挂在任务栏/Alt+Tab 里。
-* ``headless``——``--headless=new``，没有窗口。**别用**，见下。
-
-实测（2026-10-09，Chrome 153，同一账号，四个档位轮着拉）：
-
-* ``offscreen`` / ``hidden`` 都把窗口从用户眼前挪开，站点 JS 照跑，约 2s 出令牌，
-  拿它打 ``joblist.json`` 服务端照收（``code 0``，15 条）。要"前台看不见"就用这两个。
-* ``headless`` **不合规**：页面一开就被站点重定向到
-  ``/web/passport/zp/verify.html?…&code=36``（「安全验证 / 账号可能存在异常访问行为」），
-  等 40s 也等不到 ``__zp_stoken__``。跟渲染能力无关——无头下 WebGL（ANGLE + 真 GPU）、
-  插件数、时区跟有头一模一样，**是站点的风控在挑环境**。所以这一档只留着备查，
-  别拿去跑。
-* 非 ``visible`` 档位都会让 Chrome 把窗口判成「被遮挡」，页面里
-  ``document.visibilityState === 'hidden'``。取令牌不受影响，但这个差异记着——
-  这正是 ``hidden`` 档位额外挂 ``--disable-backgrounding-occluded-windows`` /
-  ``--disable-renderer-backgrounding`` / ``--disable-background-timer-throttling``
-  和 ``CalculateNativeWinOcclusion`` 的原因：否则被遮挡的窗口会被停画、
-  后台定时器被冻结，站点 JS 可能就算不动令牌。
-
-退出收尾（``BOSS_CDP_CLOSE_ON_EXIT``）
---------------------------------------------------------------------------------
-进程退出时 :func:`close_launched_browsers` 会把**我们拉起来的** Chrome 一起关掉
-（先 CDP ``Browser.close`` 让它自己退，没退就杀进程）。``atexit`` + ``SIGTERM``
-两条路都接了，Ctrl+C 和正常结束都算；只有被强杀（``taskkill /F``）才收不了。
-
-不想要这个行为（比如想让浏览器跨进程留着复用），设 ``BOSS_CDP_CLOSE_ON_EXIT=0``。
-
-用法::
-
-    from boss_jobs.cdp_stoken import CdpStokenProvider
-    p = CdpStokenProvider(http=session)     # http 里带登录 Cookie
-    token = p.ensure()                      # 有过期检查，过期才拉 Chrome
-    token = p.ensure(force=True)            # 无视过期，强制换新
-    p = CdpStokenProvider(http=session, mode="visible")  # 要人工过验证码时
+Attributes:
+    CHROME_PROFILE_ENV: 独立 user-data-dir；默认 profile 会被拒开调试口。
+    CHROME_KEEP_ENV: 抓完是否留着 Chrome（`0`/`false` = 关掉）。
+    CHROME_CLOSE_ON_EXIT_ENV: 进程退出时是否关掉自拉的 Chrome（`0`/`false` = 留着）。
+    CHROME_MODES: 窗口档位：`visible` / `offscreen` / `hidden`。
+    DEFAULT_CHROME_MODE: 默认 `hidden`；人工过滑块时改 `visible`。
+    EXPIRY_MARGIN: 快过期就提前换新的余量（秒）。
+    RENEW_COOLDOWN: 强制换新的冷却（秒），免得连环拉 Chrome 惹风控。
+    ACQUIRE_TIMEOUT: 等站点写出 token 的超时（秒）。
+    TOKEN_PAGE: 要 token 就得跑站点 JS 的那个页面。
+    _NON_COOKIE_KEYS: 登录态里不需要往 Chrome 灌的键。
+    _OFFSCREEN_POS: `offscreen`/`hidden` 把窗口摆到这儿（别用 Win32 保留值 `-32000`）。
+    _LOOPBACK_HOSTS: 调试口两个 loopback 都要问，Chrome 被占时会退到 `[::1]`。
+    _LOOPBACK_OPENER: 不走环境变量 HTTP 代理，免得梯子劫走 loopback。
+    _launched: 本进程自拉的 Chrome 清单，改动要拿 `_launched_lock`。
+    _FATAL_CONSOLE_EVENTS: 可放心在此收尾的控制台事件；不含 `CTRL_C_EVENT`。
 """
 
 from __future__ import annotations
@@ -131,59 +71,36 @@ __all__ = [
     "probe_debug",
 ]
 
-#: 调试端口（``--remote-debugging-port``）
 CDP_PORT_ENV: str = "BOSS_CDP_PORT"
 DEFAULT_CDP_PORT: int = 9222
 
-#: Chrome 可执行文件；不设就按 常见安装路径 → PATH 的顺序找
 CHROME_BIN_ENV: str = "BOSS_CHROME_BIN"
 
-#: 独立 user-data-dir。**必须独立**：Chrome 在默认 profile 上会拒开调试口
 CHROME_PROFILE_ENV: str = "BOSS_CHROME_PROFILE"
 DEFAULT_CHROME_PROFILE: Path = C.PROJECT_ROOT / ".chrome_profile"
 
-#: 抓完是否留着 Chrome（``0``/``false`` = 关掉）。默认留着，**本进程内**下次秒连；
-#: 进程一退还是会被 :func:`close_launched_browsers` 收走（见下一条）
 CHROME_KEEP_ENV: str = "BOSS_CDP_KEEP"
 
-#: 进程退出时是否把我们拉起来的 Chrome 一起关掉（``0``/``false`` = 留着）。
-#: 默认关：不然程序跑完，桌面上（或屏幕外）会挂着一台没人管的 Chrome
 CHROME_CLOSE_ON_EXIT_ENV: str = "BOSS_CDP_CLOSE_ON_EXIT"
 
-#: 拉起来的 Chrome 窗口怎么摆（见 :data:`CHROME_MODES`）
 CHROME_MODE_ENV: str = "BOSS_CHROME_MODE"
 
-#: 窗口可见性档位：``visible``（照常显示）/ ``offscreen``（挪到屏幕外）/
-#: ``hidden``（Win32 隐藏窗口 + 关掉遮挡节流）/ ``headless``（无头）
 CHROME_MODES: tuple[str, ...] = ("visible", "offscreen", "hidden")
 
-#: 默认 ``hidden``：拉 Chrome 是为了让站点自己算令牌，用户没必要被弹一脸窗口。
-#: ⚠️ 要**人工过滑块/人机验证**时得改回 ``visible``——隐藏的窗口连任务栏里
-#: 都没有，人是够不着的（``BOSS_CHROME_MODE=visible``）
 DEFAULT_CHROME_MODE: str = "hidden"
 
-#: 令牌账本落在状态库的哪一行（含 minted_at / expires_at，用来判过期）。
-#: 库路径走 ``BOSS_DB`` / 显式参数，见 :func:`boss_db.resolve_db_path`。
 DEFAULT_DB_PATH: Path = boss_db.DEFAULT_DB_PATH
 
-#: 快过期就提前换新的余量（秒）
 EXPIRY_MARGIN: int = 5 * 60
 
-#: 强制换新的冷却（秒）。撞 code 37 有时只是「请求太快」，
-#: 连环拉 Chrome 既慢（每次 ~3s）又更容易把风控惹出来；冷却期内
-#: 顶多把现有那枚写回 Cookie 重试一次，不真去换。
 RENEW_COOLDOWN: float = 5.0
 
-#: 等站点写出 token 的超时（秒）。真浏览器首次开页要拉 chunk，给宽点
 ACQUIRE_TIMEOUT: float = 40.0
 
-#: 要 token 就得跑站点 JS 的那个页面
 TOKEN_PAGE: str = f"{C.BASE_URL}/web/geek/jobs"
 
-#: 登录态里不需要往 Chrome 灌的键（它们是 boss_login 自己的元数据）
 _NON_COOKIE_KEYS: frozenset[str] = frozenset({"__zp_stoken__"})
 
-#: 常见的 Chrome 安装路径（Windows / macOS / Linux）
 _CHROME_CANDIDATES: tuple[str, ...] = (
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -196,20 +113,15 @@ _CHROME_CANDIDATES: tuple[str, ...] = (
 )
 
 
-# --------------------------------------------------------------------------- #
-# 落盘：token + 过期时间
-# --------------------------------------------------------------------------- #
-
-
 @dataclass(frozen=True)
 class StokenRecord:
-    """一枚 ``__zp_stoken__`` 及其有效期。
+    """一枚 `__zp_stoken__` 及其有效期。
 
-    :param token: 令牌本体
-    :param minted_at: 拿到手的 Unix 时间戳（秒）
-    :param expires_at: 过期时间戳（秒）。站点给的是 Cookie ``expires``；
-        没给就按前端的 ``max-age=3840*60`` 从 ``minted_at`` 推
-    :param source: 怎么来的（``cdp`` / ``manual``）
+    Attributes:
+        token: 令牌本体。
+        minted_at: 拿到手的 Unix 时间戳（秒）。
+        expires_at: 过期时间戳（秒）；站点给 Cookie `expires`，没有就按 max-age 从 `minted_at` 推。
+        source: 怎么来的（`cdp` / `manual`）。
     """
 
     token: str
@@ -225,14 +137,14 @@ class StokenRecord:
         minted_at: float | None = None,
         source: str = "cdp",
     ) -> "StokenRecord":
-        """从 CDP 的 Cookie 结构建一条记录（认 ``expires``，没有就按 max-age 推）。"""
+        """从 CDP 的 Cookie 结构建一条记录（认 `expires`，没有就按 max-age 推）。"""
         now = minted_at if minted_at is not None else time.time()
         raw = cookie.get("expires")
         try:
             expires_at = float(raw) if raw is not None else -1.0
         except (TypeError, ValueError):
             expires_at = -1.0
-        if expires_at <= 0:  # 会话 Cookie / 没给 → 照前端 max-age 推
+        if expires_at <= 0:
             expires_at = now + STOKEN_MAX_AGE
         return cls(
             token=str(cookie.get("value") or ""),
@@ -243,17 +155,20 @@ class StokenRecord:
 
     @property
     def is_usable(self) -> bool:
+        """有没有非空的令牌本体。"""
         return bool(self.token)
 
     def is_fresh(self, *, margin: int = EXPIRY_MARGIN) -> bool:
-        """还没到该换新的时候吗？（留 ``margin`` 秒余量）"""
+        """还没到该换新的时候吗？（留 `margin` 秒余量）"""
         return self.is_usable and time.time() < (self.expires_at - margin)
 
     @property
     def ttl_left(self) -> float:
+        """距过期还剩多少秒（不会为负）。"""
         return max(0.0, self.expires_at - time.time())
 
     def to_dict(self) -> dict[str, Any]:
+        """转成可 JSON 序列化的 dict。"""
         return {
             "token": self.token,
             "minted_at": self.minted_at,
@@ -263,6 +178,7 @@ class StokenRecord:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any] | None) -> "StokenRecord | None":
+        """从落盘的 dict 还原；不像一条完整记录就返回 `None`。"""
         if not isinstance(payload, Mapping):
             return None
         token = payload.get("token")
@@ -282,23 +198,24 @@ class StokenRecord:
 
 
 class StokenStore:
-    """``doc('stoken')`` 的读写：一次 fetch 一份过期账本。
+    """`doc('stoken')` 的读写：一次 fetch 一份过期账本。
 
-    跟登录态分开放是有意的——``doc('session')`` 的 ``cookies`` 是纯
-    ``str → str``，塞不进过期时间；而过期判断恰恰是最关键的那一环。
-    取出来的 token 会另外**镜像**一份进 ``doc('session')``，让
-    :func:`boss_jobs.client.http_from_session` 老规矩继续生效。
+    跟登录态分开放——`doc('session')` 的 `cookies` 是纯 `str → str`，
+    塞不进过期时间。取出的 token 会另外镜像进 `doc('session')`。
 
-    :param path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    Args:
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
     """
 
     def __init__(self, path: Path | str | None = None) -> None:
+        """初始化。"""
         self.path = boss_db.resolve_db_path(path)
 
     def load(self) -> StokenRecord | None:
+        """读账本；没有、坏 JSON 或读盘失败都当没有。"""
         try:
             raw = boss_db.doc_get_raw(boss_db.DOC_STOKEN, self.path)
-        except (OSError, sqlite3.Error) as exc:  # 读盘失败不该拦主流程
+        except (OSError, sqlite3.Error) as exc:
             logger.warning("读 %s 的 %s 失败（当没有）：%s", self.path, boss_db.DOC_STOKEN, exc)
             return None
         if raw is None:
@@ -311,6 +228,7 @@ class StokenStore:
         return StokenRecord.from_dict(payload)
 
     def save(self, record: StokenRecord) -> None:
+        """写账本；写失败只告警，不拦主流程。"""
         try:
             resolved = boss_db.doc_set(boss_db.DOC_STOKEN, record.to_dict(), self.path)
         except (OSError, sqlite3.Error) as exc:
@@ -321,15 +239,11 @@ class StokenStore:
             )
 
     def clear(self) -> None:
+        """删掉账本这一行；失败忽略。"""
         try:
             boss_db.doc_delete(boss_db.DOC_STOKEN, self.path)
         except (OSError, sqlite3.Error):
             pass
-
-
-# --------------------------------------------------------------------------- #
-# Chrome / CDP
-# --------------------------------------------------------------------------- #
 
 
 def find_chrome() -> str:
@@ -352,6 +266,7 @@ def find_chrome() -> str:
 
 
 def _port() -> int:
+    """调试端口：读 `CDP_PORT_ENV`，非法或未设则用 `DEFAULT_CDP_PORT`。"""
     env = os.environ.get(CDP_PORT_ENV, "").strip()
     if env.isdigit():
         return int(env)
@@ -359,15 +274,18 @@ def _port() -> int:
 
 
 def _profile_dir() -> Path:
+    """Chrome 专属 user-data-dir：读 `CHROME_PROFILE_ENV`，否则用默认路径。"""
     env = os.environ.get(CHROME_PROFILE_ENV, "").strip()
     return Path(env) if env else DEFAULT_CHROME_PROFILE
 
 
 def _keep_browser() -> bool:
+    """抓完是否留着 Chrome（`CHROME_KEEP_ENV` 未显式关掉即为留）。"""
     return os.environ.get(CHROME_KEEP_ENV, "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _close_on_exit() -> bool:
+    """进程退出时是否关掉自拉 Chrome（`CHROME_CLOSE_ON_EXIT_ENV` 未显式关即为关）。"""
     return os.environ.get(CHROME_CLOSE_ON_EXIT_ENV, "").strip().lower() not in {
         "0",
         "false",
@@ -377,7 +295,7 @@ def _close_on_exit() -> bool:
 
 
 def _mode() -> str:
-    """窗口档位（:data:`CHROME_MODE_ENV`）。写错了退回 ``visible``。"""
+    """窗口档位（`CHROME_MODE_ENV`）。写错了退回默认档位。"""
     env = os.environ.get(CHROME_MODE_ENV, "").strip().lower()
     if not env:
         return DEFAULT_CHROME_MODE
@@ -393,20 +311,16 @@ def _mode() -> str:
     return env
 
 
-#: ``offscreen`` 把窗口摆到这儿（``-32000`` 是 Win32 的保留值，别用）
 _OFFSCREEN_POS: int = -10000
 
 
 def _mode_flags(mode: str) -> list[str]:
-    """按档位给窗口相关的启动参数。窗口本身的事全在这儿了。"""
+    """按档位给窗口相关的启动参数。"""
     if mode == "headless":
         return ["--headless=new"]
     if mode == "offscreen":
         return [f"--window-position={_OFFSCREEN_POS},{_OFFSCREEN_POS}"]
     if mode == "hidden":
-        # 大头是拉起来之后 Win32 SW_HIDE；这里先摆到屏幕外，免得藏之前闪一下。
-        # 窗口一旦不可见，Chrome 会停画 + 冻结后台定时器，于是站点 JS 可能
-        # 算不动令牌，这三条是专门的解药。
         return [
             f"--window-position={_OFFSCREEN_POS},{_OFFSCREEN_POS}",
             "--disable-backgrounding-occluded-windows",
@@ -417,10 +331,9 @@ def _mode_flags(mode: str) -> list[str]:
 
 
 def _disable_features(mode: str) -> str:
-    """``--disable-features`` 的值。同名开关给两次 Chrome 只认最后一个，得拼一起。"""
+    """拼 `--disable-features` 的值；hidden 档位追加遮挡停画的解药。"""
     names = ["Translate", "MediaRouter"]
     if mode == "hidden":
-        # Windows 上 Chrome 靠这个特性判断「窗口被别的窗口盖住了」→ 停画
         names.append("CalculateNativeWinOcclusion")
     return ",".join(names)
 
@@ -434,13 +347,15 @@ def _hide_windows(
     timeout: float = 10.0,
     proc: subprocess.Popen | None = None,
 ) -> int:
-    """把这台 Chrome 的顶层窗口 ``SW_HIDE`` 掉，返回藏了几个。
+    """把这台 Chrome 的顶层窗口 `SW_HIDE` 掉，返回藏了几个。
 
     只在 Windows 上有意义（别处返回 0）。Chrome 开窗口比开调试口晚一拍，
-    所以找不到就等到 ``timeout``，别以为藏好了。
+    所以找不到就等到 `timeout`。
 
-    :param proc: 启动时拿到的进程。它要是早退了（Chrome 把启动交给了同一个
-        profile 的现有实例），就没什么窗口可等，立刻返回——否则白等 10 秒。
+    Args:
+        pid: Chrome 进程 id。
+        timeout: 最长等待秒数。
+        proc: 启动时拿到的进程；它要是早退了就不再等窗口。
     """
     if os.name != "nt":
         return 0
@@ -452,6 +367,7 @@ def _hide_windows(
     found: list[int] = []
 
     def _visit(hwnd: int, _lparam: int) -> bool:
+        """枚举回调：隐藏属于 `pid` 的可见顶层窗口。"""
         owner = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
         if owner.value == pid and user32.IsWindowVisible(hwnd):
@@ -473,32 +389,27 @@ def _hide_windows(
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# 退出收尾：把自己拉起来的 Chrome 关掉
-# --------------------------------------------------------------------------- #
-
-
 @dataclass
 class _Launched:
     """本进程拉起来的一台 Chrome。
 
-    **只登记自己拉的**——复用现成调试口那台（用户自己开的）绝不入册，
-    退出一律不碰。
+    只登记自己拉的；复用现成调试口那台绝不入册，退出一律不碰。
+
+    Attributes:
+        proc: 启动进程。
+        port: 调试端口。
+        ws_url: browser 级 ws 地址；按尾巴 uuid 连回去，不会误伤后来占端口的别人。
     """
 
     proc: subprocess.Popen
     port: int
-    #: browser 级 ws 地址。尾巴那截 uuid 是每个浏览器实例独有的，
-    #: 按它连回去就不会误伤后来占了这个端口的别人
     ws_url: str = ""
 
 
-#: 自拉的浏览器（可能被 web 那边的后台线程改，加锁）
 _launched: list[_Launched] = []
 _launched_lock = threading.Lock()
 _exit_hooks_installed = False
 
-#: Win32 控制台事件。只接「进程一定活不下来」的那几个，见 :func:`_install_console_handler`
 _CTRL_C_EVENT = 0
 _CTRL_BREAK_EVENT = 1
 _CTRL_CLOSE_EVENT = 2
@@ -506,18 +417,13 @@ _CTRL_LOGOFF_EVENT = 5
 _CTRL_SHUTDOWN_EVENT = 6
 _console_handler: Any = None
 
-#: 「进程一定活不下来」的控制台事件，可以放心在这儿收尾。
-#:
-#: ``CTRL_C_EVENT`` **刻意不在里面**：那条路 Python 自己抛 ``KeyboardInterrupt``，
-#: 交给 ``atexit`` 收；而且万一上层把 KeyboardInterrupt 吃掉了、程序没退，
-#: 提前把热着的 Chrome 关了纯属白关。``CTRL_BREAK_EVENT`` 实测必死
-#: （退出码 ``0xC000013A``，Python 层收尾一律不跑），所以在这儿收。
 _FATAL_CONSOLE_EVENTS: frozenset[int] = frozenset(
     (_CTRL_BREAK_EVENT, _CTRL_CLOSE_EVENT, _CTRL_LOGOFF_EVENT, _CTRL_SHUTDOWN_EVENT)
 )
 
 
 def _track_launch(proc: subprocess.Popen, port: int) -> None:
+    """登记一台自拉的 Chrome，并挂上退出收尾钩子。"""
     with _launched_lock:
         _launched.append(_Launched(proc=proc, port=port))
     _install_exit_hooks()
@@ -535,7 +441,7 @@ def _track_ws(port: int, ws_url: str) -> None:
 def _install_exit_hooks() -> None:
     """第一次拉 Chrome 时挂上退出钩子。
 
-    不在 import 时挂：没拉过浏览器就没什么可收的，别给人家进程加负担。
+    不在 import 时挂：没拉过浏览器就没什么可收的。
     """
     global _exit_hooks_installed
     with _launched_lock:
@@ -545,36 +451,26 @@ def _install_exit_hooks() -> None:
     if not _close_on_exit():
         return
     atexit.register(close_launched_browsers)
-    # SIGTERM 的默认动作是直接退，atexit 不跑；接过来走正常收尾。
-    # SIGINT（Ctrl+C）不用接：Python 自己抛 KeyboardInterrupt，atexit 照跑
     try:
         signal.signal(signal.SIGTERM, _on_sigterm)
     except (AttributeError, OSError, ValueError):
-        pass  # 平台没有 / 不在主线程
+        pass
     _install_console_handler()
 
 
 def _console_ctrl_handler(event: int) -> bool:
-    """Win32 控制台事件回调（见 :func:`_install_console_handler` 的说明）。
-
-    只在该收尾的事件上收尾；返回 False = 不拦，默认动作照跑。
-    """
+    """Win32 控制台事件回调：致命事件先收尾，返回 `False` 不拦默认动作。"""
     if event in _FATAL_CONSOLE_EVENTS:
         close_launched_browsers(timeout=3.0)
     return False
 
 
 def _install_console_handler() -> None:
-    """Windows：控制台把进程硬干掉的那几条路，也把 Chrome 收走。
+    """Windows：控制台硬杀进程的那几条路，也把 Chrome 收走。
 
-    ``CTRL_CLOSE_EVENT``（用户点终端窗口的 X）、``CTRL_LOGOFF_EVENT``、
-    ``CTRL_SHUTDOWN_EVENT``、``CTRL_BREAK_EVENT`` 这几条都走不到 ``atexit``
-    ——控制台直接干掉进程，实测退出码 ``0xC000013A``，Python 层收尾一律不跑。
-    所以在这儿抢最后一次机会（``_FATAL_CONSOLE_EVENTS``）。
-
-    ⚠️ ``CTRL_C_EVENT`` **不碰**，一律返回 FALSE 放行：Ctrl+C 那条路 Python 自己有
-    处理器（抛 ``KeyboardInterrupt`` → ``atexit``），在这儿抢答会把 Ctrl+C 的手感
-    搞坏。返回 FALSE 也让默认动作接着跑——我们只是先收个尾，不改变进程怎么死。
+    `CTRL_CLOSE_EVENT` / `CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT` /
+    `CTRL_BREAK_EVENT` 走不到 `atexit`，在此抢最后一次机会。
+    `CTRL_C_EVENT` 不碰，放行走 Python 自己的 `KeyboardInterrupt` → `atexit`。
     """
     global _console_handler  # noqa: PLW0603 - 得留住引用，不然回调会被 GC 掉
     if os.name != "nt":
@@ -593,6 +489,7 @@ def _install_console_handler() -> None:
 
 
 def _on_sigterm(signum: int, _frame: Any) -> None:
+    """SIGTERM 收尾：关掉自拉 Chrome 后以 `128 + signum` 退出。"""
     close_launched_browsers(timeout=3.0)
     raise SystemExit(128 + signum)
 
@@ -600,18 +497,15 @@ def _on_sigterm(signum: int, _frame: Any) -> None:
 def close_launched_browsers(*, timeout: float = 5.0) -> int:
     """把本进程拉起来的 Chrome 全关掉，返回关了几台。
 
-    进程退出时由 ``atexit`` 自动调一次（``BOSS_CDP_CLOSE_ON_EXIT=0`` 关掉
-    这个行为）；想在流程里提前收尾也可以直接调。
-
-    先走 CDP ``Browser.close`` 让它自己退（profile 收得干净），没退就杀进程
-    ——那是我们自己的子进程，杀了不牵连谁。**复用现成调试口那种一律不碰。**
+    进程退出时由 `atexit` 自动调一次（`BOSS_CDP_CLOSE_ON_EXIT=0` 关掉这个行为）。
+    先走 CDP `Browser.close` 让它自己退，没退就杀进程。复用现成调试口那种一律不碰。
     """
     with _launched_lock:
         pending, _launched[:] = list(_launched), []
     closed = 0
     for item in pending:
         if item.proc.poll() is not None:
-            continue  # 早就自己退了
+            continue
         if _shutdown_one(item, timeout=timeout):
             closed += 1
     if closed:
@@ -620,8 +514,8 @@ def close_launched_browsers(*, timeout: float = 5.0) -> int:
 
 
 def _shutdown_one(item: _Launched, *, timeout: float) -> bool:
+    """关掉一台自拉 Chrome；CDP 关不掉就杀进程。返回是否成功关掉。"""
     if not item.ws_url:
-        # 从没连上过（多半压根没起来），不用给它体面
         return _kill(item.proc)
     client = None
     try:
@@ -641,6 +535,7 @@ def _shutdown_one(item: _Launched, *, timeout: float) -> bool:
 
 
 def _kill(proc: subprocess.Popen) -> bool:
+    """杀掉子进程；失败记日志并返回 `False`。"""
     try:
         proc.kill()
     except OSError as exc:  # pragma: no cover - 退出路上，别让异常冒出去
@@ -649,26 +544,20 @@ def _kill(proc: subprocess.Popen) -> bool:
     return True
 
 
-#: 调试口的两个 loopback 地址。Chrome 默认绑 ``127.0.0.1``，**被占时它退到
-#: ``[::1]``**（日志里照样写 ``DevTools listening on ws://[::1]:9222/…``）。
-#: 只问 IPv4 就会把「明明开了」误判成「没开」——真机踩过。
 _LOOPBACK_HOSTS: tuple[str, ...] = ("127.0.0.1", "[::1]")
 
-#: 不走环境变量里的 HTTP 代理。开着梯子 / 构了 ``HTTP_PROXY`` 时，默认 opener
-#: 会连 loopback 一起劫走，表现同样是「Chrome 起了但连不上调试口」。
 _LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def _debug_url(host: str, port: int, path: str) -> str:
+    """拼调试口的 HTTP URL。"""
     return f"http://{host}:{port}{path}"
 
 
 def probe_debug(port: int | None = None, *, timeout: float = 1.5) -> str:
     """问一下调试口在不在，在就返回 browser 级 WebSocket 地址。
 
-    IPv4 / IPv6 两个 loopback 都问（原因见 :data:`_LOOPBACK_HOSTS`）。
-
-    空字符串 = 没连上（Chrome 没起，或起了但没开调试口）。
+    IPv4 / IPv6 两个 loopback 都问。空字符串 = 没连上。
     """
     port = port or _port()
     for host in _LOOPBACK_HOSTS:
@@ -686,6 +575,7 @@ def probe_debug(port: int | None = None, *, timeout: float = 1.5) -> str:
 
 
 def _can_bind(host: str, port: int) -> bool:
+    """该 loopback 地址上还能不能 bind 这个端口。"""
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     try:
         with socket.socket(family, socket.SOCK_STREAM) as sock:
@@ -698,21 +588,17 @@ def _can_bind(host: str, port: int) -> bool:
 def _port_usable(port: int) -> bool:
     """Chrome 还能不能在这个端口上开调试口。
 
-    任一 loopback 能 bind 就行——Chrome 自己也是这么退的（见 :func:`probe_debug`）。
-    两个都被别的程序占着才值得换端口。
+    任一 loopback 能 bind 就行；两个都被别的程序占着才值得换端口。
     """
     return _can_bind("127.0.0.1", port) or _can_bind("::1", port)
 
 
-#: Chrome 自己的 stderr 落在 profile 里。调试口起不来时，原因就在这几行：
-#: ``bind() returned an error`` / ``DevTools listening on …`` / 策略拦截。
-#: 以前直接扔 ``DEVNULL``，出问题只能靠猜「是不是安全软件」。
 _CHROME_LOG_NAME = "chrome-stderr.log"
-_CHROME_LOG_MAX = 1 << 20  # 1 MiB；超了下一次启动前清掉
+_CHROME_LOG_MAX = 1 << 20
 
 
 def _open_chrome_log(profile: Path, port: int):
-    """给这次启动开一个追加写的 Chrome 日志。开不了返回 ``None``，不拦主流程。"""
+    """给这次启动开一个追加写的 Chrome 日志。开不了返回 `None`，不拦主流程。"""
     path = profile / _CHROME_LOG_NAME
     try:
         if path.exists() and path.stat().st_size > _CHROME_LOG_MAX:
@@ -746,7 +632,7 @@ def _chrome_log_hint(profile: Path) -> str:
 
 
 def _profile_populated(profile: Path) -> bool:
-    """Chrome 到底有没有起来过：正常启动会写 ``Local State`` / ``Default``。"""
+    """Chrome 到底有没有起来过：正常启动会写 `Local State` / `Default`。"""
     return (profile / "Local State").exists() or (profile / "Default").is_dir()
 
 
@@ -759,15 +645,14 @@ def launch_chrome(
 ) -> subprocess.Popen:
     """用独立 user-data-dir 拉起一台带调试口的 Chrome。
 
-    ⚠️ 必须独立 profile：Chrome 136+ 直接拒绝对默认 profile 开
-    ``--remote-debugging-port``。独立 profile 的登录态由本模块每次从
-    状态库 ``doc('session')`` 灌进去，不用手工登。
+    必须独立 profile：Chrome 会拒绝对默认 profile 开调试口。拉起来的这台
+    会记进册子，进程退出时自动关掉。
 
-    :param mode: 窗口档位，见 :data:`CHROME_MODES`；``None`` = 读
-        :data:`CHROME_MODE_ENV`，再默认 ``hidden``。
-
-    拉起来的这台会记进册子，**进程退出时自动关掉**（见
-    :func:`close_launched_browsers`，``BOSS_CDP_CLOSE_ON_EXIT=0`` 可关掉）。
+    Args:
+        chrome: Chrome 可执行文件；省略则 `find_chrome`。
+        port: 调试端口；省略读 `CDP_PORT_ENV`。
+        profile_dir: 独立 user-data-dir；省略读 `CHROME_PROFILE_ENV`。
+        mode: 窗口档位，见 `CHROME_MODES`；省略读 `CHROME_MODE_ENV`。
     """
     chrome = chrome or find_chrome()
     port = port or _port()
@@ -781,7 +666,6 @@ def launch_chrome(
     cmd = [
         chrome,
         f"--remote-debugging-port={port}",
-        # Chrome 111+ 默认拒掉陌生 Origin 的 WS 握手；调试口是本地闭环，放开它
         "--remote-allow-origins=*",
         f"--user-data-dir={profile}",
         "--no-first-run",
@@ -804,16 +688,13 @@ def launch_chrome(
         raise StokenError(f"拉不起 Chrome（{chrome}）：{exc}") from exc
     finally:
         if log is not None:
-            log.close()  # 子进程已经拿到句柄，父进程这份可以关了
+            log.close()
     if mode == "hidden":
-        # 窗口藏起来（Win32）。藏不藏得上都继续：顶多用户看见一个后台窗口，
-        # 令牌该拿还是能拿——为这个把整条链路拦掉不值。
         hidden = _hide_windows(proc.pid, proc=proc)
         if hidden:
             logger.info("已隐藏 %d 个 Chrome 窗口（pid %s）", hidden, proc.pid)
         else:
             logger.warning("没找到 pid %s 的 Chrome 窗口可隐藏，窗口会露出来", proc.pid)
-    # 登记进册：进程退出时会被关掉（复用的那台不进册，不碰）
     _track_launch(proc, port)
     return proc
 
@@ -828,12 +709,15 @@ def connect_or_launch(
 ) -> "CdpClient":
     """连上现成的调试口，连不上就自己拉一台再等它起来。
 
-    端口被别的程序占着时自动往后挪。⚠️ **每次换端口都换一个 user-data-dir**：
-    Chrome 对同一个 profile 只允许一个实例，第二台会把启动请求交给已经在跑的
-    那台、自己立刻退出——共用 profile 的话，端口永远轮不到第二台开。
+    端口被占时自动往后挪；每次换端口都换一个 user-data-dir，免得 Chrome
+    把启动交给还活着的旧实例。`mode` 只影响自拉那一支。
 
-    :param mode: 窗口档位（:data:`CHROME_MODES`）；只影响**自拉**那一支，
-        复用现成的调试口时无从谈起——那台的窗口长什么样是它自己启动时定的。
+    Args:
+        chrome: Chrome 可执行文件；省略则 `find_chrome`。
+        port: 起始调试端口；省略读 `CDP_PORT_ENV`。
+        profile_dir: 基础 user-data-dir；换端口时会在旁边另开一份。
+        mode: 窗口档位（`CHROME_MODES`）。
+        timeout: 首轮等调试口就绪的秒数。
     """
     first_port = port or _port()
     base_profile = Path(profile_dir) if profile_dir else _profile_dir()
@@ -841,15 +725,11 @@ def connect_or_launch(
     for offset in range(3):
         p = first_port + offset
 
-        # 先看这个端口上是不是已经有能用的调试口：可能是用户自己开的那台，
-        # 也可能是上一次换端口时留下的我们那台（本进程内复用，秒连）。
         ws_url = probe_debug(p)
         if ws_url:
             try:
                 client = CdpClient(ws_url)
             except StokenError as exc:
-                # 端口在但握手被拒（多半是那台 Chrome 没开 --remote-allow-origins）。
-                # 这台用不了，也别在这个端口上再拉一台——探测会优先看到它。
                 last_note = f"端口 {p} 上的不是我们那台：{exc}"
                 continue
             logger.debug("复用已有 Chrome 调试口 %s", p)
@@ -858,8 +738,6 @@ def connect_or_launch(
         if not _port_usable(p):
             last_note = f"端口 {p} 被别的程序占着"
             continue
-        # 只有第一轮用基础 profile（那是「正常」的那份）；后面几轮各用各的，
-        # 免得 Chrome 把启动交给还活着的上一轮实例（见函数 docstring）。
         profile = base_profile
         if offset:
             profile = base_profile.with_name(f"{base_profile.name}-{p}")
@@ -873,9 +751,8 @@ def connect_or_launch(
                     client = CdpClient(ws_url)
                 except StokenError as exc:
                     last_note = f"端口 {p} 上的不是我们那台：{exc}"
-                    break  # 换下一个端口
+                    break
                 logger.debug("自拉 Chrome 调试口 %s 就绪", p)
-                # 记下这台的 ws 地址，退出时按它连回去关掉（见 close_launched_browsers）
                 _track_ws(p, ws_url)
                 return client
             if proc.poll() is not None:
@@ -895,7 +772,6 @@ def connect_or_launch(
         else:
             last_note = f"端口 {p} 一直没开"
 
-        # 这一轮没成：把我们拉的那台收掉，别留一个看不见的 Chrome 占着 profile/端口。
         if proc.poll() is None:
             _kill(proc)
         hint = _chrome_log_hint(profile)
@@ -912,14 +788,19 @@ def connect_or_launch(
 class CdpClient:
     """一条 browser 级 CDP WebSocket 连接（同步，够用即可）。
 
-    只用少数几个命令：``Storage.setCookies/getCookies``、
-    ``Target.getTargets/createTarget/attachToTarget``、``Page.navigate``。
+    只用少数几个命令：`Storage.setCookies/getCookies`、
+    `Target.getTargets/createTarget/attachToTarget`、`Page.navigate`。
     不碰 cookie 存储文件，也不注入页面跑脚本——令牌由站点自己写。
+
+    Args:
+        ws_url: browser 级 WebSocket 地址。
+        recv_timeout: 单次收发的默认超时（秒）。
     """
 
     def __init__(self, ws_url: str, *, recv_timeout: float = 30.0) -> None:
+        """初始化。"""
         try:
-            import websocket  # 延迟导入：没装也只是拿不到 CDP，不影响别的
+            import websocket
         except ImportError as exc:  # pragma: no cover
             raise StokenError(
                 "要走 CDP 得装 websocket-client：pip install websocket-client"
@@ -928,17 +809,11 @@ class CdpClient:
         self._recv_timeout = recv_timeout
         self._id = 0
         try:
-            # suppress_origin：Chrome 111+ 会对陌生 Origin 回 403，
-            # 调试口本来就是本地闭环，不发 Origin 头最干净。
             self._ws = websocket.create_connection(
                 ws_url, timeout=recv_timeout, suppress_origin=True
             )
         except Exception as exc:  # noqa: BLE001
             raise StokenError(f"连不上 CDP（{ws_url}）：{exc}") from exc
-
-    # ------------------------------------------------------------------ #
-    # 基础：发一条命令等回包
-    # ------------------------------------------------------------------ #
 
     def call(
         self,
@@ -948,10 +823,13 @@ class CdpClient:
         session_id: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """发一条 CDP 命令，等到它自己的回包（按 ``id`` 匹配，跳过事件）。
+        """发一条 CDP 命令，等到它自己的回包（按 `id` 匹配，跳过事件）。
 
-        :param session_id: 页面级命令（``Page.navigate`` 等）要带；
-            browser 级（``Storage.*`` / ``Target.*``）不用。
+        Args:
+            method: CDP 方法名。
+            params: 命令参数。
+            session_id: 页面级命令（`Page.navigate` 等）要带；browser 级（`Storage.*` / `Target.*`）不用。
+            timeout: 本次等待超时（秒）；省略用连接默认值。
         """
         self._id += 1
         mine = self._id
@@ -976,7 +854,7 @@ class CdpClient:
             except ValueError:
                 continue
             if data.get("id") != mine:
-                continue  # 事件（Page.loadEventFired 之类），丢掉
+                continue
             if "error" in data:
                 err = data["error"]
                 raise StokenError(f"CDP {method} 报错：{err.get('message', err)}")
@@ -985,29 +863,29 @@ class CdpClient:
         raise StokenError(f"CDP {method} 超时（{timeout or self._recv_timeout}s）")
 
     def close(self) -> None:
+        """关掉 WebSocket 连接；失败忽略。"""
         try:
             self._ws.close()
         except Exception:  # noqa: BLE001 # pragma: no cover
             pass
 
     def __enter__(self) -> "CdpClient":
+        """返回自身。"""
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """退出时关连接。"""
         self.close()
 
-    # ------------------------------------------------------------------ #
-    # Cookie
-    # ------------------------------------------------------------------ #
-
     def get_cookie(self, name: str) -> dict[str, Any] | None:
-        """按名字取一枚 Cookie（整份结构，含 ``expires``）。"""
+        """按名字取一枚 Cookie（整份结构，含 `expires`）。"""
         for cookie in self.get_cookies():
             if cookie.get("name") == name:
                 return cookie
         return None
 
     def get_cookies(self) -> list[dict[str, Any]]:
+        """取浏览器里全部 Cookie（只保留 dict 项）。"""
         result = self.call("Storage.getCookies")
         cookies = result.get("cookies") or []
         return [c for c in cookies if isinstance(c, dict)]
@@ -1019,10 +897,10 @@ class CdpClient:
         domain: str = ".zhipin.com",
         path: str = "/",
     ) -> int:
-        """把 ``doc('session')`` 里的登录 Cookie 灌进 Chrome（免手工登）。
+        """把登录 Cookie 灌进 Chrome（免手工登）；`__zp_stoken__` 不灌。
 
-        只灌真正的登录态，``__zp_stoken__`` 不灌——那枚要让站点自己算，
-        否则指纹还是对不上。
+        Returns:
+            实际灌进去的枚数。
         """
         items = [
             {"name": name, "value": str(value), "domain": domain, "path": path}
@@ -1059,15 +937,11 @@ class CdpClient:
             f"多半是登录态没灌进去（``doc('session')`` 过期？）或页面没跑起来。"
         )
 
-    # ------------------------------------------------------------------ #
-    # 页面
-    # ------------------------------------------------------------------ #
-
     def open_page(self, url: str, *, timeout: float = 20.0) -> tuple[str, str]:
-        """打开（或跳到）某个页面，返回 ``(target_id, session_id)``。
+        """打开（或跳到）某个页面，返回 `(target_id, session_id)`。
 
-        已经有 zhipin 的 target 就复用它 ``Page.navigate``，否则新开一个。
-        不等页面 ``load``——等的是 Cookie，够快。
+        已经有 zhipin 的 target 就复用它 `Page.navigate`，否则新开一个。
+        不等页面 `load`——等的是 Cookie，够快。
         """
         target_id = self._find_zhipin_target()
         if target_id:
@@ -1094,8 +968,8 @@ class CdpClient:
     ) -> None:
         """在页面上下文里把这枚 Cookie 过期掉，逼站点重新算一枚。
 
-        CDP 的 ``Storage`` 域只有「全清」没有「按名删」，全清会把登录态
-        一起端掉；所以在站点页面里改 ``document.cookie`` 的到期时间。
+        CDP 的 `Storage` 域只有「全清」没有「按名删」，全清会把登录态一起端掉，
+        所以在站点页面里改 `document.cookie` 的到期时间。
         """
         script = (
             f"document.cookie = {json.dumps(name)} + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;"
@@ -1109,6 +983,7 @@ class CdpClient:
         self.call("Page.reload", {}, session_id=session_id)
 
     def _find_zhipin_target(self) -> str:
+        """找 zhipin 或空白页 target 的 id；没有则空串。"""
         result = self.call("Target.getTargets")
         for info in result.get("targetInfos") or []:
             if not isinstance(info, dict):
@@ -1121,29 +996,27 @@ class CdpClient:
         return ""
 
     def _attach(self, target_id: str) -> str:
+        """附到 target 上，返回 flatten 会话 id。"""
         result = self.call("Target.attachToTarget", {"targetId": target_id, "flatten": True})
         return str(result.get("sessionId") or "")
 
 
-# --------------------------------------------------------------------------- #
-# Provider：fetch 里那一环
-# --------------------------------------------------------------------------- #
-
-
 @dataclass
 class CdpStokenProvider:
-    """fetch 用的 ``__zp_stoken__`` 供给器：**判过期 → 过期才拉 Chrome**。
+    """fetch 用的 `__zp_stoken__` 供给器：判过期，过期才拉 Chrome。
 
-    跟 :class:`boss_jobs.stoken.StokenProvider` 同一个 ``ensure(force=)`` 接口，
-    所以 :meth:`boss_jobs.client.JobClient.fetch_search_page` 的编排不用改。
-
-    :param http: 带 ``cookies`` 的会话（``requests.Session``）。
-        里面的登录 Cookie 会被灌进 Chrome，好让站点认得你。
-    :param store: 过期账本；不传就用 ``BOSS_DB`` 的 ``doc('stoken')``
-    :param session_path: 镜像进 ``doc('session')`` 的库路径；``None`` = 不镜像
-    :param acquire: 换新令牌的实现（测试里替换掉真 Chrome）
-    :param mode: 自拉 Chrome 时的窗口档位（:data:`CHROME_MODES`）；
-        ``None`` = 读 :data:`CHROME_MODE_ENV`
+    Attributes:
+        http: 带 `cookies` 的会话；里面的登录 Cookie 会被灌进 Chrome。
+        store: 过期账本；不传就用 `BOSS_DB` 的 `doc('stoken')`。
+        session_path: 镜像进 `doc('session')` 的库路径；`None` = 不镜像。
+        page_url: 跑站点 JS 取令牌的页面。
+        timeout: 等站点写出 token 的超时（秒）。
+        acquire: 换新令牌的实现（测试里替换掉真 Chrome）。
+        port: 调试端口。
+        chrome: Chrome 可执行文件。
+        profile_dir: 独立 user-data-dir。
+        mode: 自拉 Chrome 时的窗口档位（`CHROME_MODES`）。
+        _last_renew_at: 上次真去 Chrome 换新的时间戳，给 `RENEW_COOLDOWN` 用。
     """
 
     http: Any
@@ -1156,34 +1029,24 @@ class CdpStokenProvider:
     chrome: str | None = None
     profile_dir: Path | str | None = None
     mode: str | None = None
-    #: 上次真去 Chrome 换新的时间戳（秒），给 :data:`RENEW_COOLDOWN` 用
     _last_renew_at: float = 0.0
 
     def __post_init__(self) -> None:
+        """补上默认的 `store` 与 `acquire`。"""
         if self.store is None:
             self.store = StokenStore()
         if self.acquire is None:
             self.acquire = self._acquire_from_chrome
 
-    # ------------------------------------------------------------------ #
-    # 一步到位
-    # ------------------------------------------------------------------ #
-
     def ensure(self, *, force: bool = False) -> str:
-        """确保会话里有一枚**没过期**的 ``__zp_stoken__``，并返回它。
+        """确保会话里有一枚没过期的 `__zp_stoken__`，并返回它。
 
-        顺序：
+        顺序：账本新鲜直接用；账本没有但会话里已有就先用着；其余
+        （过期 / `force`）拉 Chrome 换新并落盘。已是同一枚时不再 `_persist`；
+        `force` 也有 `RENEW_COOLDOWN` 冷却。
 
-        1. 账本里还新鲜 → 直接用（Cookie 里还不是这枚才写回去）；
-        2. 账本没有、但会话里已经有人（手工拷的）→ 信它，等撞 37 再说；
-        3. 其余（过期 / ``force``）→ 拉 Chrome 换新，落盘。
-
-        两处**刻意不动**，免得日志/状态库被刷屏：
-
-        - 已经是这枚令牌时不再 ``_persist``（否则每条请求都写一遍
-          ``doc('session')``，日志上就是一行行「登录态已保存」）；
-        - ``force`` 也有冷却（:data:`RENEW_COOLDOWN`）——37 有时只是「太快了」，
-          连环拉 Chrome 既慢又更容易撞风控。
+        Args:
+            force: 无视过期强制换新。
         """
         record = self.store.load() if self.store else None
         if not force:
@@ -1202,9 +1065,6 @@ class CdpStokenProvider:
                     logger.debug("会话里已有 %s（手工拷的），先用着", C.STOKEN_COOKIE)
                     return existing
 
-        # force 的冷却：**本进程**刚换过就别再拉 Chrome，把现有那枚顶上就算。
-        # 刻意不拿 record.minted_at 当起点——那是落盘时间，手工拷的/上次进程留下的
-        # 都算，会把「真强制换新」也误杀掉。
         if force and self._last_renew_at and record is not None and record.is_usable:
             since = time.time() - self._last_renew_at
             if since < RENEW_COOLDOWN:
@@ -1217,7 +1077,6 @@ class CdpStokenProvider:
                     self._persist(record.token, record.expires_at, record.minted_at, record.source)
                 return record.token
 
-        # 过期 / 强制 / 压根没有
         reason = "强制换新" if force else ("已过期" if record else "还没有")
         logger.info("%s %s，拉 Chrome（CDP）重取一枚", C.STOKEN_COOKIE, reason)
         new = self._to_record(self.acquire())
@@ -1229,7 +1088,7 @@ class CdpStokenProvider:
 
     @staticmethod
     def _to_record(raw: Any) -> StokenRecord:
-        """``acquire`` 的三种回包：CDP 的 Cookie 结构 / 记录 / 光字符串。"""
+        """`acquire` 的三种回包：CDP 的 Cookie 结构 / 记录 / 光字符串。"""
         if isinstance(raw, StokenRecord):
             return raw
         if isinstance(raw, Mapping):
@@ -1241,12 +1100,11 @@ class CdpStokenProvider:
             source="cdp",
         )
 
-    # ------------------------------------------------------------------ #
-    # 真 Chrome 那一段
-    # ------------------------------------------------------------------ #
-
     def _acquire_from_chrome(self) -> dict[str, Any]:
-        """拉 Chrome 算一枚，返回 CDP 的 Cookie 结构（含 ``expires``）。"""
+        """拉 Chrome 算一枚，返回 CDP 的 Cookie 结构（含 `expires`）。
+
+        先把旧的过期掉再重载，逼站点重算。
+        """
         client = connect_or_launch(
             chrome=self.chrome, port=self.port, profile_dir=self.profile_dir, mode=self.mode
         )
@@ -1254,8 +1112,6 @@ class CdpStokenProvider:
             login = _session_cookies(self.http)
             client.set_login_cookies(login)
             _, session_id = client.open_page(self.page_url)
-            # 先把旧的过期掉再重载：否则站点看到 Cookie 还在就不重算，
-            # force 换新时拿到的还是同一枚被拒过的令牌。
             client.clear_cookie(C.STOKEN_COOKIE, session_id=session_id)
             client.reload(session_id=session_id)
             cookie = client.wait_for_cookie(C.STOKEN_COOKIE, timeout=self.timeout)
@@ -1264,20 +1120,17 @@ class CdpStokenProvider:
             return dict(cookie)
         finally:
             if _keep_browser():
-                client.close()          # 只断开，Chrome 留着本进程内下次秒连
+                client.close()
             else:
                 try:
-                    client.call("Browser.close", timeout=5.0)   # 让 Chrome 自己退
+                    client.call("Browser.close", timeout=5.0)
                 except StokenError:  # pragma: no cover - 已经退了也算
                     pass
                 finally:
                     client.close()
 
-    # ------------------------------------------------------------------ #
-    # 落盘
-    # ------------------------------------------------------------------ #
-
     def _persist(self, token: str, expires_at: float, minted_at: float, source: str) -> None:
+        """把令牌写进账本、会话 Cookie，并镜像回 `doc('session')`。"""
         record = StokenRecord(
             token=token, minted_at=minted_at, expires_at=expires_at, source=source
         )
@@ -1287,12 +1140,13 @@ class CdpStokenProvider:
         self._mirror_session(token)
 
     def _apply_cookie(self, token: str, expires_at: float) -> None:
-        from .stoken import put_cookie  # 延迟导入
+        """把令牌写进会话 cookiejar（带过期时间）。"""
+        from .stoken import put_cookie
 
         put_cookie(self.http.cookies, C.STOKEN_COOKIE, token, expires=int(expires_at))
 
     def _mirror_session(self, token: str) -> None:
-        """把 token 写回 ``doc('session')``，让 ``http_from_session`` 老规矩继续生效。"""
+        """把 token 写回 `doc('session')`，让 `http_from_session` 老规矩继续生效。"""
         if not self.session_path:
             return
         try:
@@ -1318,12 +1172,8 @@ class CdpStokenProvider:
             logger.debug("镜像 %s 到 %s 失败（忽略）：%s", C.STOKEN_COOKIE, path, exc)
 
 
-# --------------------------------------------------------------------------- #
-# 小工具
-# --------------------------------------------------------------------------- #
-
-
 def _read_cookie(http: Any, name: str) -> str:
+    """从会话 cookiejar 取一枚 cookie 的值；取不到或异常都返回空串。"""
     jar = getattr(http, "cookies", None)
     if jar is None:
         return ""
@@ -1337,7 +1187,7 @@ def _read_cookie(http: Any, name: str) -> str:
 
 
 def _session_cookies(http: Any) -> dict[str, str]:
-    """从会话 cookiejar 里把 ``.zhipin.com`` 的登录 Cookie 抠出来。"""
+    """从会话 cookiejar 里把登录 Cookie 抠出来。"""
     jar = getattr(http, "cookies", None)
     if jar is None:
         return {}

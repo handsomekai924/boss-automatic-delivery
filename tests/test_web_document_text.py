@@ -1,9 +1,6 @@
-"""Word / PDF 简历抽正文。
+"""Word / PDF 简历正文抽取测试。
 
-用户手里的简历九成是 .docx 或 .pdf，所以这条路必须能走通，且**失败时说的话
-得能照着做**（扫描件、老 .doc、加密 PDF 各有一条专属提示）。
-
-这里自己造最小的 .docx / .pdf 样本，不往仓库里塞二进制测试文件。
+自造最小 .docx / .pdf 样本，覆盖抽取结果、失败提示与上传接口。
 """
 
 from __future__ import annotations
@@ -18,13 +15,8 @@ from boss_web.app import create_app
 from boss_web.services import document_text as dt
 
 
-# --------------------------------------------------------------------------- #
-# 样本构造
-# --------------------------------------------------------------------------- #
-
-
 def make_docx(*, with_table: bool = True, empty: bool = False) -> bytes:
-    """造一份带表格的 .docx——简历最常见的排版就是表格。"""
+    """造一份带段落和表格的 .docx 样本。"""
     from docx import Document
 
     document = Document()
@@ -44,7 +36,7 @@ def make_docx(*, with_table: bool = True, empty: bool = False) -> bytes:
 
 
 def make_pdf(text: str = "Zhang San", *, blank: bool = False) -> bytes:
-    """手搓一份最小 PDF。pypdf 只会读不会写文字，所以自己拼对象表。"""
+    """手搓一份只含单行文字的最小 PDF 样本。"""
     content = b"" if blank else f"BT /F1 24 Tf 72 700 Td ({text}) Tj ET".encode("latin-1")
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -75,6 +67,7 @@ def make_pdf(text: str = "Zhang San", *, blank: bool = False) -> bytes:
 
 
 def make_encrypted_pdf(password: str = "s3cret") -> bytes:
+    """造一份带密码的加密 PDF 样本。"""
     from pypdf import PdfWriter
 
     writer = PdfWriter()
@@ -87,12 +80,8 @@ def make_encrypted_pdf(password: str = "s3cret") -> bytes:
 
 @pytest.fixture
 def client():
+    """提供不抛服务端异常的测试客户端。"""
     return TestClient(create_app(), raise_server_exceptions=False)
-
-
-# --------------------------------------------------------------------------- #
-# 后缀判定
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -108,50 +97,48 @@ def client():
     ],
 )
 def test_ext_of(name, expected):
+    """验后缀提取统一转小写并正确处理无后缀。"""
     assert dt.ext_of(name) == expected
 
 
 def test_allowed_ext_covers_word_and_pdf():
+    """验允许后缀覆盖 Word 与 PDF。"""
     assert {".docx", ".pdf"} <= dt.ALLOWED_EXT
 
 
 def test_extract_text_defers_markdown_and_text_to_caller():
-    """纯文本不走抽取——交回调用方按编码解码，行为与改造前一致。"""
+    """验纯文本不走抽取、交回调用方。"""
     assert dt.extract_text("## 技能".encode(), "a.md") is None
     assert dt.extract_text("普通文本".encode("gbk"), "a.txt") is None
     assert dt.extract_text(b"xx", "a.exe") is None
 
 
-# --------------------------------------------------------------------------- #
-# Word
-# --------------------------------------------------------------------------- #
-
-
 def test_docx_extracts_paragraphs_and_tables():
+    """验 docx 段落与表格内容都能抽出。"""
     text = dt.extract_text(make_docx(), "简历.docx")
 
     assert "张三" in text
     assert "13800138000" in text
-    # 表格内容也要抽出来，否则用表格排版的简历会变成空白
     assert "示例科技" in text
     assert "Python、FastAPI" in text
     assert "热爱工程化" in text
 
 
 def test_docx_keeps_document_order():
-    """段落和表格必须按原文顺序出现（先段落再表格会把经历和技能串位）。"""
+    """验 docx 段落与表格保持原文顺序。"""
     text = dt.extract_text(make_docx(), "简历.docx")
     assert text.index("张三") < text.index("工作经历") < text.index("热爱工程化")
 
 
 def test_docx_empty_raises_friendly_error():
+    """验空 docx 抛出可读的友好错误。"""
     with pytest.raises(dt.DocumentTextError) as ei:
         dt.extract_text(make_docx(empty=True), "空.docx")
     assert "没有文字" in str(ei.value)
 
 
 def test_old_doc_format_is_told_to_convert():
-    """`.doc` 是另一种二进制格式，python-docx 读不了——得教用户另存为。"""
+    """验旧 .doc 格式提示用户另存为。"""
     with pytest.raises(dt.DocumentTextError) as ei:
         dt.extract_text(b"\xd0\xcf\x11\xe0old binary", "老简历.docx")
     assert "另存为" in str(ei.value)
@@ -159,6 +146,7 @@ def test_old_doc_format_is_told_to_convert():
 
 
 def test_corrupt_docx_does_not_leak_exception_class():
+    """验损坏 docx 不泄漏异常类名。"""
     with pytest.raises(dt.DocumentTextError) as ei:
         dt.extract_text(b"not a zip at all", "坏.docx")
     message = str(ei.value)
@@ -166,18 +154,14 @@ def test_corrupt_docx_does_not_leak_exception_class():
     assert "BadZipFile" not in message
 
 
-# --------------------------------------------------------------------------- #
-# PDF
-# --------------------------------------------------------------------------- #
-
-
 def test_pdf_extracts_text():
+    """验 PDF 正文能抽出。"""
     text = dt.extract_text(make_pdf("Zhang San Python"), "简历.pdf")
     assert "Zhang San" in text
 
 
 def test_scanned_pdf_gets_scan_specific_hint():
-    """扫描件是最常见的失败原因，提示必须点名「扫描件 / 图片」，不能只说读不出。"""
+    """验扫描件给出扫描专属提示。"""
     with pytest.raises(dt.DocumentTextError) as ei:
         dt.extract_text(make_pdf(blank=True), "扫描件.pdf")
     message = str(ei.value)
@@ -186,28 +170,27 @@ def test_scanned_pdf_gets_scan_specific_hint():
 
 
 def test_encrypted_pdf_tells_user_to_remove_password():
+    """验加密 PDF 提示去除密码。"""
     with pytest.raises(dt.DocumentTextError) as ei:
         dt.extract_text(make_encrypted_pdf(), "加密.pdf")
     assert "密码" in str(ei.value)
 
 
 def test_corrupt_pdf_does_not_leak_exception_class():
+    """验损坏 PDF 不泄漏异常类名。"""
     with pytest.raises(dt.DocumentTextError) as ei:
         dt.extract_text(b"%PDF-1.4 garbage", "坏.pdf")
     assert "PdfReadError" not in str(ei.value)
 
 
 def test_tidy_collapses_blank_runs():
+    """验 `_tidy` 压缩连续空行与行尾空白。"""
     assert dt._tidy("a\n\n\n\n\nb") == "a\n\nb"
     assert dt._tidy("a  \nb") == "a\nb"
 
 
-# --------------------------------------------------------------------------- #
-# 上传接口
-# --------------------------------------------------------------------------- #
-
-
 def test_upload_docx(client):
+    """验上传 docx 抽出正文并原样落库。"""
     r = client.post(
         "/api/resume/upload",
         files={
@@ -227,6 +210,7 @@ def test_upload_docx(client):
 
 
 def test_upload_pdf(client):
+    """验上传 PDF 成功返回简历编号。"""
     r = client.post(
         "/api/resume/upload",
         files={"file": ("简历.pdf", make_pdf("Li Si"), "application/pdf")},
@@ -238,6 +222,7 @@ def test_upload_pdf(client):
 
 
 def test_upload_broken_docx_returns_actionable_422(client):
+    """验损坏 docx 返回可操作的 422。"""
     r = client.post(
         "/api/resume/upload",
         files={"file": ("简历.docx", b"garbage", "application/octet-stream")},
@@ -247,7 +232,7 @@ def test_upload_broken_docx_returns_actionable_422(client):
 
 
 def test_reject_message_mentions_word_and_pdf(client):
-    """别再只写「只支持 Markdown」——用户手里根本没有 Markdown。"""
+    """验拒绝消息点名 Word 与 PDF。"""
     r = client.post(
         "/api/resume/upload",
         files={"file": ("resume.doc", b"xx", "application/msword")},
@@ -258,19 +243,19 @@ def test_reject_message_mentions_word_and_pdf(client):
 
 
 def test_binary_resumes_get_a_larger_size_ceiling(client, monkeypatch):
-    """带照片的 Word/PDF 很容易超 2MB，纯文本的 2MB 限制不该套在它们头上。"""
+    """验二进制简历有更大的体积上限。"""
     assert MAX_BINARY_BYTES > 2 * 1024 * 1024
 
     r = client.post(
         "/api/resume/upload",
         files={"file": ("大简历.docx", b"x" * (3 * 1024 * 1024), "application/octet-stream")},
     )
-    # 3MB 的 Word 通过体积检查，倒在「读不出来」上——证明没被 2MB 卡死
     assert r.status_code == 422
     assert "超过" not in r.json()["message"]
 
 
 def test_text_resume_still_capped_at_2mb(client):
+    """验纯文本简历仍受 2MB 上限约束。"""
     r = client.post(
         "/api/resume/upload",
         files={"file": ("big.txt", b"x" * (3 * 1024 * 1024), "text/plain")},

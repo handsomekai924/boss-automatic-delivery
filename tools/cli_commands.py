@@ -1,6 +1,6 @@
 """列出项目里所有模块的命令与子命令。
 
-独立脚本：不依赖登录/筛选的业务逻辑，只introspect 各模块 ``cli.build_parser()``
+独立脚本：不依赖登录/筛选的业务逻辑，只 introspect 各模块 `cli.build_parser()`
 构造出来的 argparse 解析器，所以新增命令后不用改这里。
 
     python tools/cli_commands.py                # 人读表格
@@ -19,18 +19,18 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-#: 项目根（tools 的上一级），用来找包
 ROOT = Path(__file__).resolve().parent.parent
-
-
-# --------------------------------------------------------------------------- #
-# 数据
-# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
 class Option:
-    """一个命令行选项（``--json`` / ``--out PATH`` 这种）。"""
+    """一个命令行选项（`--json` / `--out PATH` 这种）。
+
+    Attributes:
+        flags: 选项名，多个用 ` / ` 连接。
+        help: 一行帮助文案。
+        default: 展示用的默认值；无默认值为 `None`。
+    """
 
     flags: str
     help: str = ""
@@ -39,7 +39,13 @@ class Option:
 
 @dataclass(frozen=True)
 class Command:
-    """一个子命令；``options`` 是它自己的选项（含父解析器并进来的）。"""
+    """一个子命令；`options` 是它自己的选项（含父解析器并进来的）。
+
+    Attributes:
+        name: 子命令名。
+        help: 一行帮助文案。
+        options: 该子命令的选项表。
+    """
 
     name: str
     help: str = ""
@@ -48,7 +54,14 @@ class Command:
 
 @dataclass(frozen=True)
 class ModuleCli:
-    """一个可执行模块：``python -m <name> <command> …``。"""
+    """一个可执行模块：`python -m <name> <command> …`。
+
+    Attributes:
+        name: 包名。
+        help: 模块文档字符串首行。
+        commands: 子命令表。
+        global_options: 挂在父解析器上的选项表。
+    """
 
     name: str
     help: str = ""
@@ -56,13 +69,8 @@ class ModuleCli:
     global_options: tuple[Option, ...] = field(default_factory=tuple)
 
 
-# --------------------------------------------------------------------------- #
-# argparse 挖掘
-# --------------------------------------------------------------------------- #
-
-
 def _option_from_action(action) -> Option | None:
-    """把 argparse 的 action 压成 :class:`Option`；不是选项就返回 None。"""
+    """把 argparse 的 action 压成 `Option`；不是选项就返回 `None`。"""
     flags = " / ".join(action.option_strings or ())
     if not flags:
         return None
@@ -99,12 +107,12 @@ def _subparsers_of(parser: argparse.ArgumentParser) -> dict[str, argparse.Argume
 
 
 def _subcommand_help(action) -> dict[str, str]:
-    """子命令的一行帮助。argparse 把它挂在 ``_choices_actions`` 上，不在解析器上。"""
+    """子命令的一行帮助。argparse 把它挂在 `_choices_actions` 上，不在解析器上。"""
     return {item.dest: (item.help or "").strip() for item in getattr(action, "_choices_actions", [])}
 
 
 def walk_parser(parser: argparse.ArgumentParser, name: str, help_text: str = "") -> ModuleCli:
-    """把一个 ``build_parser()`` 的结果摊平成 :class:`ModuleCli`。"""
+    """把一个 `build_parser()` 的结果摊平成 `ModuleCli`。"""
     commands: list[Command] = []
     help_map: dict[str, str] = {}
     for action in parser._actions:  # noqa: SLF001
@@ -131,17 +139,12 @@ def walk_parser(parser: argparse.ArgumentParser, name: str, help_text: str = "")
     )
 
 
-# --------------------------------------------------------------------------- #
-# 模块发现
-# --------------------------------------------------------------------------- #
-
-
 def discover_modules(only: str | None = None) -> list[ModuleCli]:
-    """在项目根下找带 ``cli.build_parser`` 的包，逐个挖命令。
+    """在项目根下找带 `cli.build_parser` 的包，逐个挖命令。
 
-    :param only: 只看这个模块名（如 ``boss_filter``）；不给就全看。
+    Args:
+        only: 只看这个模块名（如 `boss_filter`）；不给就全看。
     """
-    # 本脚本可能从 tools/ 直接跑，项目根不一定在 sys.path 上
     root_str = str(ROOT)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
@@ -154,7 +157,7 @@ def discover_modules(only: str | None = None) -> list[ModuleCli]:
             continue
         try:
             cli = importlib.import_module(f"{info.name}.cli")
-        except Exception:  # 没有 cli 子模块，或导入失败——不当成命令行模块
+        except Exception:
             continue
         build = getattr(cli, "build_parser", None)
         if build is None:
@@ -163,11 +166,6 @@ def discover_modules(only: str | None = None) -> list[ModuleCli]:
         doc = (sys.modules[cli.__name__].__doc__ or "").strip().splitlines()
         found.append(walk_parser(parser, info.name, doc[0] if doc else ""))
     return found
-
-
-# --------------------------------------------------------------------------- #
-# 输出
-# --------------------------------------------------------------------------- #
 
 
 def _fmt_option(opt: Option) -> str:
@@ -179,6 +177,7 @@ def _fmt_option(opt: Option) -> str:
 
 
 def to_json(modules: list[ModuleCli], *, with_options: bool = False) -> str:
+    """把命令表序列化成 JSON 字符串。"""
     payload = []
     for mod in modules:
         item = {"module": mod.name, "help": mod.help, "commands": []}
@@ -194,6 +193,7 @@ def to_json(modules: list[ModuleCli], *, with_options: bool = False) -> str:
 
 
 def to_text(modules: list[ModuleCli], *, with_options: bool = False) -> str:
+    """把命令表渲染成人读文本。"""
     lines: list[str] = []
     for mod in modules:
         lines.append(f"python -m {mod.name}  {('- ' + mod.help) if mod.help else ''}".rstrip())
@@ -214,12 +214,8 @@ def to_text(modules: list[ModuleCli], *, with_options: bool = False) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-# --------------------------------------------------------------------------- #
-# 入口
-# --------------------------------------------------------------------------- #
-
-
 def build_parser() -> argparse.ArgumentParser:
+    """构造本脚本的命令行解析器。"""
     parser = argparse.ArgumentParser(
         prog="cli_commands",
         description="列出项目里所有模块的命令与子命令",
@@ -233,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """打印命令表；一个模块都没找到时返回 2。"""
     _force_utf8_streams()
     args = build_parser().parse_args(argv)
     modules = discover_modules(only=args.module)

@@ -1,19 +1,17 @@
 """CDP 网络抓包：附着到带调试口的 Chrome，把整个浏览器实例的请求落盘。
 
+产物在会话目录里：`index.jsonl` 一行一个请求（请求头/参数/响应头/正文路径），
+`bodies/` 是响应体，`post/` 是 POST 正文，`websocket.jsonl` 是 WS 握手与逐帧流水。
+
+默认档（`--preset all`）只排 HTML/CSS/JS，图片和字体也会落盘，抓久了目录会很大。
+实抓接口和 MQTT over WS 用 `--preset api`。本工具默认只附着，退出时不关那台 Chrome；
+只有 `--launch` 自己拉起来的才走 `boss_jobs.cdp_stoken` 的退出收尾。
+
 用法：
 
     chrome.exe --remote-debugging-port=9222 --user-data-dir=<临时目录>
     python tools/capture_net.py --preset api --out data/capture/try1
     # 在页面里点几下，然后 Ctrl+C 收工
-
-产物在会话目录里：``index.jsonl`` 一行一个请求（请求头/参数/响应头/正文路径），
-``bodies/`` 是响应体，``post/`` 是 POST 正文，``websocket.jsonl`` 是 WS 握手与逐帧流水。
-
-**默认档（``--preset all``）严格照「非 JS/CSS/HTML」的字面意思**，图片和字体也会落盘，
-抓久了目录会很大。实抓接口和 MQTT over WS 用 ``--preset api``，输出小一个数量级。
-
-**本工具默认只附着，退出时绝不关你那台 Chrome。** 只有 ``--launch``（自己拉起来的那台）
-才走 ``boss_jobs.cdp_stoken`` 的退出收尾。
 """
 
 from __future__ import annotations
@@ -62,6 +60,7 @@ def _force_utf8_streams() -> None:
 
 
 def _setup_logging(verbose: bool) -> None:
+    """按 verbose 配置根日志级别。"""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
@@ -69,6 +68,7 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构造命令行解析器。"""
     parser = argparse.ArgumentParser(
         prog="capture_net.py",
         description="附着到带调试口的 Chrome，把整个浏览器实例的网络请求落盘",
@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _port_hint(explicit: int | None) -> str:
+    """给出调试口端口提示文案。"""
     if explicit:
         return str(explicit)
     return os.environ.get(CDP_PORT_ENV, "") or str(DEFAULT_CDP_PORT)
@@ -154,6 +155,7 @@ def _launch_and_probe(port: int | None, *, timeout: float = 20.0) -> str:
 
 
 def _print_summary(summary: CC.CaptureSummary) -> None:
+    """打印抓包收工摘要。"""
     print()
     print(f"✓ 收工（{summary.stop_reason}）")
     print(f"  请求：{summary.requests_total} 条命中，写入 {summary.requests_written} 行，"
@@ -169,6 +171,7 @@ def _print_summary(summary: CC.CaptureSummary) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """附着 Chrome 抓包并落盘；找不到调试口或抓包失败时返回 1。"""
     _force_utf8_streams()
     args = build_parser().parse_args(argv)
     _setup_logging(args.verbose)

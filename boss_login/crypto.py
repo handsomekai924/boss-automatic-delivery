@@ -1,22 +1,9 @@
-"""AES 加密 —— 复刻登录页的 ``re(plain, atob(E))``。
+"""AES 加解密，对齐登录页 `re(plain, atob(E))` 的输出形状。
 
-来源是按需加载的 webpack chunk ``user-login.5398946e.js``（zhipin-sign/v5330）。
-登录页里 ``re`` 被用了两次，明文不同、密钥和算法完全一样::
+算法为 AES-128-CBC + Pkcs7，随机 16 字节 IV，结果为 `base64(iv ‖ ciphertext)`。
 
-    je():        phone → encryptedAccount      （短信登录的表单）
-    scanJump():  fingerprint → fp              （扫码登录 dispatcher 的 query）
-
-``re(plaintext, key)`` 是 CryptoJS 默认参数下的 AES：
-
-    key        = Utf8.parse(atob("clRwXUJBK1VKK0k0IWFbbQ=="))
-    iv         = WordArray.random(16)
-    ciphertext = AES.encrypt(Utf8.parse(plaintext), key, {iv}).ciphertext
-    return     = Base64.stringify(iv.concat(ciphertext))
-
-也就是 **AES-128-CBC + Pkcs7**，随机 16 字节 IV，输出 ``base64(iv ‖ ciphertext)``。
-密钥是写死的 16 个 ASCII 字节（``atob`` 之后全是 < 0x80，所以 Utf8.parse 不改变它）。
-
-**只做协议对齐**：这层只是把字符串按线上形状装进请求，不涉及任何风控绕过。
+Attributes:
+    ACCOUNT_AES_KEY: AES-128 密钥，16 字节。
 """
 
 from __future__ import annotations
@@ -27,7 +14,6 @@ import os
 from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-#: ``atob("clRwXUJBK1VKK0k0IWFbbQ==")`` —— 16 字节，AES-128
 ACCOUNT_AES_KEY: bytes = base64.b64decode("clRwXUJBK1VKK0k0IWFbbQ==")
 
 _BLOCK_BITS = 128
@@ -35,11 +21,14 @@ _IV_SIZE = 16
 
 
 def encrypt_text(plaintext: str, *, iv: bytes | None = None) -> str:
-    """登录页那个 ``re(plain, atob(E))``：AES-128-CBC + Pkcs7，``base64(iv‖ct)``。
+    """AES-128-CBC + Pkcs7 加密，输出 `base64(iv ‖ ciphertext)`。
 
-    :param plaintext: 明文（UTF-8 编码）
-    :param iv:        可注入的 16 字节 IV，默认 ``os.urandom(16)``。给测试对拍用。
-    :returns:         ``base64(iv ‖ ciphertext)``，与 CryptoJS 的输出同形
+    Args:
+        plaintext: 明文，按 UTF-8 编码。
+        iv: 可注入的 16 字节 IV，缺省随机；供测试对拍。长度不符时抛 `ValueError`。
+
+    Returns:
+        与 CryptoJS 同形的密文字符串；空明文返回空串。
     """
     if not plaintext:
         return ""
@@ -55,15 +44,14 @@ def encrypt_text(plaintext: str, *, iv: bytes | None = None) -> str:
 
 
 def encrypt_account(phone: str, *, iv: bytes | None = None) -> str:
-    """把手机号加密成 ``encryptedAccount``。:func:`encrypt_text` 的别名。"""
+    """把手机号加密成 `encryptedAccount`；`encrypt_text` 的别名。"""
     return encrypt_text(phone, iv=iv)
 
 
 def decrypt_text(token: str) -> str:
-    """:func:`encrypt_text` 的逆运算。
+    """`encrypt_text` 的逆运算；格式非法时抛 `ValueError`。
 
-    线上用不到（服务端解），放这里是因为本地假服务端要从 ``encryptedAccount``
-    还原出手机号才能记账，顺带也能对拍加密是否与 CryptoJS 一致。
+    线上用不到（服务端解），供本地假服务端还原手机号、对拍加密结果。
     """
     if not token:
         return ""
@@ -78,5 +66,5 @@ def decrypt_text(token: str) -> str:
 
 
 def decrypt_account(token: str) -> str:
-    """:func:`encrypt_account` 的逆运算。:func:`decrypt_text` 的别名。"""
+    """`encrypt_account` 的逆运算；`decrypt_text` 的别名。"""
     return decrypt_text(token)

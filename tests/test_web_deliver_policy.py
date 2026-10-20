@@ -1,6 +1,6 @@
 """投递策略：mode=all 排除、selected/manual 确认、匹配时快照不可变。
 
-规矩：假发送客户端，不打真网络。策略读的是 **analysis 里那份匹配时快照**，
+规矩：假发送客户端，不打真网络。策略读的是 analysis 里那份匹配时快照，
 不在发送中途重算当前规则。
 """
 
@@ -17,7 +17,6 @@ from boss_web import create_app
 from boss_web.services.deliver_task import DeliverTaskManager
 from boss_web.services.resume_store import load_analysis, save_analysis
 
-# 匹配时安全快照的必备字段（缺一就当旧分析，自动投递一律拒）
 SAFETY_FIELDS = (
     "is_blacklisted",
     "company_blacklisted",
@@ -30,12 +29,14 @@ SAFETY_FIELDS = (
 
 
 class FakeGreetClient:
-    """假 ``JobClient``：只记录 ``deliver_greeting`` 调用，不打网络。"""
+    """假 `JobClient`：只记录 `deliver_greeting` 调用，不打网络。"""
 
     def __init__(self) -> None:
+        """初始化。"""
         self.calls: list[dict] = []
 
     def deliver_greeting(self, **kwargs):
+        """记录一次招呼投递并返回成功结果。"""
         from boss_jobs import GreetingDelivery
 
         self.calls.append(kwargs)
@@ -44,10 +45,12 @@ class FakeGreetClient:
 
 @pytest.fixture
 def client():
+    """起一个不带真实依赖的测试客户端。"""
     return TestClient(create_app())
 
 
 def _match(jid: str, **overrides) -> dict:
+    """造一条基础匹配项。"""
     item = {
         "encrypt_job_id": jid,
         "job_name": f"岗位 {jid}",
@@ -80,6 +83,7 @@ def _safe(jid: str, **overrides) -> dict:
 
 
 def _seed(matches, analysis_id: str = "an_p1") -> str:
+    """把匹配列表落成 analysis 并返回 id。"""
     return save_analysis(
         {
             "analysis_id": analysis_id,
@@ -93,6 +97,7 @@ def _seed(matches, analysis_id: str = "an_p1") -> str:
 
 
 def _wait(mgr, timeout: float = 5.0) -> dict:
+    """等发送任务结束并返回快照。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         snap = mgr.snapshot()
@@ -103,7 +108,7 @@ def _wait(mgr, timeout: float = 5.0) -> dict:
 
 
 def _run(matches, *, mode="selected", confirmed=False, confirmation_token="", job_ids=None, min_score=None):
-    """起任务、等结束，回 ``(snapshot, fake_client, analysis_id)``。"""
+    """起任务、等结束，回 `(snapshot, fake_client, analysis_id)`。"""
     aid = _seed(matches)
     fake = FakeGreetClient()
     mgr = DeliverTaskManager(client_factory=lambda: fake, sleeper=lambda _s: None, interval=0.0)
@@ -123,15 +128,12 @@ def _run(matches, *, mode="selected", confirmed=False, confirmation_token="", jo
 
 
 def _items_by_id(snap: dict) -> dict[str, dict]:
+    """把快照里的发送明细按职位 id 索引。"""
     return {i["encrypt_job_id"]: i for i in snap.get("items") or []}
 
 
-# --------------------------------------------------------------------------- #
-# mode=all：服务端排除受限项，skipped 不是 failed，且不打发送客户端
-# --------------------------------------------------------------------------- #
-
-
 def test_all_排除公司黑名单且不调客户端():
+    """mode=all 排除公司黑名单且不调客户端。"""
     snap, fake, _ = _run(
         [_safe("j1"), _safe("j2", company_blacklisted=True, is_blacklisted=True)],
         mode="all",
@@ -147,6 +149,7 @@ def test_all_排除公司黑名单且不调客户端():
 
 
 def test_all_排除JD黑名单():
+    """mode=all 排除 JD 黑名单。"""
     snap, fake, _ = _run(
         [_safe("j1"), _safe("j2", jd_blacklisted=True, is_blacklisted=True)],
         mode="all",
@@ -157,6 +160,7 @@ def test_all_排除JD黑名单():
 
 
 def test_all_排除JD未检查():
+    """mode=all 排除 JD 未检查项。"""
     snap, fake, _ = _run(
         [_safe("j1"), _safe("j2", jd_rule_checked=False, auto_delivery_blocked=True)],
         mode="all",
@@ -166,6 +170,7 @@ def test_all_排除JD未检查():
 
 
 def test_all_排除JD状态不完整():
+    """mode=all 排除 JD 状态不完整项。"""
     snap, fake, _ = _run(
         [_safe("j1"), _safe("j2", jd_status="failed")],
         mode="all",
@@ -175,6 +180,7 @@ def test_all_排除JD状态不完整():
 
 
 def test_all_排除缺少招呼语():
+    """mode=all 排除缺少招呼语的项。"""
     snap, fake, _ = _run(
         [_safe("j1"), _safe("j2", greeting="   ")],
         mode="all",
@@ -184,6 +190,7 @@ def test_all_排除缺少招呼语():
 
 
 def test_all_排除低于阈值():
+    """mode=all 排除低于分数阈值的项。"""
     snap, fake, _ = _run(
         [_safe("j1"), _safe("j2", match_score=50)],
         mode="all",
@@ -205,6 +212,7 @@ def test_all_旧分析缺安全快照一律拒():
 
 
 def test_all_快照缺一个字段也不算完整():
+    """安全快照缺一字段即判不完整。"""
     item = _safe("j1")
     item.pop("auto_delivery_blocked")
     snap, fake, _ = _run([item], mode="all")
@@ -214,7 +222,7 @@ def test_all_快照缺一个字段也不算完整():
 
 
 def test_all_跳过30天内已发送的():
-    """一键发送也走 30 天冷却：``delivered_at`` 是最近 → 跳过、不打客户端。"""
+    """一键发送也走 30 天冷却：`delivered_at` 是最近 → 跳过、不打客户端。"""
     snap, fake, _ = _run(
         [_safe("j1", delivered_at=time.time() - 10), _safe("j2")],
         mode="all",
@@ -227,6 +235,7 @@ def test_all_跳过30天内已发送的():
 
 
 def test_all_全部受限时零发送且任务done():
+    """全部受限时零发送且任务收尾。"""
     snap, fake, _ = _run(
         [
             _safe("j1", company_blacklisted=True),
@@ -243,6 +252,7 @@ def test_all_全部受限时零发送且任务done():
 
 
 def test_all_混杂时只发合格的():
+    """混杂场景只发合格项。"""
     snap, fake, _ = _run(
         [
             _safe("ok1"),
@@ -259,12 +269,8 @@ def test_all_混杂时只发合格的():
     assert sent == ["sec-ok1", "sec-ok2"]
 
 
-# --------------------------------------------------------------------------- #
-# mode=selected：受限项要汇总确认
-# --------------------------------------------------------------------------- #
-
-
 def test_selected_受限未确认_整批拒发():
+    """selected 模式受限未确认时整批拒发。"""
     snap, fake, _ = _run(
         [_safe("ok1"), _safe("bad", company_blacklisted=True)],
         mode="selected",
@@ -280,6 +286,7 @@ def test_selected_受限未确认_整批拒发():
 
 
 def test_selected_受限已确认_按清单发():
+    """selected 受限已确认后按清单发送。"""
     snap, fake, _ = _run(
         [_safe("ok1"), _safe("bad", company_blacklisted=True)],
         mode="selected",
@@ -291,18 +298,15 @@ def test_selected_受限已确认_按清单发():
 
 
 def test_selected_无不受限项_不需确认直接发():
+    """selected 无受限项时不需确认直接发。"""
     snap, fake, _ = _run([_safe("j1"), _safe("j2")], mode="selected", confirmed=False)
     assert snap["status"] == "done"
     assert snap["ok"] == 2
     assert len(fake.calls) == 2
 
 
-# --------------------------------------------------------------------------- #
-# mode=manual：受限单条要二次确认（token）
-# --------------------------------------------------------------------------- #
-
-
 def test_manual_受限只有confirmed还不够():
+    """manual 受限单条仅 confirmed 不够。"""
     snap, fake, _ = _run(
         [_safe("bad", company_blacklisted=True)],
         mode="manual",
@@ -315,6 +319,7 @@ def test_manual_受限只有confirmed还不够():
 
 
 def test_manual_受限带token才发():
+    """manual 受限单条带 token 才发。"""
     snap, fake, _ = _run(
         [_safe("bad", company_blacklisted=True)],
         mode="manual",
@@ -327,20 +332,15 @@ def test_manual_受限带token才发():
 
 
 def test_manual_普通职位不需要token():
+    """manual 普通职位不需要 token。"""
     snap, fake, _ = _run([_safe("j1")], mode="manual", confirmed=False, confirmation_token="")
     assert snap["status"] == "done"
     assert snap["ok"] == 1
 
 
-# --------------------------------------------------------------------------- #
-# 快照不可变：发送只认匹配时那份，不读当前库/当前规则
-# --------------------------------------------------------------------------- #
-
-
 def test_规则事后改掉_仍按匹配时快照拦(tmp_path):
     """匹配时记了公司黑名单；库里的当前状态后来改成干净的，一键发送仍拒。"""
     aid = _seed([_safe("j1", company_blacklisted=True, is_blacklisted=True)])
-    # 当前库状态：干净（规则删了 / 重检翻案了）
     store = JobStore(tmp_path / "boss.db")
     try:
         from boss_jobs.models import Job
@@ -407,12 +407,8 @@ def test_当前库被标黑_匹配快照干净_仍按快照发(tmp_path):
     assert len(fake.calls) == 1
 
 
-# --------------------------------------------------------------------------- #
-# API 契约
-# --------------------------------------------------------------------------- #
-
-
 def test_api_start_接受mode与确认字段(client: TestClient, monkeypatch):
+    """API start 接受 mode 与确认字段。"""
     import boss_web.api.deliver as api_deliver
 
     fake = FakeGreetClient()
@@ -440,6 +436,7 @@ def test_api_start_接受mode与确认字段(client: TestClient, monkeypatch):
 
 
 def test_api_拒绝未知mode(client: TestClient, monkeypatch):
+    """API 拒绝未知 mode。"""
     import boss_web.api.deliver as api_deliver
 
     mgr = DeliverTaskManager(client_factory=FakeGreetClient, sleeper=lambda _s: None, interval=0.0)
@@ -459,7 +456,6 @@ def test_api_旧客户端默认selected拿不到all权限(client: TestClient, mo
     fake = FakeGreetClient()
     mgr = DeliverTaskManager(client_factory=lambda: fake, sleeper=lambda _s: None, interval=0.0)
     monkeypatch.setattr(api_deliver, "deliver_tasks", mgr)
-    # 三条匹配，老客户端只交了其中一条 id；mode 默认 selected，不会自动把另外两条拉进来
     aid = _seed([_safe("j1"), _safe("j2"), _safe("j3")])
     r = client.post("/api/deliver/start", json={"analysis_id": aid, "encrypt_job_ids": ["j1"]})
     assert r.status_code == 200

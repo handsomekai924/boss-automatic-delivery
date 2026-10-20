@@ -1,8 +1,7 @@
 """冻结环境路径解析的单元测试。
 
-这是打包方案的地基：``bootstrap()`` 只要算错一次，用户的简历和登录态就会写进
-PyInstaller 的临时解包目录、关掉程序就没。所以这里的断言全部对着真实路径字符串，
-而不是「跑通就行」。
+打包方案的地基：`bootstrap()` 算错一次，用户数据就会写进临时解包目录。
+这里断言全部对着真实路径字符串，而不是「跑通就行」。
 """
 
 from __future__ import annotations
@@ -21,15 +20,15 @@ from boss_web import runtime
 
 @pytest.fixture(autouse=True)
 def _env_copy(monkeypatch):
-    """``bootstrap()`` 直接写 ``os.environ``（不走 monkeypatch），
+    """用环境副本跑，免得污染别的测试。
 
-    整个环境用副本跑，收尾由 monkeypatch 换回原对象，免得污染别的测试。
+    `bootstrap()` 直接写 `os.environ`（不走 monkeypatch），收尾由 monkeypatch 换回原对象。
     """
     monkeypatch.setattr(os, "environ", os.environ.copy())
 
 
 def _fake_frozen(monkeypatch, tmp_path: Path, *, exe_dir: Path | None = None) -> Path:
-    """把进程伪装成打包后的 exe；返回 ``_MEIPASS``。"""
+    """把进程伪装成打包后的 exe；返回 `_MEIPASS`。"""
     meipass = tmp_path / "_MEI12345"
     meipass.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -38,12 +37,8 @@ def _fake_frozen(monkeypatch, tmp_path: Path, *, exe_dir: Path | None = None) ->
     return meipass
 
 
-# --------------------------------------------------------------------------- #
-# 只读资源根
-# --------------------------------------------------------------------------- #
-
-
 def test_resource_root_dev_is_repo_root(monkeypatch):
+    """验开发态资源根是仓库根。"""
     monkeypatch.delattr(sys, "frozen", raising=False)
     root = runtime.resource_root()
     assert (root / "boss_web" / "runtime.py").is_file(), f"应是仓库根，实际 {root}"
@@ -51,23 +46,21 @@ def test_resource_root_dev_is_repo_root(monkeypatch):
 
 
 def test_resource_root_frozen_is_meipass(monkeypatch, tmp_path):
+    """验打包态资源根是 `_MEIPASS`。"""
     meipass = _fake_frozen(monkeypatch, tmp_path)
     assert runtime.resource_root() == meipass
 
 
 def test_executable_dir_frozen_is_exe_parent(monkeypatch, tmp_path):
+    """验打包态可执行目录是 exe 父目录。"""
     exe_dir = tmp_path / "Desktop"
     exe_dir.mkdir()
     _fake_frozen(monkeypatch, tmp_path, exe_dir=exe_dir)
     assert runtime.executable_dir() == exe_dir
 
 
-# --------------------------------------------------------------------------- #
-# 数据目录
-# --------------------------------------------------------------------------- #
-
-
 def test_app_data_dir_dev_follows_repo(monkeypatch):
+    """验开发态数据目录跟仓库根走。"""
     monkeypatch.delattr(sys, "frozen", raising=False)
     assert runtime.app_data_dir() == runtime.resource_root() / "data"
 
@@ -83,29 +76,29 @@ def test_app_data_dir_frozen_is_portable(monkeypatch, tmp_path):
 
 
 def test_app_data_env_overrides_everything(monkeypatch, tmp_path):
+    """验 `APP_DATA_ENV` 优先于其它路径推断。"""
     monkeypatch.setenv(runtime.APP_DATA_ENV, str(tmp_path / "custom"))
     assert runtime.app_data_dir() == tmp_path / "custom"
 
 
-# --------------------------------------------------------------------------- #
-# 可写性回退
-# --------------------------------------------------------------------------- #
-
-
 def test_ensure_writable_uses_folder_when_ok(tmp_path):
+    """验目录可写时原样返回，且探针文件删干净。"""
     target = tmp_path / "ok"
     assert runtime.ensure_writable(target) == target
     assert not (target / ".write_test").exists(), "探针文件要删干净"
 
 
 def test_ensure_writable_falls_back_to_user_dir(monkeypatch, tmp_path):
-    """exe 放在只读位置（Program Files）时退到 %LOCALAPPDATA%。"""
+    """exe 放在只读位置（Program Files）时退到 %LOCALAPPDATA%。
+
+    目标用文件占住，mkdir 必炸。
+    """
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
 
     blocked = tmp_path / "ProgramFiles" / "data"
     blocked.parent.mkdir()
-    blocked.write_text("我是个文件，不是目录", encoding="utf-8")  # mkdir 必炸
+    blocked.write_text("我是个文件，不是目录", encoding="utf-8")
 
     assert runtime.ensure_writable(blocked) == tmp_path / "local" / "BossAutoDelivery" / "data"
 
@@ -122,11 +115,6 @@ def test_ensure_writable_falls_back_to_temp(monkeypatch, tmp_path):
     local.write_text("也是文件", encoding="utf-8")
 
     assert runtime.ensure_writable(blocked) == tmp_path / "tmp" / "BossAutoDelivery" / "data"
-
-
-# --------------------------------------------------------------------------- #
-# bootstrap
-# --------------------------------------------------------------------------- #
 
 
 def test_bootstrap_dev_is_noop(monkeypatch, tmp_path):
@@ -172,11 +160,14 @@ def test_bootstrap_respects_existing_env(monkeypatch, tmp_path):
 
 
 def test_bootstrap_marks_non_portable_when_falling_back(monkeypatch, tmp_path):
-    """退到用户目录时要如实报告，界面得告诉用户「东西存哪了」。"""
+    """退到用户目录时要如实报告，界面得告诉用户「东西存哪了」。
+
+    exe 目录用文件占住，让它写不了。
+    """
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     exe_dir = tmp_path / "ProgramFiles"
     exe_dir.mkdir()
-    (exe_dir / "data").write_text("挡路的文件", encoding="utf-8")  # 让 exe 目录写不了
+    (exe_dir / "data").write_text("挡路的文件", encoding="utf-8")
     _fake_frozen(monkeypatch, tmp_path, exe_dir=exe_dir)
     monkeypatch.delenv(DB_ENV, raising=False)
 
@@ -198,11 +189,6 @@ def test_bootstrap_force_runs_in_dev(monkeypatch, tmp_path):
     assert os.environ[DB_ENV] == str(tmp_path / "elsewhere" / "boss.db")
 
 
-# --------------------------------------------------------------------------- #
-# 压缩包直开检测
-# --------------------------------------------------------------------------- #
-
-
 def test_is_temp_run_flags_zip_preview(monkeypatch, tmp_path):
     """直接从压缩包预览双击：exe 落在 %TEMP% 下，数据会丢。"""
     temp = tmp_path / "tmp"
@@ -215,6 +201,7 @@ def test_is_temp_run_flags_zip_preview(monkeypatch, tmp_path):
 
 
 def test_is_temp_run_false_for_normal_run(monkeypatch, tmp_path):
+    """验正常目录启动不算临时运行。"""
     exe_dir = tmp_path / "Desktop"
     exe_dir.mkdir()
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
@@ -224,5 +211,6 @@ def test_is_temp_run_false_for_normal_run(monkeypatch, tmp_path):
 
 
 def test_is_temp_run_false_in_dev(monkeypatch):
+    """验开发态不算临时运行。"""
     monkeypatch.delattr(sys, "frozen", raising=False)
     assert runtime.is_temp_run() is False

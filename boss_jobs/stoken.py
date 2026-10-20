@@ -1,80 +1,16 @@
-"""``__zp_stoken__`` 安全网关令牌：来源、算法、全自动获取。
+"""`__zp_stoken__` 安全网关令牌：来源、算法、全自动获取。
 
-来源（逆自 ``.saved_web`` 里的 app~2.1a6c0514.js，模块 49657）
---------------------------------------------------------------------------------
-站点前端把 ``__zp_stoken__`` 当成安全网关 Cookie。**它不是服务端发的**，
-是浏览器本地算出来再回传的。整条链路：
+令牌不是服务端发的，是浏览器按站点下发的 security-js 算出来再回传的。
+本模块用 Node 硬算一条链路；细节见 `notes/boss_jobs/stoken.md`。
 
-1. 拿着登录态打搜索类接口（如 ``/wapi/zpgeek/search/joblist.json``），
-   没带 ``__zp_stoken__`` 时服务端回 ``code:37``「您的环境存在异常.」，
-   并在 ``zpData`` 里下发**一次性挑战**::
-
-       {"code":37,"message":"您的环境存在异常.",
-        "zpData":{"seed":"Em6sUKm1q2j+...=","name":"e948d594","ts":1790759239936}}
-
-2. 前端把这三样写进 Cookie ``__zp_sseed__`` / ``__zp_sname__`` / ``__zp_sts__``
-   （生成完立刻清掉），再去拉 **按次下发的生成脚本**::
-
-       GET /web/common/security-js/{name}.js        ← name 就是挑战里的 name
-
-3. 这个脚本往 ``window`` 上挂构造函数 ``ABC``。生成一行：
-
-       token = new ABC().z(seed, parseInt(ts) + (480 + getTimezoneOffset()) * 60000)
-
-   （北京时间 ``getTimezoneOffset() === -480``，括号归零，所以本地直接传
-   ``ts`` 也一样；本模块按原式算，不依赖时区。）
-
-4. 写 Cookie ``__zp_stoken__=<token>``，``max-age=3840*60``（3840 分钟），
-   ``domain=.zhipin.com`` ``path=/``，然后把三份辅助 Cookie 清掉。
-
-算法（逆自 security-js 静态结构 + 运行时追踪）
---------------------------------------------------------------------------------
-``{name}.js`` 是两段 IIFE：
-
-* **第一段**：开源的 `js-md5`（MD5 / HMAC-MD5，含 ``module.exports`` 出口）。
-* **第二段**：obfuscator.io 风格的控制流扁平化 VM（``p=NNNN`` 计算 goto +
-  ``switch`` 位域状态机），出口就是 ``window.ABC``。
-  ``ABC`` 本身是空构造函数，``ABC.prototype.z`` 只是
-  ``function(){ return l.apply(this, [581].concat(...args)) }``
-  —— 581 是 VM 的入口块号。
-
-输出形态：``0138`` 固定前缀 + 一段 **58 字符子集的类 base64** 编码。
-剥掉末位校验字符后按标准 base64 解，起手四字节恒为 ``d35dfc81``
-（``0138gQ`` / ``0138gR`` 等都落在这个魔数上），长度随 seed/ts 在
-约 130–470 字节之间浮动。**同 seed+ts 连算两次结果不同**——生成器内部带
-随机量，不是纯哈希。
-
-运行时追踪显示 ``z()`` 还会采一遍 **浏览器环境指纹** 并编进 token：
-
-| 采集点 | 用途 |
-|---|---|
-| ``document.createElement('canvas')`` + 2D 上下文 | canvas 指纹 |
-| ``navigator.webkitTemporaryStorage`` / ``deviceMemory`` / ``hardwareConcurrency`` | 硬件特征 |
-| ``navigator.plugins`` / ``mimeTypes`` / ``webdriver`` | 插件与自动化标记 |
-| ``navigator.languages`` / ``language`` | 语言 |
-| ``screen.availWidth/availHeight/width/height`` | 屏幕 |
-| ``localStorage.getItem('c5jbelwo')`` | 持久设备 id |
-| ``document.createElement('iframe')`` | 环境探测 |
-
-所以**同一段 JS 在「真浏览器」和「光板 Node」里算出来的 token 不一样**，
-服务端按指纹校验。本模块默认在 Node 里跑（带浏览器外壳），
-:func:`compute_stoken` 的结果格式正确、可重复调用；
-要让服务端认，指纹得跟请求头自洽（见 :mod:`boss_jobs.config` 的
-``DEFAULT_HEADERS``，UA / 平台要跟外壳对得上）。
-
-全自动获取
---------------------------------------------------------------------------------
->>> from boss_jobs.stoken import StokenProvider
->>> p = StokenProvider(http=session)          # 带登录态
->>> token = p.ensure()                        # 打一次拿挑战 → 算 → 写 Cookie
->>> token[:4]
-'0138'
-
-也可以只算不发请求::
-
-    from boss_jobs.stoken import compute_stoken, load_security_js
-    js = load_security_js(http, "e948d594")
-    token = compute_stoken(js, seed="...", ts=1790759239936)
+Attributes:
+    SECURITY_JS_URL: `{name}.js` 的下载地址模板。
+    STOKEN_MAX_AGE: 令牌 Cookie 的有效期（秒）= 前端写的 3840 分钟。
+    RUNNER_PATH: 生成脚本的 Node 入口（跟本文件同目录的 assets/）。
+    HELPER_COOKIES: 挑战三元组在 Cookie 里的临时名字（写完令牌就清掉）。
+    DEFAULT_CACHE_DIR: security-js 的本地缓存目录（每个 name 一份）。
+    NODE_BIN_ENV: Node 可执行文件环境变量；空 = 从 PATH 里找。
+    SAMPLE_CHALLENGE: 离线铸币用的样例挑战；服务端不会认。
 """
 
 from __future__ import annotations
@@ -95,22 +31,16 @@ from . import config as C
 
 logger = logging.getLogger(__name__)
 
-#: ``{name}.js`` 的下载地址模板
 SECURITY_JS_URL: str = "/web/common/security-js/{name}.js"
 
-#: 令牌 Cookie 的有效期（秒）= 前端写的 3840 分钟
 STOKEN_MAX_AGE: int = 3840 * 60
 
-#: 生成脚本的 Node 入口（跟本文件同目录的 assets/）
 RUNNER_PATH: Path = Path(__file__).resolve().parent / "assets" / "run_abc.js"
 
-#: 挑战三元组在 Cookie 里的临时名字（前端写完令牌就清掉）
 HELPER_COOKIES: tuple[str, ...] = ("__zp_sseed__", "__zp_sname__", "__zp_sts__")
 
-#: security-js 的本地缓存目录（每个 name 一份，脚本内容按 name 换）
 DEFAULT_CACHE_DIR: Path = Path(tempfile.gettempdir()) / "boss_security_js"
 
-#: Node 可执行文件；空 = 从 PATH 里找
 NODE_BIN_ENV: str = "BOSS_NODE_BIN"
 
 __all__ = [
@@ -130,12 +60,18 @@ __all__ = [
 
 
 class StokenError(RuntimeError):
-    """``__zp_stoken__`` 获取失败。"""
+    """`__zp_stoken__` 获取失败。"""
 
 
 @dataclass(frozen=True)
 class StokenChallenge:
-    """服务端下发的一次性挑战（code 37 的 ``zpData``）。"""
+    """服务端下发的一次性挑战（code 37 的 `zpData`）。
+
+    Attributes:
+        seed: 挑战 seed。
+        name: 挑战 name，也是 security-js 文件名。
+        ts: 挑战时间戳（毫秒）。
+    """
 
     seed: str
     name: str
@@ -143,21 +79,19 @@ class StokenChallenge:
 
     @property
     def is_complete(self) -> bool:
+        """三个字段是否齐全可用。"""
         return bool(self.seed) and bool(self.name) and bool(self.ts)
 
 
-#: 离线铸币用的样例挑战（算法演示/计时用，服务端不会认，别拿去打接口）
 SAMPLE_CHALLENGE: StokenChallenge = StokenChallenge(
     seed="Em6sUKm1q2j+AAA=", name="e948d594", ts=1790759239936
 )
 
 
 def parse_challenge(payload: Mapping[str, Any] | None) -> StokenChallenge | None:
-    """从响应体的 ``zpData`` 里抠出挑战 ``{seed,name,ts}``。
+    """从响应体的 `zpData` 里抠出挑战 `{seed,name,ts}`；不全则回 `None`。
 
-    三个字段缺一、或 ``ts`` 不是能用的正整数，就返回 ``None``
-    （调用方据此报「接口没给挑战」）。业务码本身不看——挑战只认
-    ``zpData`` 的形状，code 37 只是它最常见的出场方式。
+    业务码本身不看——挑战只认 `zpData` 的形状。
     """
     if not isinstance(payload, Mapping):
         return None
@@ -179,7 +113,7 @@ def parse_challenge(payload: Mapping[str, Any] | None) -> StokenChallenge | None
 
 
 def find_node() -> str:
-    """定位 Node 可执行文件。优先 ``BOSS_NODE_BIN``，否则从 PATH 找。"""
+    """定位 Node 可执行文件。优先 `BOSS_NODE_BIN`，否则从 PATH 找。"""
     env = os.environ.get(NODE_BIN_ENV, "").strip()
     if env:
         return env
@@ -193,7 +127,7 @@ def find_node() -> str:
 
 
 def security_js_path(name: str, cache_dir: Path | str | None = None) -> Path:
-    """某个 ``name`` 对应的 security-js 本地缓存路径。"""
+    """某个 `name` 对应的 security-js 本地缓存路径。"""
     base = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", name) or "_"
     return base / f"{safe}.js"
@@ -208,10 +142,9 @@ def load_security_js(
     timeout: float = C.DEFAULT_TIMEOUT,
     force: bool = False,
 ) -> str:
-    """下载 ``/web/common/security-js/{name}.js``，按 name 缓存到本地。
+    """下载 `/web/common/security-js/{name}.js`，按 name 缓存到本地。
 
-    这份脚本是**按挑战里的 name 现下发**的，站点随时可以换名换实现，
-    所以不做算法硬编码，每次都认服务端给的那份。
+    脚本按挑战里的 name 现下发，不做算法硬编码，每次认服务端给的那份。
     """
     path = security_js_path(name, cache_dir)
     if path.exists() and not force:
@@ -254,14 +187,20 @@ def compute_stoken(
     node_bin: str | None = None,
     timeout: float = 30.0,
 ) -> str:
-    """在 Node 里跑 ``new ABC().z(seed, ts_adj)``，返回 ``__zp_stoken__``。
+    """在 Node 里跑 `new ABC().z(seed, ts_adj)`，返回 `__zp_stoken__`。
 
-    :param script_source: ``{name}.js`` 的全文
-    :param seed: 挑战里的 ``seed``
-    :param ts: 挑战里的 ``ts``（毫秒）
-    :param tz_offset_minutes: JS 的 ``getTimezoneOffset()``；
-        默认取本机当前时区（跟浏览器行为一致）
-    :param name: 挑战里的 ``name``，只用来给缓存文件命名
+    Args:
+        script_source: `{name}.js` 的全文。
+        seed: 挑战里的 `seed`。
+        ts: 挑战里的 `ts`（毫秒）。
+        tz_offset_minutes: JS 的 `getTimezoneOffset()`；默认取本机当前时区。
+        name: 挑战里的 `name`，只用来给缓存文件命名。
+        cache_dir: 脚本缓存目录。
+        node_bin: Node 可执行文件；不传就从 PATH 找。
+        timeout: 跑脚本的超时（秒）。
+
+    Returns:
+        生成的令牌字符串。
     """
     if not seed or ts is None:
         raise StokenError(f"算 {C.STOKEN_COOKIE} 缺 seed/ts")
@@ -293,7 +232,7 @@ def compute_stoken(
 
 
 def _local_js_timezone_offset() -> int:
-    """JS ``Date.getTimezoneOffset()``：UTC 比本地慢多少分钟（北京 = -480）。"""
+    """JS `Date.getTimezoneOffset()`：UTC 比本地慢多少分钟（北京 = -480）。"""
     offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
     return int(-offset.total_seconds() // 60)
 
@@ -302,12 +241,13 @@ def _local_js_timezone_offset() -> int:
 class StokenProvider:
     """一条龙：拿挑战 → 下脚本 → 算 token → 写进会话 Cookie。
 
-    :param http: 带 ``get()`` / ``cookies`` 的会话（一般是 ``requests.Session``）
-    :param base_url: 站点地址
-    :param cache_dir: security-js 缓存目录
-    :param node_bin: Node 可执行文件；不传就从 PATH 找
-    :param probe_path: 用来触发挑战的接口路径
-    :param probe_params: 该接口的查询参数
+    Args:
+        http: 带 `get()` / `cookies` 的会话（一般是 `requests.Session`）。
+        base_url: 站点地址。
+        cache_dir: security-js 缓存目录。
+        node_bin: Node 可执行文件；不传就从 PATH 找。
+        probe_path: 用来触发挑战的接口路径。
+        probe_params: 该接口的查询参数。
     """
 
     http: Any
@@ -319,15 +259,12 @@ class StokenProvider:
     _script_cache: dict[str, str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
+        """初始化脚本内存缓存。"""
         if self._script_cache is None:
             self._script_cache = {}
 
-    # ------------------------------------------------------------------ #
-    # 分步
-    # ------------------------------------------------------------------ #
-
     def fetch_challenge(self) -> StokenChallenge:
-        """打一次探针接口，从 code 37 的 ``zpData`` 里取挑战。"""
+        """打一次探针接口，从 code 37 的 `zpData` 里取挑战。"""
         params = dict(self.probe_params or {"query": "", "page": "1", "scene": "1"})
         url = f"{self.base_url.rstrip('/')}{self.probe_path}"
         try:
@@ -367,7 +304,7 @@ class StokenProvider:
         return src
 
     def mint(self, challenge: StokenChallenge, *, force_script: bool = False) -> str:
-        """拿挑战 + 脚本，算出 token（**不写** Cookie）。"""
+        """拿挑战 + 脚本，算出 token（不写 Cookie）。"""
         src = self.script_for(challenge.name, force=force_script)
         return compute_stoken(
             src,
@@ -379,10 +316,9 @@ class StokenProvider:
         )
 
     def apply(self, token: str) -> None:
-        """把 token 写进会话 Cookie（跟前端 ``a.A.set`` 同一套属性）。
+        """把 token 写进会话 Cookie。
 
-        前端是 ``max-age=3840*60``；``requests`` 的 cookiejar 认的是绝对过期
-        时间 ``expires``，这里换算过去。
+        前端是 `max-age=3840*60`；cookiejar 认绝对过期 `expires`，这里换算过去。
         """
         put_cookie(
             self.http.cookies,
@@ -392,15 +328,10 @@ class StokenProvider:
         )
         logger.debug("已写入 %s（长度 %d）", C.STOKEN_COOKIE, len(token))
 
-    # ------------------------------------------------------------------ #
-    # 一步到位
-    # ------------------------------------------------------------------ #
-
     def ensure(self, *, force: bool = False) -> str:
-        """确保会话里有一个可用的 ``__zp_stoken__``，返回它。
+        """确保会话里有一个可用的 `__zp_stoken__`，返回它。
 
-        已有就直接复用（除非 ``force=True``）；没有就走一遍
-        「拿挑战 → 算 → 写 Cookie」。
+        已有就复用（除非 `force=True`）；没有就走「拿挑战 → 算 → 写 Cookie」。
         """
         if not force:
             existing = _read_cookie(self.http, C.STOKEN_COOKIE)
@@ -422,12 +353,9 @@ def put_cookie(
     path: str = "/",
     expires: int | None = None,
 ) -> None:
-    """把一枚 Cookie 稳稳地写进 cookiejar：**先清同名，再写**。
+    """把一枚 Cookie 稳稳地写进 cookiejar：先清同名，再写。
 
-    ``requests`` 的 jar 允许同名不同 domain 共存，而 ``http_from_session``
-    装配时是不带 domain 写的（domain=``''``）。要是不清就补一枚
-    domain=``.zhipin.com`` 的，请求头里会同时出现新旧两枚
-    ``__zp_stoken__``，服务端照着旧的那枚拒——实测就是这么吃的 code 37。
+    不清就补会导致请求头里同时出现新旧两枚同名 Cookie。
     """
     if jar is None or not hasattr(jar, "set"):
         raise StokenError("会话对象不支持 cookies.set，没法写入 " + name)
@@ -445,11 +373,12 @@ def put_cookie(
         kwargs["expires"] = int(expires)
     try:
         jar.set(name, value, **kwargs)
-    except TypeError:  # 简易假 jar 只认 set(name, value, **ignored)
+    except TypeError:  # pragma: no cover - 简易假 jar 只认 set(name, value)
         jar.set(name, value)
 
 
 def _read_cookie(http: Any, name: str) -> str:
+    """从会话 cookiejar 里读一枚 Cookie；读不到回空串。"""
     jar = getattr(http, "cookies", None)
     if jar is None:
         return ""
@@ -471,11 +400,8 @@ def mint_offline(
 ) -> str:
     """不打网络、只用本地缓存的 security-js 铸一枚令牌。
 
-    账号被风控（code 36）拿不到真挑战时，用它验证「算法通了」并量出
-    纯铸币耗时。结果**结构合法但服务端不会认**（challenge 是样例的），
-    别拿去打接口。
-
-    :raises StokenError: 本地没有对应 ``{name}.js`` 时
+    结果结构合法但服务端不会认（challenge 是样例的），别拿去打接口。
+    本地没有对应 `{name}.js` 时抛 `StokenError`。
     """
     ch = challenge or SAMPLE_CHALLENGE
     path = security_js_path(ch.name, cache_dir)

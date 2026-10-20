@@ -21,23 +21,34 @@ router = APIRouter()
 
 
 class MatchBody(BaseModel):
+    """启动人岗匹配。
+
+    Attributes:
+        job_ids: 空 = 全库全部岗位；非空 = 只对勾选的 job_id 跑。
+        crawl_task_id: 非空 = 只跑该抓取任务的岗位（优先级 > job_ids > 全库）。
+    """
+
     resume_id: str
-    #: 空 = 全库全部岗位；非空 = 只对勾选的 job_id 跑
     job_ids: list[str] = Field(default_factory=list)
-    #: 非空 = 只跑该抓取任务的岗位（优先级 > job_ids > 全库）
     crawl_task_id: str = ""
 
 
 class GreetingBody(BaseModel):
+    """改单条招呼语。"""
+
     encrypt_job_id: str
     greeting: str = Field("", max_length=500)
 
 
 class RegenGreetingBody(BaseModel):
+    """重打招呼语草稿。"""
+
     encrypt_job_id: str
 
 
 class RematchBody(BaseModel):
+    """单条重跑匹配。"""
+
     encrypt_job_id: str
 
 
@@ -51,13 +62,13 @@ def _with_greet_state(snap: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/analyze")
 def start_match(body: MatchBody) -> dict[str, Any]:
+    """启动人岗匹配任务。"""
     task = match_tasks.start(
         resume_id=body.resume_id,
         job_ids=body.job_ids,
         crawl_task_id=body.crawl_task_id,
     )
     snap = task.snapshot()
-    # 范围条要的 scope 字段；空集合时也要把范围说清楚
     if "scope" not in snap:
         snap["scope"] = task.scope_info()
     return snap
@@ -65,16 +76,19 @@ def start_match(body: MatchBody) -> dict[str, Any]:
 
 @router.get("/analyze/status")
 def match_status() -> dict[str, Any]:
+    """当前匹配任务快照。"""
     return _with_greet_state(match_tasks.snapshot())
 
 
 @router.get("/analyze/{task_id}")
 def match_task(task_id: str) -> dict[str, Any]:
+    """按 id 取匹配任务快照。"""
     return _with_greet_state(match_tasks.snapshot(task_id))
 
 
 @router.post("/analyze/{task_id}/cancel")
 def cancel_match(task_id: str) -> dict[str, Any]:
+    """取消匹配任务。"""
     task = match_tasks.cancel(task_id)
     return task.snapshot()
 
@@ -93,7 +107,7 @@ def patch_greeting(analysis_id: str, body: GreetingBody) -> dict[str, Any]:
 
 @router.post("/{analysis_id}/greeting/regenerate")
 def regen_greeting(analysis_id: str, body: RegenGreetingBody) -> dict[str, Any]:
-    """重打一条招呼语草稿：**只回新文案，不落库**（用户可能反复生成再挑一条保存）。"""
+    """重打一条招呼语草稿；只回新文案，不落库。"""
     try:
         greeting = regenerate_greeting(
             analysis_id=analysis_id, encrypt_job_id=body.encrypt_job_id
@@ -107,7 +121,7 @@ def regen_greeting(analysis_id: str, body: RegenGreetingBody) -> dict[str, Any]:
 
 @router.post("/{analysis_id}/rematch")
 def rematch_one(analysis_id: str, body: RematchBody) -> dict[str, Any]:
-    """对一条 match 重跑人岗匹配：**只改库里那条、不新增 analysis**。"""
+    """对一条 match 重跑人岗匹配；只改库里那条，不新增 analysis。"""
     try:
         item = rematch_job(analysis_id=analysis_id, encrypt_job_id=body.encrypt_job_id)
     except FileNotFoundError as exc:
@@ -119,24 +133,26 @@ def rematch_one(analysis_id: str, body: RematchBody) -> dict[str, Any]:
 
 @router.get("/analyses")
 def analyses() -> dict[str, Any]:
+    """历史分析列表。"""
     return {"items": list_analyses()}
 
 
 @router.get("/analyses/{analysis_id}")
 def get_analysis(analysis_id: str) -> dict[str, Any]:
+    """按 id 取历史分析；出门前补当前发送史与冷却状态。"""
     try:
         payload = load_analysis(analysis_id)
     except FileNotFoundError as exc:
         raise NotFoundError(f"分析结果不存在：{analysis_id}") from exc
     matches = payload.get("matches")
     if isinstance(matches, list):
-        # 出门前补**当前**发送史与冷却状态：快照里的 last_greeted_at 是匹配那一刻的值
         enrich_match_greet_state([m for m in matches if isinstance(m, dict)])
     return payload
 
 
 @router.delete("/analyses/{analysis_id}")
 def remove_analysis(analysis_id: str) -> dict[str, Any]:
+    """删除一条历史分析。"""
     if not delete_analysis(analysis_id):
         raise NotFoundError(f"分析结果不存在：{analysis_id}")
     return {"deleted": True}

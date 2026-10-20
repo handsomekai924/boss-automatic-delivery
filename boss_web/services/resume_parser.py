@@ -1,11 +1,10 @@
 """简历 LLM 固定模板解析。
 
-规则切章节退居幕后（只用来「阅读原文」），**解析结果**一律出自这里的固定模板：
-一次 LLM 调用抠出结构化 JSON（基本信息 / 求职意向 / 工作 / 项目 / 教育 / 技能 /
-自我评价 / 摘要），字段对齐 ``docs/todo.md`` 第四节「简历解析字段」。
+一次 LLM 调用抠出结构化 JSON；字段名固定，不开放给界面改。
+失败重试一次仍失败则抛错，不覆盖原有解析结果。
 
-模板是**固定的**，不开放给界面改——改字段名会连累匹配页吃同一套结构。
-失败重试一次（追加「严格只输出 JSON」），仍失败则抛错，**不覆盖**原有解析结果。
+Attributes:
+    TEMPLATE_FIELDS: 固定模板的输出骨架（文档与校验共用；LLM 照这个形状回）。
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ from ..errors import ValidationWebError
 
 logger = logging.getLogger(__name__)
 
-#: 固定模板的输出骨架（文档与校验共用；LLM 照这个形状回）
 TEMPLATE_FIELDS: dict[str, str] = {
     "basic": "基本信息：name/phone/email/city，缺的留空串",
     "intent": "求职意向：position/city/salary",
@@ -62,11 +60,12 @@ class ResumeParseError(ValueError):
 
 
 def _template_block() -> str:
+    """把 `TEMPLATE_FIELDS` 拼成提示词里的条目列表。"""
     return "\n".join(f"- `{key}`：{desc}" for key, desc in TEMPLATE_FIELDS.items())
 
 
 def build_messages(content: str, *, retry: bool = False) -> list[dict[str, str]]:
-    """拼固定模板的 chat 消息。``retry=True`` 追加「严格只输出 JSON」。"""
+    """拼固定模板的 chat 消息。`retry=True` 追加「严格只输出 JSON」。"""
     user = USER_TEMPLATE.format(template=_template_block(), content=content or "")
     if retry:
         user += _RETRY_SUFFIX
@@ -77,15 +76,14 @@ def build_messages(content: str, *, retry: bool = False) -> list[dict[str, str]]
 
 
 def normalize(data: dict[str, Any]) -> dict[str, Any]:
-    """把 LLM 回的 JSON 拉成模板形状：补键、修类型、剪长度。
-
-    不求全对（LLM 偶尔漏键），但求**形状稳定**——匹配页直接吃这几个字段。
-    """
+    """把 LLM 回的 JSON 拉成模板形状：补键、修类型、剪长度。"""
 
     def _str(value: Any) -> str:
+        """值转干净字符串；空 / `None` 回空串。"""
         return "" if value is None else str(value).strip()
 
     def _str_list(value: Any, *, limit: int = 12) -> list[str]:
+        """列表值收成去重后的字符串列表。"""
         if not isinstance(value, list):
             return []
         out: list[str] = []
@@ -98,6 +96,7 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
         return out
 
     def _entries(value: Any, keys: tuple[str, ...], *, limit: int = 8) -> list[dict[str, Any]]:
+        """经历条目列表收成定长字段字典。"""
         if not isinstance(value, list):
             return []
         out: list[dict[str, Any]] = []
@@ -142,11 +141,16 @@ def parse_resume_llm(
 ) -> dict[str, Any]:
     """LLM 固定模板解析简历原文，回模板形状的 dict。
 
-    :param content: 简历 Markdown 原文
-    :param config: LLM 配置；``llm`` 没传时用来建客户端
-    :param llm: 注入的客户端（测试用）
-    :raises ResumeParseError: 两次都没抠出合法 JSON
-    :raises ValidationWebError: LLM 还没配置
+    Args:
+        content: 简历 Markdown 原文。
+        config: LLM 配置；`llm` 没传时用来建客户端。
+        llm: 注入的客户端（测试用）。
+
+    Returns:
+        模板形状的解析结果。
+
+    非法 JSON 两次都抠不出时抛 `ResumeParseError`；LLM 未配置时抛
+    `ValidationWebError`。
     """
     if llm is None:
         cfg = config or load_config()
@@ -160,6 +164,7 @@ def parse_resume_llm(
         raise ResumeParseError("简历原文是空的，没法解析")
 
     def _chat(messages: list[dict[str, str]], max_tokens: int) -> tuple[str, str | None]:
+        """调一层客户端；优先带 `finish_reason` 的接口。"""
         chat_with_metadata = getattr(llm, "chat_with_metadata", None)
         if callable(chat_with_metadata):
             result = chat_with_metadata(messages, max_tokens=max_tokens)
@@ -198,12 +203,7 @@ def parse_and_stamp(
     config: LLMConfig | None = None,
     llm: LLMClient | None = None,
 ) -> dict[str, Any]:
-    """解析并打上时间戳/模型名，回 ``meta.llm`` 的形状。
-
-    ::
-
-        {"parsed_at": 1728000000.0, "model": "…", "data": { …模板结构体… }}
-    """
+    """解析并打上时间戳 / 模型名，回 `meta.llm` 的形状。"""
     data = parse_resume_llm(content, config=config, llm=llm)
     return {
         "parsed_at": time.time(),

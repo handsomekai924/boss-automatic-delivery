@@ -1,16 +1,20 @@
-"""登录任务状态机：把 ``run_sms_login`` / ``AppScanLogin.run`` 的阻塞回调接到网页表单上。
+"""登录任务状态机：把 `run_sms_login` / `AppScanLogin.run` 的阻塞回调接到网页表单上。
 
-网页上「发码 → 输码 → （滑块）→ 登录成功」分两步走，每步都在后台线程里跑，
-HTTP 只负责启动和喂料：
+短信流「发码 → 输码 → （滑块）→ 登录成功」与 APP 扫码流的细节见
+`notes/boss_web/services/login_task.md`。滑块只是人机协作管道，不认缺口、不伪造轨迹。
 
-* :meth:`LoginTaskManager.start_send` 起线程发短信，命中滑块时把帮助页挂出来；
-* :meth:`LoginTaskManager.submit_code` 把验证码塞给阻塞中的 ``code_provider``；
-* :meth:`LoginTaskManager.solve_slider` 把极验票据塞给阻塞中的 ``slider_solver``。
-
-APP 扫码登录是另一条：``start_qr`` 起线程跑 ``AppScanLogin``，网页只需要把
-二维码画出来、轮询状态，手机扫完在 App 里点确认就完事（见 ``qr`` 字段）。
-
-滑块只是**人机协作管道**：官方组件渲染、人拖、票据回传。不认缺口、不伪造轨迹。
+Attributes:
+    ST_PENDING: 任务状态：待启动。
+    ST_SENDING: 任务状态：发短信中。
+    ST_NEED_CODE: 任务状态：等验证码。
+    ST_NEED_SLIDER: 任务状态：等滑块票据。
+    ST_LOGGING_IN: 任务状态：登录中。
+    ST_NEED_SCAN: 任务状态：扫码登录，二维码已出好，等手机扫。
+    ST_DONE: 任务状态：完成。
+    ST_ERROR: 任务状态：失败。
+    ST_CANCELLED: 任务状态：已取消。
+    _TERMINAL: 终态集合。
+    login_tasks: 模块级单例，app 启动时直接用。
 """
 
 from __future__ import annotations
@@ -51,13 +55,11 @@ from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebE
 
 logger = logging.getLogger(__name__)
 
-#: 任务状态
 ST_PENDING = "pending"
 ST_SENDING = "sending_sms"
 ST_NEED_CODE = "need_code"
 ST_NEED_SLIDER = "need_slider"
 ST_LOGGING_IN = "logging_in"
-#: 扫码登录：二维码已经出好了，等手机扫
 ST_NEED_SCAN = "need_scan"
 ST_DONE = "done"
 ST_ERROR = "error"
@@ -68,14 +70,41 @@ _TERMINAL = {ST_DONE, ST_ERROR, ST_CANCELLED}
 
 @dataclass
 class LoginTask:
-    """一次网页登录的全部状态。"""
+    """一次网页登录的全部状态。
+
+    Attributes:
+        task_id: 任务 id。
+        phone: 手机号（已抽成纯数字）。
+        dial_code: 区号。
+        kind: 任务类型：`sms` 短信 / `qr` APP 扫码；前端必须按它分派界面。
+        status: 任务状态。
+        created_at: 创建时间戳。
+        events: 事件流水。
+        error: 错误文案。
+        result: 成功结果。
+        retry_after: 限频建议等待秒数。
+        attempts: 验证码尝试次数。
+        code_event: 验证码等待事件。
+        code_box: 验证码投递箱。
+        slider_event: 滑块票据等待事件。
+        slider_box: 滑块票据投递箱。
+        slider_challenge: 当前极验挑战。
+        slider_html: 帮助页 HTML。
+        slider_needed: 是否还欠滑块。
+        slider_refresher: 重新拉一张滑块挑战的回调。
+        lock: 状态锁。
+        cancel_flag: 取消标记。
+        qr_payload: 二维码内容。
+        qr_head_img: 扫码人头像。
+        qr_scanned: 是否已扫。
+        qr_confirmed: 是否已在 App 确认。
+        qr_pk: 扫码登录 pk。
+        qr_revision: 二维码重画版本号。
+    """
 
     task_id: str
     phone: str
     dial_code: str = "86"
-    #: 任务类型：``sms`` 短信验证码 / ``qr`` APP 扫码。两条流的状态机长得像
-    #: （都叫 pending / logging_in / done），但界面完全是两套，前端必须按这个
-    #: 字段分派，不能按 status 猜——扫码的 pending 会误触发短信的步骤条。
     kind: str = "sms"
     status: str = ST_PENDING
     created_at: float = field(default_factory=time.time)
@@ -85,46 +114,58 @@ class LoginTask:
     retry_after: float = 0.0
     attempts: int = 0
 
-    # 验证码：code_provider 阻塞在这里等网页表单
     code_event: threading.Event = field(default_factory=threading.Event)
     code_box: dict[str, Any] = field(default_factory=dict)
 
-    # 滑块：slider_solver 阻塞在这里等网页里的极验组件
     slider_event: threading.Event = field(default_factory=threading.Event)
     slider_box: dict[str, Any] = field(default_factory=dict)
     slider_challenge: SliderChallenge | None = None
     slider_html: str | None = None
     slider_needed: bool = False
-    #: 重新拉一张滑块挑战的回调（帮助页「重新加载」用）；由 solver 挂上
     slider_refresher: Callable[[], SliderChallenge] | None = None
 
     lock: threading.RLock = field(default_factory=threading.RLock)
     cancel_flag: bool = False
 
-    # 扫码登录：AppScanLogin 的 on_payload 把二维码内容写进来，网页去 /qr/{id}/image 取图
     qr_payload: str = ""
     qr_head_img: str = ""
     qr_scanned: bool = False
     qr_confirmed: bool = False
     qr_pk: str = ""
-    #: 票据换发（secondUuid）后二维码内容会变，让前端知道该重画了
     qr_revision: int = 0
 
     def record(self, name: str, payload: Mapping[str, Any] | None = None) -> None:
+        """记一条事件。
+
+        Args:
+            name: 事件名。
+            payload: 事件载荷。
+        """
         with self.lock:
             self.events.append(
                 {"at": time.time(), "name": name, "payload": dict(payload or {})}
             )
 
     def set_status(self, status: str) -> None:
+        """改任务状态。
+
+        Args:
+            status: 新状态。
+        """
         with self.lock:
             self.status = status
 
     @property
     def finished(self) -> bool:
+        """是否已到终态。"""
         return self.status in _TERMINAL
 
     def snapshot(self) -> dict[str, Any]:
+        """当前状态副本。
+
+        Returns:
+            含 status / slider / qr / events 的 dict。
+        """
         with self.lock:
             return {
                 "task_id": self.task_id,
@@ -162,6 +203,14 @@ class LoginTask:
 
 
 def _mask_phone(phone: str) -> str:
+    """手机号打码成 `138****1234`。
+
+    Args:
+        phone: 手机号。
+
+    Returns:
+        打码后的手机号。
+    """
     digits = "".join(ch for ch in phone if ch.isdigit())
     if len(digits) < 7:
         return phone
@@ -169,38 +218,69 @@ def _mask_phone(phone: str) -> str:
 
 
 class LoginTaskManager:
-    """同一时刻只跑一个登录任务（本机单用户工具）。"""
+    """同一时刻只跑一个登录任务（本机单用户工具）。
+
+    Attributes:
+        _session_path: 会话落盘路径覆盖。
+        _wait_timeout: 等验证码 / 滑块的超时。
+        _lock: 任务槽锁。
+        _tasks: 任务字典。
+        _current: 当前任务。
+    """
 
     def __init__(self, *, session_path: Any = None, wait_timeout: float | None = None) -> None:
+        """初始化。"""
         self._session_path = session_path
         self._wait_timeout = wait_timeout or C.LOGIN_WAIT_TIMEOUT
         self._lock = threading.Lock()
         self._tasks: dict[str, LoginTask] = {}
         self._current: LoginTask | None = None
 
-    # ------------------------------------------------------------------ #
-
     def current(self) -> LoginTask | None:
+        """当前任务；没有则 `None`。
+
+        Returns:
+            当前任务或 `None`。
+        """
         with self._lock:
             return self._current
 
     def get(self, task_id: str) -> LoginTask:
+        """按 id 取任务。
+
+        Args:
+            task_id: 任务 id。
+
+        Returns:
+            登录任务。
+
+        Raises:
+            NotFoundError: 任务不存在。
+        """
         task = self._tasks.get(task_id)
         if task is None:
             raise NotFoundError(f"登录任务不存在：{task_id}")
         return task
 
     def snapshot(self, task_id: str | None = None) -> dict[str, Any]:
+        """查询进度快照。
+
+        Args:
+            task_id: 可选任务 id；不传取当前任务。
+
+        Returns:
+            任务快照；没有任务则空 dict。
+        """
         if task_id:
             return self.get(task_id).snapshot()
         task = self.current()
         return task.snapshot() if task else {}
 
     def status_payload(self) -> dict[str, Any]:
-        """``GET /api/auth/status`` 用：本地会话 + 当前任务 + 启动自检结论。
+        """`GET /api/auth/status` 用：本地会话 + 当前任务 + 启动自检结论。
 
-        ``logged_in`` 以库里那份为准；启动自检说过期时**压成 False**——
-        清库偶尔会失败（文件锁），这时候不能再让界面谎报「已登录」。
+        Returns:
+            登录状态载荷。
         """
         import boss_db
 
@@ -228,9 +308,20 @@ class LoginTaskManager:
             "task": task.snapshot() if task else None,
         }
 
-    # ------------------------------------------------------------------ #
-
     def start_send(self, phone: str, *, dial_code: str = "86") -> LoginTask:
+        """起短信登录线程。
+
+        Args:
+            phone: 手机号。
+            dial_code: 区号。
+
+        Returns:
+            新建的登录任务。
+
+        Raises:
+            ValidationWebError: 手机号位数不对。
+            ConflictError: 已有登录流程在进行中。
+        """
         digits = "".join(ch for ch in phone if ch.isdigit())
         if len(digits) < 11:
             raise ValidationWebError("手机号看起来不对，请填 11 位数字")
@@ -252,7 +343,17 @@ class LoginTaskManager:
         return task
 
     def start_qr(self, *, pk: str = "") -> LoginTask:
-        """起一条 APP 扫码登录：后台出二维码、等手机扫、等 App 确认。"""
+        """起一条 APP 扫码登录：后台出二维码、等手机扫、等 App 确认。
+
+        Args:
+            pk: 扫码登录 pk；空则用默认。
+
+        Returns:
+            新建的登录任务。
+
+        Raises:
+            ConflictError: 已有登录流程在进行中。
+        """
         with self._lock:
             if self._current is not None and not self._current.finished:
                 raise ConflictError("已有登录流程在进行中，请先完成或取消")
@@ -269,7 +370,18 @@ class LoginTaskManager:
         return task
 
     def qr_png(self, task_id: str) -> bytes:
-        """把任务当前的二维码画成 PNG，给网页 ``<img src>`` 用。"""
+        """把任务当前的二维码画成 PNG，给网页 `<img src>` 用。
+
+        Args:
+            task_id: 任务 id。
+
+        Returns:
+            PNG 字节。
+
+        Raises:
+            NotFoundError: 本次登录还没有二维码。
+            UpstreamError: 渲染失败。
+        """
         task = self.get(task_id)
         payload = task.qr_payload
         if not payload:
@@ -280,6 +392,19 @@ class LoginTaskManager:
             raise UpstreamError(str(exc)) from exc
 
     def submit_code(self, task_id: str, code: str) -> LoginTask:
+        """把验证码塞给阻塞中的 `code_provider`。
+
+        Args:
+            task_id: 任务 id。
+            code: 验证码。
+
+        Returns:
+            登录任务。
+
+        Raises:
+            ValidationWebError: 验证码为空。
+            ConflictError: 本次登录已结束。
+        """
         task = self.get(task_id)
         code = (code or "").strip()
         if not code:
@@ -295,6 +420,19 @@ class LoginTaskManager:
         return task
 
     def solve_slider(self, task_id: str, payload: Mapping[str, Any]) -> LoginTask:
+        """把极验票据塞给阻塞中的 `slider_solver`。
+
+        Args:
+            task_id: 任务 id。
+            payload: 票据载荷。
+
+        Returns:
+            登录任务。
+
+        Raises:
+            ConflictError: 本次登录已结束。
+            ValidationWebError: 滑块票据不完整。
+        """
         task = self.get(task_id)
         if task.finished:
             raise ConflictError("本次登录已结束")
@@ -313,8 +451,15 @@ class LoginTaskManager:
     def refresh_slider(self, task_id: str) -> LoginTask:
         """帮助页「重新加载」：换一张新的极验挑战，重建帮助页。
 
-        极验的 ``challenge`` 是一次性的——把旧帮助页重新加载会拿同一张已用过的
-        挑战去 initGeetest，组件必然 onError。所以这里重新拉一张，再渲染新页面。
+        Args:
+            task_id: 任务 id。
+
+        Returns:
+            登录任务。
+
+        Raises:
+            ConflictError: 登录已结束或没有待完成的滑块。
+            UpstreamError: 没能取到新的滑块验证。
         """
         task = self.get(task_id)
         if task.finished:
@@ -344,6 +489,14 @@ class LoginTaskManager:
         return task
 
     def cancel(self, task_id: str) -> LoginTask:
+        """取消登录任务并唤醒阻塞回调。
+
+        Args:
+            task_id: 任务 id。
+
+        Returns:
+            被取消的任务。
+        """
         task = self.get(task_id)
         with task.lock:
             task.cancel_flag = True
@@ -355,20 +508,22 @@ class LoginTaskManager:
         task.record("cancelled", {})
         return task
 
-    # ------------------------------------------------------------------ #
-    # 后台线程
-    # ------------------------------------------------------------------ #
-
     def _web_slider_solver(self, task: LoginTask, client: Any) -> SliderSolver:
-        """``slider_solver`` 回调：挂出帮助页，等人拖完把票据送回来。
+        """`slider_solver` 回调：挂出帮助页，等人拖完把票据送回来。
 
-        ``client`` 给「重新加载」用：帮助页要换挑战时，得拿它回服务端重新拉一张
-        （极验 challenge 一次性，旧页面重载必然 onError）。
+        Args:
+            task: 登录任务。
+            client: 登录客户端（「重新加载」要回服务端拉新挑战）。
+
+        Returns:
+            solver 回调。
         """
         def fetch_challenge() -> SliderChallenge:
+            """回服务端重新拉一张极验挑战。"""
             return client.fetch_slider_challenge()
 
         def solver(challenge: SliderChallenge) -> SliderSolution | None:
+            """挂帮助页并等票据；超时 / 取消回 `None`。"""
             if task.cancel_flag:
                 return None
             html = build_helper_html(
@@ -395,7 +550,16 @@ class LoginTaskManager:
         return solver
 
     def _code_provider(self, task: LoginTask):
+        """`code_provider` 回调：等网页表单把验证码塞进来。
+
+        Args:
+            task: 登录任务。
+
+        Returns:
+            provider 回调。
+        """
         def provider(attempt: int, _ticket: Any) -> str | None:
+            """等验证码；超时 / 取消回 `None`。"""
             with task.lock:
                 task.attempts = max(task.attempts, attempt)
                 task.set_status(ST_NEED_CODE)
@@ -412,6 +576,11 @@ class LoginTaskManager:
         return provider
 
     def _run_sms_login(self, task: LoginTask) -> None:
+        """短信登录的后台线程。
+
+        Args:
+            task: 登录任务。
+        """
         kwargs: dict[str, Any] = {"load_stored": True}
         if self._session_path is not None:
             kwargs["session_path"] = self._session_path
@@ -419,6 +588,7 @@ class LoginTaskManager:
         solver = self._web_slider_solver(task, client)
 
         def on_event(name: str, payload: dict[str, Any]) -> None:
+            """把底层事件写进任务流水。"""
             task.record(name, payload)
 
         try:
@@ -455,7 +625,11 @@ class LoginTaskManager:
             self._finish_err(task, f"登录流程出错：{exc}")
 
     def _run_qr_login(self, task: LoginTask) -> None:
-        """APP 扫码登录的后台线程：出二维码 → 等手机扫 → 等 App 确认 → 落盘。"""
+        """APP 扫码登录的后台线程：出二维码 → 等手机扫 → 等 App 确认 → 落盘。
+
+        Args:
+            task: 登录任务。
+        """
         kwargs: dict[str, Any] = {"load_stored": True}
         if self._session_path is not None:
             kwargs["session_path"] = self._session_path
@@ -463,6 +637,7 @@ class LoginTaskManager:
         login = AppScanLogin(client, pk=task.qr_pk or QR_DEFAULT_PK)
 
         def on_payload(payload: str) -> None:
+            """收到二维码内容时写进任务。"""
             with task.lock:
                 task.qr_payload = payload
                 task.qr_revision += 1
@@ -470,7 +645,7 @@ class LoginTaskManager:
             task.record("qr_ready", {"revision": task.qr_revision})
 
         def on_event(name: str, payload: dict[str, Any]) -> None:
-            # 这几个事件把前端关心的状态写进任务快照，光有 events 不够用
+            """把扫码关心的状态写进任务快照。"""
             with task.lock:
                 if name == "qr_scanned":
                     task.qr_scanned = True
@@ -506,8 +681,14 @@ class LoginTaskManager:
             self._finish_err(task, f"扫码登录出错：{exc}")
 
     def _finish_ok(self, task: LoginTask, client: Any, result: LoginResult) -> None:
+        """登录成功：落盘会话并写成功状态。
+
+        Args:
+            task: 登录任务。
+            client: 登录客户端。
+            result: 登录结果。
+        """
         try:
-            # 不给 session_path = 写默认状态库（BOSS_DB / data/boss.db）
             persist_login(client, result, session_path=self._session_path)
         except Exception as exc:  # noqa: BLE001 - 落盘失败不该把登录说成失败
             logger.warning("登录成功但写状态库失败：%s", exc)
@@ -522,11 +703,16 @@ class LoginTaskManager:
 
     @staticmethod
     def _finish_err(task: LoginTask, message: str) -> None:
+        """登录失败：写错误状态。
+
+        Args:
+            task: 登录任务。
+            message: 错误文案。
+        """
         with task.lock:
             task.error = message
             task.set_status(ST_ERROR)
         task.record("error", {"message": message})
 
 
-# 模块级单例，app 启动时直接用
 login_tasks = LoginTaskManager()

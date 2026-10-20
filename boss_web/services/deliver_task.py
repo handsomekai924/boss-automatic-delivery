@@ -1,29 +1,19 @@
-"""一键投递任务：把匹配结果里的目标岗位串行打招呼 **并把招呼语发出去**。
+"""一键投递任务：把匹配结果里的目标岗位串行打招呼并把招呼语发出去。
 
-一键 / 多条 / 单条三种入口只差目标集合，任务本身只认一串 ``encrypt_job_id``
-（todo.md C2）。规矩照 todo.md C6 / C7 写死，别在界面层再实现一遍：
+一键 / 多条 / 单条三种入口只差目标集合，任务本身只认一串 `encrypt_job_id`。
+串行发送、`delivered_at` 有值跳过不重发、单条失败只记 `deliver_error` 不自动
+重试；结果写回 `analysis` 的 `deliver_status` / `delivered_at` / `deliver_error`。
+协议与风控细节见 `notes/boss_web/services/deliver_task.md`。
 
-- 确认弹窗是前端的事（C7），这里只收已确认的清单；
-- 串行 + :data:`boss_jobs.config.DELIVER_INTERVAL` 节流，可随时取消；
-- ``delivered_at`` 有值跳过不重发；单条失败只记 ``deliver_error``、不自动重试
-  （失败条目可人工点行内「发送」再试）；
-- 撞 **code 36**（账号异常 / 人机验证）**立即停整批**，继续砸只会更糟；
-- 撞 **「开聊提醒」**（每日沟通配额提示弹窗，``friend/add`` 回 code 1 +
-  chatRemindDialog）**不是停批信号**：这是 blockLevel 0 的提示弹窗，话术
-  「您今天已与120位BOSS沟通，还剩30次沟通机会哦」里那 30 是**还能再发的次数**。
-  :meth:`boss_jobs.client.JobClient.greet` 已经做过「模拟点击确认」
-  （埋点 + ``cid=1`` 重打 ``friend/add``）；确认完还被拦才轮到这儿——
-  只记这一条、**继续发剩下的**，除非话术明说「还剩 0 次」。
-  **不是登录失效**，别叫人去重新登录（2026-10-09 实测踩过：code 1 被当
-  登录态失效，人重新登录了照样发不出去）；
-- 结果写回 ``analysis`` 的 ``deliver_status`` / ``delivered_at`` / ``deliver_error``。
-
-发送是「建会话 + 真投递正文」两步：:meth:`boss_jobs.client.JobClient.deliver_greeting`
-先打 ``friend/add.json``，再经 MQTT（:mod:`boss_jobs.chat`）发正文——站点
-``friend/add`` **只建会话、不投递任何文本**。成功判据是「这帧发出去了」
-（``ChatSocket.send_text`` PUBLISH 无异常且 ``rc == 0``）；**没有回读接口可验**，
-也别指望 PUBACK（网关对文本帧不回，发完约 150ms 关 WebSocket 是常态）。
-细节见 :mod:`boss_jobs.chat`。
+Attributes:
+    ST_RUNNING: 任务运行中。
+    ST_DONE: 任务正常结束。
+    ST_ERROR: 任务出错或被停批。
+    ST_CANCELLED: 任务被取消。
+    GREET_COOLDOWN_DAYS: 发送冷却天数。
+    GREET_COOLDOWN_SECONDS: 发送冷却窗（秒）。
+    GREET_COOLDOWN_SKIP_FMT: 跳过原因模板；日期 MM-DD 由调用方填。
+    ITEM_SKIPPED: 跳过单条时的状态字面量。
 """
 
 from __future__ import annotations
@@ -62,23 +52,17 @@ ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
 
-#: 30 天发送冷却窗（秒）。**写死常量**，不进配置——以后要调再进 ``deliver_config``。
-#: 判定：``可发送 ⇔ now - last_greeted_at(job) ≥ 30 天``；恰好 30 天整 → 允许再发。
 GREET_COOLDOWN_DAYS = 30
 GREET_COOLDOWN_SECONDS = GREET_COOLDOWN_DAYS * 86400
 
-#: 跳过原因模板；日期 MM-DD 由调用方填
 GREET_COOLDOWN_SKIP_FMT = "30 天内已发送（{date}）"
 
 
 def parse_greet_time(value: Any) -> float | None:
-    """``jobs.last_greeted_at`` / ``item.delivered_at`` → ``time.time()`` 同口径的秒。
+    """`jobs.last_greeted_at` / `item.delivered_at` → `time.time()` 同口径的秒。
 
-    - 数字（含数字字符串）= Unix 时间戳，原样用；
-    - ``%Y-%m-%d %H:%M:%S`` / ``%Y-%m-%dT%H:%M:%S``（ISO 风格，与 ``fetched_at`` 同格式）
-      按服务器本地时钟解析，**不做时区换算**；
-    - 读不到 / 解析失败 → ``None``（按「从未发送」处理，放行——宁可多一次确认弹窗，
-      不静默吞掉可发对象）。
+    数字（含数字字符串）当 Unix 时间戳；`%Y-%m-%d %H:%M:%S` 等按本地时钟解析，
+    不做时区换算。读不到 / 解析失败 → `None`（按「从未发送」处理）。
     """
     if value is None or value == "":
         return None
@@ -113,10 +97,17 @@ def greet_cooldown_state(
 ) -> dict[str, Any]:
     """30 天冷却判定（单一口径）。
 
-    ``last_greeted_at``（岗位维度）与 ``delivered_at``（本条分析的即时状态）**取较晚者**，
-    再套 30 天窗——兼容上线前已发出的岗位（只有 ``delivered_at``）与上线后的新发送。
+    `last_greeted_at`（岗位维度）与 `delivered_at`（本条分析的即时状态）取
+    较晚者，再套 30 天窗；恰好 30 天整允许再发。
 
-    :return: ``{last_greeted_ts, last_greeted_at, cooldown_until, in_cooldown, cooldown_days_left}``
+    Args:
+        last_greeted_at: 岗位维度最近发送时间。
+        delivered_at: 本条分析的即时发送时间。
+        now: 判定时刻；省略用当前时间。
+
+    Returns:
+        `{last_greeted_ts, last_greeted_at, cooldown_until, in_cooldown,
+        cooldown_days_left}`。
     """
     stamps = [ts for ts in (parse_greet_time(last_greeted_at), parse_greet_time(delivered_at)) if ts is not None]
     last_ts = max(stamps) if stamps else None
@@ -131,7 +122,7 @@ def greet_cooldown_state(
     now_ts = time.time() if now is None else float(now)
     cooldown_until = last_ts + GREET_COOLDOWN_SECONDS
     remaining = cooldown_until - now_ts
-    in_cooldown = remaining > 0  # 恰好 30 天整 → 允许再发
+    in_cooldown = remaining > 0
     return {
         "last_greeted_ts": last_ts,
         "last_greeted_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_ts)),
@@ -142,7 +133,11 @@ def greet_cooldown_state(
 
 
 def greet_cooldown_reason(state: Mapping[str, Any]) -> str:
-    """冷却中 → 跳过原因 ``30 天内已发送（MM-DD）``；否则空串。"""
+    """冷却中 → 跳过原因 `30 天内已发送（MM-DD）`；否则空串。
+
+    Args:
+        state: `greet_cooldown_state` 的结果。
+    """
     if not state.get("in_cooldown"):
         return ""
     ts = parse_greet_time(state.get("last_greeted_ts") or state.get("last_greeted_at"))
@@ -151,11 +146,14 @@ def greet_cooldown_reason(state: Mapping[str, Any]) -> str:
 
 
 def enrich_match_greet_state(items: list[dict[str, Any]], *, now: float | None = None) -> None:
-    """读接口出门前给 match 条目补**当前**发送史与冷却状态（就地改）。
+    """读接口出门前给 match 条目补当前发送史与冷却状态（就地改）。
 
-    分析快照里的 ``last_greeted_at`` 是匹配那一刻的值；真正算冷却要看
-    ``jobs`` 表现在的 ``last_greeted_at`` 与 ``item.delivered_at`` 取较晚者。
-    读不到就按「从未发送」放行。
+    真正算冷却要看 `jobs` 表现在的 `last_greeted_at` 与 `item.delivered_at`
+    取较晚者；读不到就按「从未发送」放行。
+
+    Args:
+        items: match 条目列表。
+        now: 判定时刻；省略用当前时间。
     """
     from boss_jobs.store import JobStore
 
@@ -181,7 +179,6 @@ def enrich_match_greet_state(items: list[dict[str, Any]], *, now: float | None =
         item["greet_cooldown_days_left"] = state["cooldown_days_left"]
 
 
-#: Any safety field marks a current-format match snapshot.
 _SAFETY_FIELDS = (
     "is_blacklisted", "company_blacklisted", "jd_blacklisted", "jd_rule_checked",
     "jd_status", "auto_delivery_blocked", "matched_rule_snapshot",
@@ -189,15 +186,16 @@ _SAFETY_FIELDS = (
 
 
 def _has_safety_snapshot(item: dict[str, Any]) -> bool:
-    # 必须字段齐全才算有安全快照；缺字段的旧分析不能进自动投递
+    """必备安全快照字段是否齐全。"""
     return all(key in item for key in _SAFETY_FIELDS)
 
 
 def _delivery_restriction(item: dict[str, Any], *, automatic: bool = False) -> str:
-    """Return a stable reason from the immutable match-time safety snapshot.
+    """从匹配时安全快照得出稳定拦截原因；可发回空串。
 
-    Legacy analyses can still be explicitly sent by a user-selected request for
-    backwards compatibility, but they are never eligible for automatic/all send.
+    Args:
+        item: match 条目。
+        automatic: 是否自动 / 全量发送；旧分析缺快照时只拦自动发送。
     """
     if not _has_safety_snapshot(item):
         return "缺少匹配时职位安全快照" if automatic else ""
@@ -215,14 +213,27 @@ def _delivery_restriction(item: dict[str, Any], *, automatic: bool = False) -> s
 
 
 def _all_restriction(item: dict[str, Any]) -> str:
-    """Return reasons that an automatic/all batch must never send."""
+    """自动 / 全量批量绝不能发的原因；可发回空串。"""
     return _delivery_restriction(item, automatic=True) or (
         "没有招呼语正文" if not str(item.get("greeting") or "").strip() else ""
     )
 
 
 ITEM_SKIPPED = "skipped"
+
+
 class DeliverTask:
+    """一次投递任务的状态、单条结果流水与事件流。
+
+    Attributes:
+        mode: `all` / `selected` / `manual`。
+        confirmed: 是否已确认受限职位。
+        confirmation_token: 手动发送的确认令牌。
+        items: 每个目标的状态流水，按 `encrypt_job_id` 贴回结果行。
+        events: 最近事件环。
+        cancel_flag: 是否已请求取消。
+    """
+
     def __init__(
         self,
         analysis_id: str,
@@ -232,6 +243,7 @@ class DeliverTask:
         confirmed: bool = False,
         confirmation_token: str = "",
     ) -> None:
+        """初始化。"""
         self.task_id = "dv_" + uuid.uuid4().hex[:10]
         self.analysis_id = analysis_id
         self.job_ids = list(job_ids)
@@ -248,13 +260,18 @@ class DeliverTask:
         self.ok = 0
         self.failed = 0
         self.skipped = 0
-        #: 每个目标的状态流水，前端按 encrypt_job_id 贴回结果行
         self.items: list[dict[str, Any]] = []
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.cancel_flag = False
         self.lock = threading.Lock()
 
     def push(self, name: str, payload: dict[str, Any] | None = None) -> None:
+        """追加一条命名事件（带时间戳）。
+
+        Args:
+            name: 事件名。
+            payload: 事件字段。
+        """
         with self.lock:
             self.events.append({"at": time.time(), "name": name, "payload": payload or {}})
 
@@ -268,6 +285,19 @@ class DeliverTask:
         error: str = "",
         delivered_at: float | None = None,
     ) -> dict[str, Any]:
+        """记一条单目标结果流水。
+
+        Args:
+            encrypt_job_id: 职位 id。
+            job_name: 职位名。
+            brand_name: 公司名。
+            status: 结果状态。
+            error: 失败 / 跳过原因。
+            delivered_at: 发送时间。
+
+        Returns:
+            写入的流水字典。
+        """
         item = {
             "encrypt_job_id": encrypt_job_id,
             "job_name": job_name,
@@ -281,6 +311,7 @@ class DeliverTask:
         return item
 
     def snapshot(self) -> dict[str, Any]:
+        """取一份只含最近 20 条事件的只读快照。"""
         with self.lock:
             return {
                 "task_id": self.task_id,
@@ -306,9 +337,10 @@ class DeliverTask:
 class DeliverTaskManager:
     """同一时刻只跑一个发送任务。
 
-    :param client_factory: 造 ``JobClient`` 的工厂（测试里注入假的）
-    :param sleeper: 可替换的 sleep（测试里注入 no-op，免得真等一秒）
-    :param interval: 条间隔（秒），默认 :data:`boss_jobs.config.DELIVER_INTERVAL`
+    Args:
+        client_factory: 造 `JobClient` 的工厂（测试里注入假的）。
+        sleeper: 可替换的 sleep（测试里注入 no-op）。
+        interval: 条间隔（秒），默认 `boss_jobs.config.DELIVER_INTERVAL`。
     """
 
     def __init__(
@@ -318,6 +350,7 @@ class DeliverTaskManager:
         sleeper: Callable[[float], None] = time.sleep,
         interval: float | None = None,
     ) -> None:
+        """初始化。"""
         self._lock = threading.Lock()
         self._task: DeliverTask | None = None
         self._client_factory = client_factory or (lambda: create_client())
@@ -325,10 +358,19 @@ class DeliverTaskManager:
         self._interval = DELIVER_INTERVAL if interval is None else interval
 
     def current(self) -> DeliverTask | None:
+        """当前任务；没有则 `None`。"""
         with self._lock:
             return self._task
 
     def snapshot(self, task_id: str | None = None) -> dict[str, Any]:
+        """取任务快照；指定 id 对不上时抛 `NotFoundError`。
+
+        Args:
+            task_id: 可选的期望任务 id。
+
+        Returns:
+            任务快照；没有任务时回 `{"task_id": None, "status": "idle"}`。
+        """
         task = self.current()
         if task is None:
             return {"task_id": None, "status": "idle"}
@@ -345,6 +387,15 @@ class DeliverTaskManager:
         confirmed: bool = False,
         confirmation_token: str = "",
     ) -> DeliverTask:
+        """启动发送任务；已有任务在跑时抛 `ConflictError`。
+
+        Args:
+            analysis_id: 所属分析 id。
+            job_ids: 目标职位 id 列表。
+            mode: `all` / `selected` / `manual`。
+            confirmed: 是否已确认受限职位。
+            confirmation_token: 手动发送的确认令牌。
+        """
         if mode not in {"all", "selected", "manual"}:
             raise ValueError("mode 必须是 all、selected 或 manual")
         with self._lock:
@@ -364,6 +415,11 @@ class DeliverTaskManager:
         return task
 
     def cancel(self, task_id: str | None = None) -> DeliverTask:
+        """请求取消当前任务；没有在跑的任务时抛 `NotFoundError`。
+
+        Args:
+            task_id: 可选的期望任务 id。
+        """
         task = self.current()
         if task is None or (task_id and task.task_id != task_id):
             raise NotFoundError("没有在跑的发送任务")
@@ -373,10 +429,11 @@ class DeliverTaskManager:
 
     @staticmethod
     def _cooldown_for(item: dict[str, Any], store: JobStore) -> dict[str, Any]:
-        """一条 match 的冷却判定：``jobs.last_greeted_at``（权威）与 ``item.delivered_at`` 取较晚者。
+        """一条 match 的冷却判定：库里发送史与 `item.delivered_at` 取较晚者。
 
-        快照里的 ``last_greeted_at`` 只当补充——库里的才是跨分析的真依据；
-        两边读不到就按「从未发送」放行。
+        Args:
+            item: match 条目。
+            store: 职位库，读 `last_greeted_at`。
         """
         jid = str(item.get("encrypt_job_id") or "")
         raw_job = ""
@@ -388,13 +445,8 @@ class DeliverTaskManager:
         snapshot = item.get("last_greeted_at") or ""
         return greet_cooldown_state(raw_job or snapshot, item.get("delivered_at"))
 
-
     def _run(self, task: DeliverTask) -> None:
-        """串行发送：已成功的跳过；单条失败记 ``deliver_error`` 继续，不重试。
-
-        空招呼语不发（站点 ``friend/add`` 只建会话、不打字，空消息比不发更糟）；
-        ``ChatSendError`` 也不重试（会话可能已建、正文没出，重试会重复打扰）。
-        """
+        """串行发送：已成功的跳过；单条失败记 `deliver_error` 继续，不重试。"""
         try:
             payload = load_analysis(task.analysis_id)
         except FileNotFoundError:
@@ -414,7 +466,6 @@ class DeliverTaskManager:
         candidate_ids = list(index) if task.mode == "all" else task.job_ids
         todo: list[dict[str, Any]] = []
         restricted: list[dict[str, Any]] = []
-        # 发送前统一开库：冷却判定以 jobs.last_greeted_at 为准（权威），成功后也写回这里
         try:
             store = JobStore()
         except Exception as exc:  # noqa: BLE001 - 库起不来就整批失败
@@ -570,7 +621,6 @@ class DeliverTaskManager:
                 else:
                     consecutive_37 = 0
                     sent_at = time.time()
-                    # 双写：岗位维度 last_greeted_at（跨分析冷却依据）+ item.delivered_at（本次即时状态）
                     try:
                         store.update_last_greeted_at(jid)
                     except Exception:  # noqa: BLE001 - 冷却史写失败不该把成功当失败
@@ -596,12 +646,13 @@ class DeliverTaskManager:
                     logger.debug("关聊天通道失败", exc_info=True)
             store.close()
 
-
     def _on_api_error(self, task: DeliverTask, item: dict[str, Any], exc: JobApiError) -> str:
-        """分类处理业务错误，回 ``"stop"`` / ``"cooloff"`` / ``"continue"``。
+        """分类处理业务错误，回 `"stop"` / `"cooloff"` / `"continue"`。
 
-        code 36（账号异常/人机验证）与登录态失效停整批；code 37 走 cooloff。
-        每日沟通配额明确耗尽时停批；其他「开聊提醒」只在话术明说「还剩 0 次」时才停。
+        Args:
+            task: 当前任务。
+            item: 命中的 match 条目。
+            exc: 业务错误。
         """
         jid = str(item.get("encrypt_job_id"))
         name = str(item.get("job_name") or "")
@@ -620,8 +671,6 @@ class DeliverTaskManager:
             self._stop(task, f"{error}。这是 BOSS 侧的每日沟通配额（不是登录失效），明天再试。")
             return "stop"
         if exc.is_chat_remind:
-            # 「开聊提醒」是 **blockLevel 0 的提示弹窗**。确认后仍被拦时，
-            # 只有明确的每日额度耗尽话术（或还剩 0 次）才停批；频率限制单独处理。
             remaining = exc.chat_remind_remaining
             self._record(task, item, status=DELIVER_FAILED, error=f"开聊提醒：{exc.message}")
             if remaining == 0:
@@ -686,6 +735,7 @@ class DeliverTaskManager:
             logger.warning("发送结果写不回 analysis %s / %s：%s", task.analysis_id, jid, exc)
 
     def _stop(self, task: DeliverTask, message: str) -> None:
+        """整批停住并把原因写进任务。"""
         logger.warning("发送任务 %s 停批：%s", task.task_id, message)
         with task.lock:
             task.status = ST_ERROR
@@ -694,6 +744,7 @@ class DeliverTaskManager:
         task.push("error", {"message": message})
 
     def _fail(self, task: DeliverTask, message: str) -> None:
+        """整批失败并把原因写进任务。"""
         with task.lock:
             task.status = ST_ERROR
             task.error = message

@@ -6,8 +6,8 @@
     python -m boss_login logout                         # 退出并清除本地登录态
     python -m boss_login probe                          # 探测真实接口路径
 
-接口路径未经离线核实，如线上已变更，用 ``--endpoint-send`` / ``--endpoint-login`` 覆盖，
-或先跑 ``probe`` 确认。
+接口路径未经离线核实，如线上已变更，用 `--endpoint-send` / `--endpoint-login` 覆盖，
+或先跑 `probe` 确认。
 """
 
 from __future__ import annotations
@@ -50,7 +50,6 @@ from .verify import (
     solve_via_helper,
 )
 
-#: 退出码，便于脚本判断失败原因
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_VALIDATION = 2
@@ -65,6 +64,7 @@ BANNER = """\
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构造命令行解析器（含各子命令）。"""
     parser = argparse.ArgumentParser(
         prog="boss_login",
         description="BOSS直聘用户端手机验证码登录（Python 实现）",
@@ -75,8 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_global_options(parser, suppress_defaults=False)
 
     sub = parser.add_subparsers(dest="command", required=True)
-    # 全局开关在子命令后也认（`boss_login login -v` 和 `boss_login -v login` 都行）。
-    # 用 parents + SUPPRESS：没在子命令这层给的选项不去覆盖顶层已经给过的值。
     global_opts = _global_options_parent()
 
     login = sub.add_parser("login", help="完整登录流程（发码 → 输入验证码 → 登录）", parents=[global_opts])
@@ -135,11 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _global_options_parent() -> argparse.ArgumentParser:
-    """给子命令挂一份全局开关，带 SUPPRESS 默认值。
-
-    argparse 的子解析器会用自己那份默认值覆盖顶层同名选项，所以这里必须
-    ``default=argparse.SUPPRESS``：不写就完全不动那个属性，顶层的值得以保留。
-    """
+    """给子命令挂一份全局开关（`default=argparse.SUPPRESS`），不覆盖顶层已给值。"""
     parent = argparse.ArgumentParser(add_help=False)
     _add_global_options(parent, suppress_defaults=True)
     return parent
@@ -202,6 +196,7 @@ def _add_slider_options(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """解析参数并分发到对应子命令，返回进程退出码。"""
     args = build_parser().parse_args(argv)
     _setup_logging(args.verbose)
 
@@ -264,17 +259,14 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
 
-# --------------------------------------------------------------------------- #
-# 子命令
-# --------------------------------------------------------------------------- #
-
-
 def _cmd_login(args: argparse.Namespace, client: Any) -> int:
+    """短信登录：发码 → 输入验证码 → 登录，成功则可选落盘。"""
     print(BANNER)
     phone = normalize_phone(args.phone)
     solver = _make_solver(args)
 
     def code_provider(attempt: int, ticket: Any) -> str | None:
+        """索要验证码；返回 None 表示放弃。"""
         if args.code and attempt == 1:
             return args.code
         print()
@@ -285,6 +277,7 @@ def _cmd_login(args: argparse.Namespace, client: Any) -> int:
         return value
 
     def on_event(name: str, payload: dict[str, Any]) -> None:
+        """把流程事件打印到终端。"""
         if name == "code_sent":
             print(f"✓ 验证码已发送至 {payload['phone']}，{payload['retry_after']} 秒后可重发")
         elif name == "cooldown_reused":
@@ -323,8 +316,6 @@ def _cmd_login(args: argparse.Namespace, client: Any) -> int:
     if result.is_new_user:
         print("  说明：该手机号首次验证，已自动完成注册")
     print(f"  token：{_short(result.token) if result.token else '（以 Cookie 鉴权）'}")
-    # 真实站点的登录响应体里没有 token，鉴权靠 Set-Cookie；名字可能不在
-    # 已知名单里。把这次实际拿到的 Cookie 名打出来，好据此补 AUTH_COOKIES。
     if result.new_cookies:
         print(f"  本次登录种下的 Cookie：{sorted(result.new_cookies)}")
     elif result.cookies:
@@ -350,6 +341,7 @@ def _cmd_qr(args: argparse.Namespace, client: Any) -> int:
     seen: set[str] = set()
 
     def draw(payload: str) -> None:
+        """把新二维码渲染到终端或文件。"""
         if not payload or payload in seen:
             return
         seen.add(payload)
@@ -373,6 +365,7 @@ def _cmd_qr(args: argparse.Namespace, client: Any) -> int:
             print(f"  二维码内容：{payload}")
 
     def on_event(name: str, payload: dict[str, Any]) -> None:
+        """把扫码登录事件打印到终端。"""
         if name == "qr_created":
             print(f"✓ 已生成二维码（pk={payload.get('pk')}），请用手机 BOSS APP 扫码")
         elif name == "qr_scanned":
@@ -428,11 +421,11 @@ def _cmd_qr(args: argparse.Namespace, client: Any) -> int:
 
 
 def _cmd_whoami(args: argparse.Namespace, client: Any) -> int:
+    """查看当前登录用户；未登录时给出可排查的原因。"""
     path = boss_db.resolve_db_path(args.db)
     stored = load_session(args.db)
 
     if not client.is_logged_in():
-        # 一句话「没有登录态」没法排查：是库里没落，还是落了但凭证不认？
         print("✗ 本地没有登录态，请先执行：python -m boss_login login --phone <手机号>")
         print(f"  查过的位置：{path}")
         if not has_session_row(args.db):
@@ -469,6 +462,7 @@ def _cmd_whoami(args: argparse.Namespace, client: Any) -> int:
 
 
 def _cmd_logout(args: argparse.Namespace, client: Any) -> int:
+    """退出登录并清除本地登录态。"""
     if args.local_only:
         client.set_auth_token("")
         cookies = getattr(client.http, "cookies", None)
@@ -482,7 +476,7 @@ def _cmd_logout(args: argparse.Namespace, client: Any) -> int:
 
 
 def _cmd_probe(args: argparse.Namespace, client: Any) -> int:
-    # 进度信息走 stderr：--json 时 stdout 必须是干净的 JSON，否则没法直接管道给 jq
+    """探测候选接口路径，确认哪些路由还活着。"""
     print("正在探测候选接口（每个路径发一次空表单 POST，仅用于确认路由是否存在）…", file=sys.stderr)
     report = client.probe_endpoints()
 
@@ -505,11 +499,6 @@ def _cmd_probe(args: argparse.Namespace, client: Any) -> int:
     return EXIT_OK
 
 
-# --------------------------------------------------------------------------- #
-# 辅助
-# --------------------------------------------------------------------------- #
-
-
 def _prompt_code() -> str | None:
     """读取验证码，输入可见（验证码是短时效凭证，且便于核对），空输入表示放弃。"""
     try:
@@ -520,19 +509,15 @@ def _prompt_code() -> str | None:
 
 
 def _make_solver(args: argparse.Namespace) -> SliderSolver | None:
-    """按命令行参数造滑块解题回调。
-
-    默认拉起本地帮助页，由你在浏览器里拖官方极验组件；``--no-helper`` 则不解题，
-    命中滑块时直接抛 :class:`RiskControlRequired` 走原有提示。
-    """
+    """按命令行参数造滑块解题回调；`--no-helper` 则不解题。"""
     if getattr(args, "no_helper", False):
         return None
 
-    # None 才走默认值：--helper-port 0 是「交给系统分配」，不是「没传」
     port = SLIDER_HELPER_PORT if args.helper_port is None else args.helper_port
     timeout = SLIDER_HELPER_TIMEOUT if args.helper_timeout is None else args.helper_timeout
 
     def solve(challenge: SliderChallenge) -> SliderSolution:
+        """拉起本地帮助页求解一次滑块。"""
         return solve_via_helper(
             challenge,
             port=port,
@@ -544,6 +529,7 @@ def _make_solver(args: argparse.Namespace) -> SliderSolver | None:
 
 
 def _print_risk_control(exc: RiskControlRequired) -> None:
+    """按风控类型打印不同的处理方式。"""
     print("✗ 触发了风控，需要人工完成安全验证后才能继续。", file=sys.stderr)
     print(f"  原因：{exc.message}（code={exc.code}）", file=sys.stderr)
     if exc.verify_page:
@@ -551,13 +537,8 @@ def _print_risk_control(exc: RiskControlRequired) -> None:
     if exc.seed or exc.ts or exc.name:
         print(f"  滑块参数：seed={exc.seed} ts={exc.ts} name={exc.name}", file=sys.stderr)
     elif exc.raw:
-        # 没解析出滑块参数时，把原始 zpData 打出来——真实站点可能换了字段名，
-        # 看不到它就无从适配。
         print(f"  原始返回：{json.dumps(exc.raw, ensure_ascii=False)}", file=sys.stderr)
 
-    # 两条路的处理方式完全不同，不能混着说。--verify-token 是 SECURITY_CHECK(37)
-    # 那条的；滑块（400061）的票据是 challenge/validate/seccode 三件套，由帮助页
-    # 自动回传，压根不走 --verify-token。
     if exc.code in RISK_CODE_SLIDER:
         print(
             "  处理方式：滑块由你本人拖，客户端会自动衔接。\n"
@@ -574,10 +555,12 @@ def _print_risk_control(exc: RiskControlRequired) -> None:
 
 
 def _short(value: str, keep: int = 8) -> str:
+    """把长字符串收成 `前缀…后缀`。"""
     return value if len(value) <= keep * 2 else f"{value[:keep]}…{value[-keep:]}"
 
 
 def _setup_logging(verbose: bool) -> None:
+    """按是否 verbose 配置根日志级别。"""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",

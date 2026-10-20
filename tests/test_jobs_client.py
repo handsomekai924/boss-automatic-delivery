@@ -1,7 +1,7 @@
 """职位客户端：抓页 / 翻页流水线 / 节流 / 错误分类。
 
-重点验的是「**抓一页 → 立刻清洗 → 立刻入库 → 睡够间隔 → 下一页**」
-这条顺序，以及翻页停止条件。网络层用假会话，不打真实站点。
+重点验「抓一页 → 立刻清洗 → 立刻入库 → 睡够间隔 → 下一页」这条顺序，
+以及翻页停止条件。网络层用假会话，不打真实站点。
 """
 
 from __future__ import annotations
@@ -22,15 +22,17 @@ from boss_jobs.models import clean_page
 from boss_jobs.store import JobStore
 
 
-
-
 class FakeResponse:
+    """假的 HTTP 响应体。"""
+
     def __init__(self, payload=None, *, status: int = 200, text: str | None = None) -> None:
+        """初始化。"""
         self.status_code = status
         self._payload = payload
         self.text = text if text is not None else json.dumps(payload, ensure_ascii=False)
 
     def json(self):
+        """返回预置载荷；载荷是异常时直接抛出。"""
         if isinstance(self._payload, Exception):
             raise self._payload
         if self._payload is None:
@@ -42,12 +44,14 @@ class FakeHttp:
     """按序回脚本化响应；异常实例直接抛。裸 dict 自动包成 FakeResponse。"""
 
     def __init__(self, responses) -> None:
+        """初始化。"""
         self._responses = list(responses)
         self.calls: list[dict] = []
         self.headers: dict[str, str] = {}
         self.cookies = FakeCookieJar()
 
     def request(self, method, url, **kwargs):
+        """记录一次调用并返回下一条预置响应。"""
         self.calls.append({"method": method, "url": url, **kwargs})
         if not self._responses:
             raise AssertionError(f"没有预置响应可给，却收到了第 {len(self.calls)} 次请求：{url}")
@@ -58,16 +62,22 @@ class FakeHttp:
 
 
 class FakeCookieJar:
+    """最小 Cookie 罐，只支持 set/get/items。"""
+
     def __init__(self) -> None:
+        """初始化。"""
         self._data: dict[str, str] = {}
 
     def set(self, name, value, **_kwargs):
+        """写入一枚 Cookie。"""
         self._data[name] = value
 
     def get(self, name, default=None):
+        """按名取 Cookie，取不到回默认值。"""
         return self._data.get(name, default)
 
     def items(self):
+        """回 name→value 迭代。"""
         return self._data.items()
 
 
@@ -75,27 +85,30 @@ class RecordingSleeper:
     """记下每次睡了多久，好断言「页间真的睡了」。"""
 
     def __init__(self) -> None:
+        """初始化。"""
         self.calls: list[float] = []
 
     def __call__(self, seconds: float) -> None:
+        """记录本次睡眠秒数。"""
         self.calls.append(seconds)
 
 
 class FakeProvider:
-    """不打网络的 ``__zp_stoken__`` 桩，只验重试编排（详见 test_jobs_stoken）。"""
+    """不打网络的 `__zp_stoken__` 桩，只验重试编排。"""
 
     def __init__(self, token: str = "0138FAKE") -> None:
+        """初始化。"""
         self.token = token
         self.ensure_calls: list[bool] = []
 
     def ensure(self, *, force: bool = False) -> str:
+        """回令牌并记下是否强制换新。"""
         self.ensure_calls.append(force)
         return self.token
 
 
-
-
 def api_item(encrypt_job_id: str, job_name: str = "岗位", **overrides) -> dict:
+    """构造一条列表接口的职位项。"""
     item = {
         "encryptJobId": encrypt_job_id,
         "jobName": job_name,
@@ -113,10 +126,12 @@ def api_item(encrypt_job_id: str, job_name: str = "岗位", **overrides) -> dict
 
 
 def ok_page(items, *, has_more: bool = True) -> dict:
+    """构造一页成功的职位列表响应。"""
     return {"code": 0, "message": "Success", "zpData": {"jobList": items, "hasMore": has_more}}
 
 
 def client_with(responses, *, sleeper=None, **kwargs) -> tuple[JobClient, FakeHttp, RecordingSleeper]:
+    """用假会话造 JobClient，默认不重试并带记时睡眠。"""
     http = FakeHttp(responses)
     sleeper = sleeper or RecordingSleeper()
     kwargs.setdefault("retries", 0)
@@ -144,20 +159,20 @@ def cookie_map(http) -> dict[str, str]:
 class _StubFilter:
     """最小可用的 JobSearchFilter 桩：只要 to_params/for_page。
 
-    推荐页 special/zone 已移除，crawl/iter_pages 必须给 search_filter 或
-    expect_filter，所以每个走管线的用例都带上它。
+    crawl/iter_pages 必须给 search_filter 或 expect_filter，走管线的用例都带上它。
     """
 
     def __init__(self, params=None):
+        """初始化。"""
         self._params = dict(params or {"query": "python", "city": "101280100", "page": "1"})
 
     def to_params(self):
+        """回当前查询参数副本。"""
         return dict(self._params)
 
     def for_page(self, page):
+        """回换了页码的新桩。"""
         return _StubFilter({**self._params, "page": str(page)})
-
-
 
 
 def test_crawl_cleans_and_stores_each_page_then_sleeps(tmp_path):
@@ -168,7 +183,7 @@ def test_crawl_cleans_and_stores_each_page_then_sleeps(tmp_path):
     pages = [
         ok_page([api_item("a1"), api_item("a2")], has_more=True),
         ok_page([api_item("b1")], has_more=True),
-        ok_page([], has_more=False),  # 空页收尾
+        ok_page([], has_more=False),
     ]
     client, http, sleeper = client_with(pages)
     store = JobStore(tmp_path / "jobs.db")
@@ -203,6 +218,7 @@ def test_crawl_saves_before_sleep(tmp_path):
     seen: list[int] = []
 
     def spy(seconds: float) -> None:
+        """记录每次睡眠前的已入库条数。"""
         seen.append(store.count_jobs())
         sleeper.calls.append(seconds)
 
@@ -213,6 +229,7 @@ def test_crawl_saves_before_sleep(tmp_path):
 
 
 def test_crawl_respects_max_pages(tmp_path):
+    """验 max_pages 截断翻页。"""
     pages = [ok_page([api_item(f"id{i}")]) for i in range(1, 6)]
     client, http, sleeper = client_with(pages)
     with JobStore(tmp_path / "jobs.db") as store:
@@ -244,8 +261,8 @@ def test_crawl_ignores_unreliable_has_more_on_full_page(tmp_path):
 
     full = [api_item(f"id{i}") for i in range(C.PAGE_SIZE)]
     pages = [
-        ok_page(full, has_more=False),   # 满页 + hasMore=false → 继续
-        ok_page([], has_more=False),     # 空页 → 真的没了
+        ok_page(full, has_more=False),
+        ok_page([], has_more=False),
     ]
     client, http, _ = client_with(pages)
     with JobStore(tmp_path / "jobs.db") as store:
@@ -256,6 +273,7 @@ def test_crawl_ignores_unreliable_has_more_on_full_page(tmp_path):
 
 
 def test_crawl_zero_interval_skips_sleep(tmp_path):
+    """验页间隔为 0 时不睡。"""
     client, _, sleeper = client_with([ok_page([])])
     with JobStore(tmp_path / "jobs.db") as store:
         client.crawl(store=store, page_interval=0.0, search_filter=_StubFilter())
@@ -263,9 +281,10 @@ def test_crawl_zero_interval_skips_sleep(tmp_path):
 
 
 def test_crawl_keeps_already_stored_pages_on_error(tmp_path):
+    """验中途报错时已入库页保留。"""
     pages = [
         ok_page([api_item("a1")], has_more=True),
-        {"code": 7, "message": "当前登录状态已失效"},  # 第 2 页才失效
+        {"code": 7, "message": "当前登录状态已失效"},
     ]
     client, _, _ = client_with(pages)
     store = JobStore(tmp_path / "jobs.db")
@@ -278,6 +297,7 @@ def test_crawl_keeps_already_stored_pages_on_error(tmp_path):
 
 
 def test_crawl_opens_default_store_when_not_given(tmp_path, monkeypatch):
+    """验不传 store 时自动开默认库。"""
     db_path = tmp_path / "auto.db"
     monkeypatch.setattr("boss_jobs.client.open_store", lambda path=None: JobStore(db_path))
     client, _, _ = client_with([ok_page([])])
@@ -302,7 +322,7 @@ def test_crawl_带search_filter_走搜索流(tmp_path):
 
 
 def test_crawl_两个filter都不给就报错(tmp_path):
-    """推荐页 special/zone 已移除：两个 filter 都不给 = 没有检索语义，抛 ValueError。"""
+    """验两个 filter 都不给时没有检索语义，抛 ValueError。"""
     client, http, _ = client_with([ok_page([api_item("r1")], has_more=False)])
     with JobStore(tmp_path / "r.db") as store:
         with pytest.raises(ValueError, match="expect_filter 或 search_filter"):
@@ -330,9 +350,10 @@ def test_crawl_搜索流_翻页时换页码(tmp_path):
 
 
 def test_iter_pages_yields_without_store():
+    """验 iter_pages 不落库也能逐页产出。"""
     pages = [
         ok_page([api_item("a1")], has_more=True),
-        ok_page([api_item("b1")], has_more=False),  # 不满页（1 < 15）→ 停
+        ok_page([api_item("b1")], has_more=False),
     ]
     client, _, sleeper = client_with(pages)
     results = list(client.iter_pages(page_interval=1.0, search_filter=_StubFilter()))
@@ -342,25 +363,21 @@ def test_iter_pages_yields_without_store():
 
 
 def test_iter_pages_两个filter都不给就报错():
+    """验不给 filter 时 iter_pages 抛 ValueError。"""
     client, _, _ = client_with([])
     with pytest.raises(ValueError, match="expect_filter 或 search_filter"):
         list(client.iter_pages())
 
 
-
-
 def test_session_expired_error_is_tagged():
+    """验 code 7 标成登录失效。"""
     err = JobApiError(7, "当前登录状态已失效")
     assert err.is_session_expired
     assert not err.is_browser_check
 
 
 def test_code1_non_login_message_is_not_session_expired():
-    """code 1 是业务失败的通用码，不能一律当登录失效。
-
-    「开聊提醒」（每日沟通配额）就是 code 1——真当成登录失效，会把人支去
-    重新登录、登录了也照样发不出去（2026-10-09 实测踩过）。
-    """
+    """code 1 是业务失败的通用码，不能一律当登录失效。"""
     err = JobApiError(1, "开聊提醒")
     assert not err.is_session_expired
     assert not err.is_browser_check
@@ -368,10 +385,7 @@ def test_code1_non_login_message_is_not_session_expired():
 
 
 def test_chat_remind_dialog_is_tagged():
-    """``friend/add.json`` 的「开聊提醒」弹窗：是沟通配额，不是登录失效。
-
-    没 raw、只有话术的也认（测试/手工抛的异常）。
-    """
+    """「开聊提醒」弹窗：是沟通配额，不是登录失效。没 raw、只有话术的也认。"""
     raw = {
         "code": 1,
         "message": "开聊提醒",
@@ -444,24 +458,28 @@ def test_request_json_surfaces_dialog_content_as_message():
 
 
 def test_browser_check_error_is_tagged():
+    """验 code 37 标成浏览器校验。"""
     err = JobApiError(37, "你的浏览器环境异常", raw={"zpData": {"seed": "x", "ts": 1, "name": "y"}})
     assert err.is_browser_check
     assert not err.is_session_expired
 
 
 def test_transport_error_on_bad_json():
+    """验非 JSON 响应归为传输错误。"""
     client, _, _ = client_with([FakeResponse(None, text="<html>oops</html>")])
     with pytest.raises(JobTransportError):
         client.fetch_search_page(_StubFilter())
 
 
 def test_data_error_on_non_object_payload():
+    """验非对象载荷抛数据错误。"""
     client, _, _ = client_with([FakeResponse([1, 2, 3])])
     with pytest.raises(JobDataError):
         client.fetch_search_page(_StubFilter())
 
 
 def test_retries_then_succeeds():
+    """验 5xx 后重试成功。"""
     sleeper = RecordingSleeper()
     pages = [
         FakeResponse(None, status=502),
@@ -474,9 +492,8 @@ def test_retries_then_succeeds():
     assert sleeper.calls == [0.5]
 
 
-
-
 def test_http_from_session_loads_cookies(tmp_path):
+    """用假会话验灌 Cookie 的逻辑；真 requests.Session 见下一个用例。"""
     from boss_login.session import StoredSession, save_session
 
     session_path = tmp_path / "session.db"
@@ -498,6 +515,7 @@ def test_http_from_session_loads_cookies(tmp_path):
 
 
 def test_http_from_session_explains_missing_session(tmp_path):
+    """验缺会话文件时错误话术带路径和 boss_login。"""
     missing = tmp_path / "nope.json"
     with pytest.raises(JobApiError) as excinfo:
         http_from_session(missing)
@@ -506,6 +524,7 @@ def test_http_from_session_explains_missing_session(tmp_path):
 
 
 def test_create_client_uses_session(tmp_path):
+    """验 create_client 读会话 Cookie 并保留页间隔。"""
     from boss_login.session import StoredSession, save_session
 
     session_path = tmp_path / "session.db"
@@ -515,9 +534,8 @@ def test_create_client_uses_session(tmp_path):
     assert cookie_map(client._http) == {"wt2": "x"}
 
 
-
-
 def write_session(tmp_path, cookies: dict[str, str]):
+    """把 Cookie 落成会话文件并回路径。"""
     from boss_login.session import StoredSession, save_session
 
     session_path = tmp_path / "session.db"
@@ -526,6 +544,7 @@ def write_session(tmp_path, cookies: dict[str, str]):
 
 
 def test_stoken_从显式参数来(tmp_path):
+    """验 stoken 显式参数写进 Cookie。"""
     path = write_session(tmp_path, {"wt2": "x"})
     fake = FakeHttp([])
     http_from_session(path, http=fake, stoken="TOKEN-FROM-ARG")
@@ -533,6 +552,7 @@ def test_stoken_从显式参数来(tmp_path):
 
 
 def test_stoken_从session_json来(tmp_path):
+    """验 stoken 取自会话文件。"""
     path = write_session(tmp_path, {"wt2": "x", "__zp_stoken__": "TOKEN-FROM-SESSION"})
     fake = FakeHttp([])
     http_from_session(path, http=fake)
@@ -540,6 +560,7 @@ def test_stoken_从session_json来(tmp_path):
 
 
 def test_stoken_从环境变量兜底(tmp_path, monkeypatch):
+    """验会话无 stoken 时用环境变量兜底。"""
     monkeypatch.setenv("BOSS_ZP_STOKEN", "TOKEN-FROM-ENV")
     path = write_session(tmp_path, {"wt2": "x"})
     fake = FakeHttp([])
@@ -548,6 +569,7 @@ def test_stoken_从环境变量兜底(tmp_path, monkeypatch):
 
 
 def test_stoken_显式参数优先级最高(tmp_path, monkeypatch):
+    """验显式 stoken 优先于会话和环境变量。"""
     monkeypatch.setenv("BOSS_ZP_STOKEN", "TOKEN-FROM-ENV")
     path = write_session(tmp_path, {"__zp_stoken__": "TOKEN-FROM-SESSION"})
     fake = FakeHttp([])
@@ -556,6 +578,7 @@ def test_stoken_显式参数优先级最高(tmp_path, monkeypatch):
 
 
 def test_stoken_都没有就不带它(tmp_path, monkeypatch):
+    """验三处都没有 stoken 时不写 Cookie。"""
     monkeypatch.delenv("BOSS_ZP_STOKEN", raising=False)
     path = write_session(tmp_path, {"wt2": "x"})
     fake = FakeHttp([])
@@ -564,11 +587,7 @@ def test_stoken_都没有就不带它(tmp_path, monkeypatch):
 
 
 def test_换新令牌时不会留下同名旧Cookie(tmp_path, monkeypatch):
-    """同名不同 domain 的 Cookie 会一起进请求头，服务端照旧的那枚拒。
-
-    实测踩过：``http_from_session`` 不带 domain 写了一枚，后面 ``put_cookie``
-    又按 domain=.zhipin.com 补一枚，请求头里 ``__zp_stoken__=旧; __zp_stoken__=新``。
-    """
+    """换新令牌时清掉同名旧 Cookie，避免请求头里同时出现两枚。"""
     import requests
 
     from boss_jobs.stoken import put_cookie
@@ -586,6 +605,7 @@ def test_换新令牌时不会留下同名旧Cookie(tmp_path, monkeypatch):
 
 
 def test_stoken_会话里有就不会被环境变量盖掉(tmp_path, monkeypatch):
+    """验会话里的 stoken 不被环境变量覆盖。"""
     monkeypatch.setenv("BOSS_ZP_STOKEN", "TOKEN-FROM-ENV")
     path = write_session(tmp_path, {"__zp_stoken__": "TOKEN-FROM-SESSION"})
     fake = FakeHttp([])
@@ -593,9 +613,8 @@ def test_stoken_会话里有就不会被环境变量盖掉(tmp_path, monkeypatch
     assert cookie_map(fake)["__zp_stoken__"] == "TOKEN-FROM-SESSION"
 
 
-
-
 def search_filter(**kwargs):
+    """构造一条搜索筛选。"""
     from boss_filter.search import JobSearchFilter
 
     kwargs.setdefault("query", "python")
@@ -604,6 +623,7 @@ def search_filter(**kwargs):
 
 
 def test_fetch_search_page_打搜索路由():
+    """验搜索流打 search/joblist 路由。"""
     client, http, _ = client_with([ok_page([api_item("a")])])
     client.fetch_search_page(search_filter())
     call = http.calls[0]
@@ -612,6 +632,7 @@ def test_fetch_search_page_打搜索路由():
 
 
 def test_fetch_search_page_把筛选条件摊成查询串():
+    """验筛选条件摊平进查询串。"""
     client, http, _ = client_with([ok_page([])])
     client.fetch_search_page(search_filter(salary="405", experience=("104", "105")))
     params = http.calls[0]["params"]
@@ -624,6 +645,7 @@ def test_fetch_search_page_把筛选条件摊成查询串():
 
 
 def test_fetch_search_page_翻页只改页码():
+    """验搜索流翻页只改 page 参数。"""
     client, http, _ = client_with([ok_page([api_item("a")]), ok_page([api_item("b")])])
     first = client.fetch_search_page(search_filter(), page=1)
     second = client.fetch_search_page(search_filter(), page=2)
@@ -634,14 +656,14 @@ def test_fetch_search_page_翻页只改页码():
 
 
 def test_fetch_search_page_清洗后回PageResult():
+    """验列表项清洗后进 PageResult。"""
     client, http, _ = client_with([ok_page([api_item("a", jobName="Python 开发")])])
     result = client.fetch_search_page(search_filter())
     assert [job.job_name for job in result.jobs] == ["Python 开发"]
 
 
 def test_fetch_search_page_code37_标记成浏览器校验():
-    """code 37 归到 is_browser_check；「去哪儿补令牌」的话术在 CLI 层（见
-    test_cli_fetch_reports_browser_check），客户端只负责把码标对。"""
+    """验 code 37 标成浏览器校验，补令牌话术留给 CLI 层。"""
     client, http, _ = client_with(
         [{"code": 37, "message": "你的浏览器环境异常", "zpData": {"seed": "s", "ts": 1, "name": "n"}}]
     )
@@ -652,12 +674,8 @@ def test_fetch_search_page_code37_标记成浏览器校验():
     assert not excinfo.value.is_session_expired
 
 
-# --------------------------------------------------------------------------- #
-# 期望流（recommend/job/list + recommend/expect/list）
-# --------------------------------------------------------------------------- #
-
-
 def expect_filter(**kwargs):
+    """构造一条期望筛选。"""
     from boss_filter.expect import JobExpectFilter
 
     kwargs.setdefault("kind", "expect")
@@ -666,6 +684,7 @@ def expect_filter(**kwargs):
 
 
 def ok_expects(*, mix=None, expects=(), part_time=()) -> dict:
+    """构造成功的期望列表响应。"""
     zp: dict = {}
     if mix is not None:
         zp["mixExpect"] = mix
@@ -677,6 +696,7 @@ def ok_expects(*, mix=None, expects=(), part_time=()) -> dict:
 
 
 def test_fetch_expect_list_打期望元数据路由():
+    """验期望元数据打 expect/list 路由。"""
     client, http, _ = client_with(
         [ok_expects(mix={"encryptExpectId": "MIX1", "positionName": "混合", "locationName": "佛山", "mixExpectType": "2"})]
     )
@@ -689,6 +709,7 @@ def test_fetch_expect_list_打期望元数据路由():
 
 
 def test_fetch_expect_page_打期望流路由():
+    """验期望流打 recommend/job/list 路由。"""
     client, http, _ = client_with([ok_page([api_item("a")])])
     client.fetch_expect_page(expect_filter())
     call = http.calls[0]
@@ -697,6 +718,7 @@ def test_fetch_expect_page_打期望流路由():
 
 
 def test_fetch_expect_page_四种kind的主参数():
+    """验四种 kind 各自的主查询参数。"""
     cases = [
         (dict(kind="recommend", encrypt_expect_id="MIX1", mix_expect_type="2", city="101280100"),
          {"encryptExpectId": "MIX1", "mixExpectType": "2", "city": "101280100"}),
@@ -718,6 +740,7 @@ def test_fetch_expect_page_四种kind的主参数():
 
 
 def test_fetch_expect_page_翻页只改页码():
+    """验期望流翻页只改 page 参数。"""
     client, http, _ = client_with([ok_page([]), ok_page([])])
     f = expect_filter()
     first = client.fetch_expect_page(f, page=1)
@@ -729,13 +752,16 @@ def test_fetch_expect_page_翻页只改页码():
 
 
 def test_fetch_expect_page_走stoken重试():
-    """期望流在安全网关后面（缺令牌回 code 37），撞 37 先退避拿同一枚重试。"""
+    """验期望流撞 37 先退避拿同一枚重试。"""
     from boss_jobs import config as C
 
     tokens = []
 
     class OnceProvider:
+        """只回一枚令牌的 stoken 桩。"""
+
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             tokens.append(force)
             return "TOKEN-1"
 
@@ -749,7 +775,7 @@ def test_fetch_expect_page_走stoken重试():
     client = JobClient(http=http, stoken_provider=OnceProvider(), sleeper=sleeper)
     result = client.fetch_expect_page(expect_filter())
     assert [job.job_name for job in result.jobs] == ["岗位"]
-    assert tokens == [False]  # 同一枚重试，没急着换新
+    assert tokens == [False]
     assert sleeper.calls == [C.BROWSER_CHECK_BACKOFF]
     assert len(http.calls) == 2
 
@@ -800,9 +826,8 @@ def test_crawl_只有search_filter_仍走搜索流(tmp_path):
     assert "recommend/job/list" not in http.calls[0]["url"]
 
 
-
-
 def test_cli_fetch_writes_db(tmp_path, monkeypatch):
+    """验 CLI fetch 写库。"""
     from boss_jobs import config as C
 
     full = [api_item(f"id{i}") for i in range(C.PAGE_SIZE)]
@@ -827,10 +852,7 @@ def test_cli_fetch_writes_db(tmp_path, monkeypatch):
 
 
 def test_cli_fetch_reports_browser_check(tmp_path, monkeypatch, capsys):
-    """自动补一枚重试后**仍然** 37，才算「救不回来」。
-
-    现在是拉 Chrome（CDP）让站点自己算，提示也改成「自动补 + 仍被拒怎么办」。
-    """
+    """验自动补令牌后仍被拒时，提示用 CDP/Chrome 补救。"""
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session",
         lambda *a, **k: FakeHttp(
@@ -875,18 +897,21 @@ class _Httplet:
     """只实现 crawl 要用的 request() 的极简会话。"""
 
     def __init__(self, request):
+        """初始化。"""
         self._request = request
         self.headers: dict[str, str] = {}
         self.cookies = FakeCookieJar()
 
     def request(self, method, url, **kwargs):
+        """转发到构造时传入的 request。"""
         return self._request(method, url, **kwargs)
 
 
 def _capturing_http(captured):
-    """造一个会话，把每次请求的 url/params 记进 ``captured``。"""
+    """造一个会话，把每次请求的 url/params 记进 `captured`。"""
 
     def _request(method, url, **kwargs):
+        """记下 URL/params 并回一页职位。"""
         captured["url"] = url
         captured["params"] = kwargs.get("params") or {}
         return FakeResponse(ok_page([api_item("j1")], has_more=False))
@@ -895,7 +920,7 @@ def _capturing_http(captured):
 
 
 def test_cli_fetch_filter文件_有筛选就走搜索流(tmp_path, monkeypatch, capsys):
-    """--filter 指定的 JSON 里写了条件 → 打 search/joblist，并把条件带进查询串。"""
+    """验 --filter JSON 有条件时走搜索流并把条件带进查询串。"""
     f = tmp_path / "f.json"
     f.write_text(
         '{"query": "python", "city": "101280100", "salary": "405"}', encoding="utf-8"
@@ -936,7 +961,7 @@ def test_cli_fetch_库里的条件_走搜索流(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_fetch_两边都没有条件_报错(tmp_path, monkeypatch, capsys):
-    """推荐页 special/zone 已下线：库里条件全空 + 没给 --filter/--expect → 报错退出。"""
+    """验库里条件全空且没给 --filter/--expect 时报错退出。"""
     captured = {}
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session", lambda *a, **k: _capturing_http(captured)
@@ -953,6 +978,7 @@ def _routing_http(captured, *, expects=None):
     """按 URL 路由：期望元数据回 expects，职位页回 ok_page 并记下参数。"""
 
     def _request(method, url, **kwargs):
+        """按 URL 路由回响应并记下调用。"""
         captured["url"] = url
         captured.setdefault("calls", []).append({"url": url, "params": kwargs.get("params") or {}})
         if "expect/list" in url:
@@ -964,7 +990,7 @@ def _routing_http(captured, *, expects=None):
 
 
 def test_cli_fetch_expect_兼职(tmp_path, monkeypatch, capsys):
-    """--expect part_time → 期望流，jobType 写死 1903，id 取 partTimeExpectList[0]。"""
+    """验 --expect part_time 走期望流，jobType=1903。"""
     captured = {}
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session",
@@ -984,7 +1010,7 @@ def test_cli_fetch_expect_兼职(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_fetch_expect_推荐(tmp_path, monkeypatch, capsys):
-    """--expect recommend → 混合期望，带 mixExpectType，city 取 mix.location。"""
+    """验 --expect recommend 走混合期望并带 mixExpectType。"""
     captured = {}
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session",
@@ -1004,7 +1030,7 @@ def test_cli_fetch_expect_推荐(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_fetch_expect_指定期望(tmp_path, monkeypatch, capsys):
-    """--expect expect:<id> 显式点名，不必先拉期望列表。"""
+    """验 --expect expect:<id> 显式点名，不拉期望列表。"""
     captured = {}
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session",
@@ -1016,12 +1042,12 @@ def test_cli_fetch_expect_指定期望(tmp_path, monkeypatch, capsys):
     assert code == 0
     assert "recommend/job/list" in captured["url"]
     assert captured["params"]["encryptExpectId"] == "E9"
-    # 显式 id 不拉期望列表
+
     assert all("expect/list" not in c["url"] for c in captured["calls"])
 
 
 def test_cli_fetch_expect_临时期望(tmp_path, monkeypatch, capsys):
-    """--expect temp:<file> 读 expectInfo JSON，发 expectInfo 不发 encryptExpectId。"""
+    """验 --expect temp:<file> 发 expectInfo 不发 encryptExpectId。"""
     info = tmp_path / "temp.json"
     info.write_text(
         '{"expectType":"1","position":"python","location":"101280100","lowSalary":"10","highSalary":"20"}',
@@ -1042,7 +1068,7 @@ def test_cli_fetch_expect_临时期望(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_fetch_expect与filter互斥(tmp_path, capsys):
-    """两条流是「这次走哪条检索路径」的二选一，同时给就报错退出。"""
+    """验 expect 与 filter 互斥，同时给就报错退出。"""
     f = tmp_path / "f.json"
     f.write_text('{"query": "python"}', encoding="utf-8")
     with pytest.raises(SystemExit) as excinfo:
@@ -1053,6 +1079,7 @@ def test_cli_fetch_expect与filter互斥(tmp_path, capsys):
 
 
 def test_cli_fetch_expect_取值不认识就报错(tmp_path, monkeypatch, capsys):
+    """验 --expect 取值不认识时报错退出。"""
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session", lambda *a, **k: _routing_http({}, expects=ok_expects())
     )
@@ -1063,6 +1090,7 @@ def test_cli_fetch_expect_取值不认识就报错(tmp_path, monkeypatch, capsys
 
 
 def test_cli_list_and_stats(tmp_path, monkeypatch, capsys):
+    """验 CLI list 与 stats 输出。"""
     db_path = tmp_path / "cli.db"
     with JobStore(db_path) as store:
         store.save_page(clean_page(ok_page([api_item("a", jobName="Python 开发", cityName="广州")]), page=1))
@@ -1074,8 +1102,6 @@ def test_cli_list_and_stats(tmp_path, monkeypatch, capsys):
     assert cli.main(["--db", str(db_path), "stats", "--json"]) == 0
     out = capsys.readouterr().out
     assert json.loads(out)["jobs"] == 1
-
-
 
 
 def test_crawl_on_progress_fires_per_page(tmp_path):
@@ -1108,9 +1134,11 @@ def test_crawl_should_stop_breaks_before_next_page(tmp_path):
     calls = {"n": 0}
 
     def stop_after_first() -> bool:
+        """第一页之后请求停止。"""
         return calls["n"] >= 1
 
     def counting(payload):
+        """进度回调：累加页数。"""
         calls["n"] += 1
 
     with JobStore(tmp_path / "s.db") as store:
@@ -1135,9 +1163,8 @@ def test_crawl_without_hooks_still_works(tmp_path):
     assert report.stats.pages == 1
 
 
-
-
 def test_fetch_job_detail_hits_detail_endpoint():
+    """验详情打 job/detail 路由并解析 JD。"""
     http = FakeHttp(
         [
             {
@@ -1160,17 +1187,21 @@ def test_fetch_job_detail_hits_detail_endpoint():
 
 
 def test_fetch_job_detail_requires_security_id():
+    """验缺 securityId 时不发请求。"""
     client = JobClient(http=FakeHttp([]))
     with pytest.raises(ValueError):
         client.fetch_job_detail(security_id="", lid="L1")
 
 
 def test_fetch_job_detail_ensures_stoken():
-    """实测：详情跟搜索一样要 __zp_stoken__，缺了回 code 37。"""
+    """验详情与搜索一样先 ensure `__zp_stoken__`。"""
     tokens = []
 
     class FakeProvider:
+        """记录 ensure 并回固定令牌的 stoken 桩。"""
+
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             tokens.append(force)
             return "TOKEN-1"
 
@@ -1187,13 +1218,16 @@ def test_fetch_job_detail_ensures_stoken():
 
 
 def test_fetch_job_detail_撞37先歇会儿再用同一枚重试():
-    """37 有时只是「请求太快」：先退避拿**同一枚**重试，别急着拉 Chrome。"""
+    """验 37 先退避拿同一枚重试，不急着换新。"""
     from boss_jobs import config as C
 
     tokens = []
 
     class OnceProvider:
+        """只回一枚令牌的 stoken 桩。"""
+
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             tokens.append(force)
             return "TOKEN-1"
 
@@ -1213,10 +1247,14 @@ def test_fetch_job_detail_撞37先歇会儿再用同一枚重试():
 
 
 def test_fetch_job_detail_歇完还37才强制换新():
+    """验歇完仍 37 才强制换新令牌。"""
     tokens = []
 
     class CountingProvider:
+        """每次 ensure 换一枚递增令牌的 stoken 桩。"""
+
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             tokens.append(force)
             return f"TOKEN-{len(tokens)}"
 
@@ -1235,7 +1273,7 @@ def test_fetch_job_detail_歇完还37才强制换新():
 
 
 def test_enrich_page_details_survives_single_failure(tmp_path):
-    """单条详情失败只记流水，下一条继续——不拖垮列表抓取。"""
+    """验单条详情失败只记流水，下一条继续。"""
     from boss_jobs.models import Job, PageResult
 
     jobs = (
@@ -1306,13 +1344,14 @@ def test_enrich_page_details_已有描述不再重复获取(tmp_path):
 
 
 def test_fetch_job_detail_换新冷却没换到_不再打第三发():
-    """force 冷却中 ensure 回的是**同一枚**：刚被拒过，再打一发纯属撞墙。"""
+    """验 force 冷却没换到新令牌时不再打第三发。"""
     tokens = []
 
     class CooldownProvider:
         """假装换新冷却中——force 也只回同一枚令牌。"""
 
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             tokens.append(force)
             return "TOKEN-SAME"
 
@@ -1331,14 +1370,7 @@ def test_fetch_job_detail_换新冷却没换到_不再打第三发():
 
 
 def test_enrich_page_details_连环撞37就停批(tmp_path):
-    """连着撞 N 次 code 37 = 整段被限速了，停掉补 JD，别拿剩下的去探墙。
-
-    每条都走完整的 37 重试梯（首打 + 歇会儿 + 不换新就不再打）＝每条 2 发，
-    够把脚本吃穿。第 4 条起脚本没了 → 也是 37 之外的错，所以这里全给 37，
-    看的是「连环 N 次就停」。
-    GIVEUP 条 detail_error 之后必须有一条 detail_stopped——剩下那条（e）连试都不试。
-    只碰了前 N 条（每条 2 发），没碰剩下的。
-    """
+    """验连环撞 N 次 code 37 后停批，不再补 JD。"""
     from boss_jobs import config as C
     from boss_jobs.models import Job, PageResult
 
@@ -1356,7 +1388,10 @@ def test_enrich_page_details_连环撞37就停批(tmp_path):
     ] * 20
 
     class SameTokenProvider:
+        """force 也只回同一枚令牌的 stoken 桩。"""
+
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             return "TOKEN-SAME"
 
     http = FakeHttp(responses)
@@ -1378,10 +1413,7 @@ def test_enrich_page_details_连环撞37就停批(tmp_path):
 
 
 def test_enrich_page_details_37失败后多躺一会(tmp_path):
-    """单条 37 不停批时，下一条之前多睡 BROWSER_CHECK_COOLOFF——别撞着墙继续敲。
-
-    至少睡过：BROWSER_CHECK_BACKOFF（37 重试）+ BROWSER_CHECK_COOLOFF（失败后躺平）。
-    """
+    """验单条 37 后下一条前多睡 COOLOFF，且至少睡过 BACKOFF。"""
     from boss_jobs import config as C
     from boss_jobs.models import Job, PageResult
 
@@ -1392,15 +1424,18 @@ def test_enrich_page_details_37失败后多躺一会(tmp_path):
     page = PageResult(page=1, jobs=jobs, has_more=False, raw_count=2)
 
     class SameTokenProvider:
+        """force 也只回同一枚令牌的 stoken 桩。"""
+
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             return "TOKEN-SAME"
 
     http = FakeHttp(
         [
-            # a：37 → 歇 2s 重试 → 37 → force 不换新 → 抛
+
             {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
             {"code": 37, "message": "您的环境存在异常.", "zpData": {}},
-            # b：一把过
+
             {"code": 0, "zpData": {"jobInfo": {"postDescription": "B 的 JD"}}},
         ]
     )
@@ -1422,10 +1457,8 @@ def test_enrich_page_details_37失败后多躺一会(tmp_path):
         assert C.BROWSER_CHECK_COOLOFF in sleeper.calls
 
 
-
-
 def test_greet_posts_form_with_query_params():
-    """打招呼：POST friend/add.json，query 带 securityId/jobId/lid，body 带 encryptBossId/sessionId。"""
+    """验打招呼 POST friend/add.json，query/body 参数各就各位。"""
     http = FakeHttp([{"code": 0, "message": "Success", "zpData": {}}])
     client = JobClient(http=http)
     result = client.greet(
@@ -1454,13 +1487,7 @@ def test_greet_不带的可选字段就不发():
 
 
 def test_greet_这条接口没有招呼语参数():
-    """**定案**：``friend/add`` 只建会话、不投递正文（实测）。
-
-    以前这里有个 ``greeting=`` 参数，塞进 body 服务端直接忽略（回 code 0，
-    聊天框还是空的）。现在参数整个删掉——想发正文只能走
-    :meth:`JobClient.deliver_greeting`（MQTT 聊天通道），别在这条接口上
-    再长出第二个「正文入参」。
-    """
+    """验 greet 不接受 greeting 入参——正文走 `JobClient.deliver_greeting`。"""
     import inspect
 
     params = inspect.signature(JobClient.greet).parameters
@@ -1484,7 +1511,7 @@ def test_greet_extra_透传非空字段():
 
 
 def _chat_remind_payload(content: str = "您今天已与120位BOSS沟通，还剩30次沟通机会哦") -> dict:
-    """真实形态的「开聊提醒」弹窗响应（2026-10-09 实测 friend/add.json）。"""
+    """构造「开聊提醒」弹窗的真实形态响应。"""
     return {
         "code": 1,
         "message": "开聊提醒",
@@ -1513,19 +1540,13 @@ def _chat_remind_payload(content: str = "您今天已与120位BOSS沟通，还�
 
 
 def test_greet_开聊提醒_模拟点击确认_cid1_后建会话():
-    """「开聊提醒」是提示弹窗：greet 自动模拟点「好」，带 cid=1 重打 friend/add。
-
-    站点前端（chunk ``1326.ad80b1c8.js``）点「好」走的就是这条：
-    埋点 ``addf-limit-popup-c`` → ``friend/add`` 带 ``cid=1`` → 埋点
-    ``addf-limit-popup-connect``。实测带上 ``cid=1`` 直接 code 0 建会话——
-    **这是提示不是硬拦**，「还剩30次」就是还能再发的次数。
-    """
+    """验「开聊提醒」自动模拟点「好」：埋点 → friend/add 带 cid=1 → 埋点。"""
     http = FakeHttp(
         [
             _chat_remind_payload(),
-            {"code": 0, "message": "Success", "zpData": True},  # 埋点 c
+            {"code": 0, "message": "Success", "zpData": True},
             {"code": 0, "message": "Success", "zpData": {"securityId": "SEC-NEW"}},
-            {"code": 0, "message": "Success", "zpData": True},  # 埋点 connect
+            {"code": 0, "message": "Success", "zpData": True},
         ]
     )
     client = JobClient(http=http)
@@ -1545,22 +1566,22 @@ def test_greet_开聊提醒_模拟点击确认_cid1_后建会话():
     ]
 
     first, log_c, confirm, log_connect = http.calls
-    # 第一发：普通打招呼，body 里没有 cid
+
     assert first["data"] == {"encryptBossId": "BOSS1"}
-    # 弹窗埋点（模拟弹窗弹出）
+
     assert log_c["data"]["action"] == "addf-limit-popup-c"
     assert "ba" in log_c["data"]
-    # 确认那发：cid=1，且 securityId/jobId/lid 只在 query（塞进 body 会 code 17）
+
     assert confirm["data"]["cid"] == 1
     assert confirm["data"] == {"encryptBossId": "BOSS1", "cid": 1}
     assert confirm["params"] == {"securityId": "SEC1", "jobId": "J1", "lid": "L1"}
-    # 点「好」之后的埋点
+
     assert log_connect["data"]["action"] == "addf-limit-popup-connect"
     assert log_connect["data"]["p8"] == "11"
 
 
 def test_greet_开聊提醒_确认后仍被拦才抛原弹窗():
-    """确认后还弹同一个窗 → 抛出来，话术仍是弹窗那句原话（含「还剩 N 次」）。"""
+    """验确认后仍被拦时抛原弹窗话术。"""
     http = FakeHttp(
         [
             _chat_remind_payload(),
@@ -1616,6 +1637,7 @@ def test_chat_limit_exhausted_recognizes_tomorrow_message_only():
 
 
 def test_greet_does_not_confirm_when_daily_limit_is_exhausted():
+    """验额度已尽时不再模拟确认。"""
     message = "您今天已与150位BOSS沟通，休息一下，明天再来吧～"
     http = FakeHttp([_chat_remind_payload(message)])
 
@@ -1629,6 +1651,7 @@ def test_greet_does_not_confirm_when_daily_limit_is_exhausted():
 
 
 def test_chat_rate_limit_phrase_recognizes_real_api_error():
+    """验「操作过于频繁」标成聊天限速。"""
     err = JobApiError(1, "您的操作过于频繁，请稍后再试")
 
     assert err.is_chat_rate_limited
@@ -1649,7 +1672,7 @@ def test_greet_缺关键参数直接报错(security_id, encrypt_job_id):
 
 
 def test_greet_code36_标记成账号风控():
-    """code 36 = 账号异常 / 人机验证：抛出来让上层**停整批**去人工处理。"""
+    """验 code 36 标成账号风控，交上层停整批。"""
     http = FakeHttp([{"code": 36, "message": "您的账户存在异常行为", "zpData": {}}])
     client = JobClient(http=http)
     with pytest.raises(JobApiError) as ei:
@@ -1660,6 +1683,7 @@ def test_greet_code36_标记成账号风控():
 
 
 def test_greet_code37_标记成浏览器校验():
+    """验 greet 的 code 37 标成浏览器校验。"""
     http = FakeHttp([{"code": 37, "message": "您的环境存在异常.", "zpData": {}}])
     client = JobClient(http=http)
     with pytest.raises(JobApiError) as ei:
@@ -1668,13 +1692,16 @@ def test_greet_code37_标记成浏览器校验():
 
 
 def test_greet_撞37先歇会儿再用同一枚重试():
-    """跟搜索 / 详情同一套重试：先拿**同一枚**令牌退避重试，别急着换新。"""
+    """验 greet 与搜索/详情同一套 37 退避重试。"""
     from boss_jobs import config as C
 
     tokens = []
 
     class OnceProvider:
+        """只回一枚令牌的 stoken 桩。"""
+
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             tokens.append(force)
             return "TOKEN-1"
 
@@ -1697,7 +1724,10 @@ def test_greet_挂了stoken也能发():
     tokens = []
 
     class FakeProvider:
+        """记录 ensure 并回固定令牌的 stoken 桩。"""
+
         def ensure(self, *, force: bool = False):
+            """回令牌并记下是否强制换新。"""
             tokens.append(force)
             return "TOKEN-G"
 

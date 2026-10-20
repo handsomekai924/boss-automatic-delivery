@@ -1,38 +1,24 @@
 """筛选项兜底常量表。
 
-⚠️ 数据来源
---------------------------------------------------------------------------------
-**已实测确认**（2026-09-30 直接打真实站点，Cookie 取自登录会话）：
+数据与线上接口逐项对齐（2026-09-30 / 2026-10-19 实测），不是手抄界面；
+明细见 `notes/boss_filter/tables.md`。
 
-  GET /wapi/zpgeek/pc/all/filter/conditions.json
-      → zpData: {payTypeList, experienceList, salaryList, stageList,
-                 scaleList, partTimeList, degreeList, jobTypeList}
-      各项均为 ``{code, name}``（salaryList 另有 ``lowSalary`` / ``highSalary``）。
-  GET /wapi/zpgeek/search/job/hot/city.json
-      → zpData.hotCityList: [{code, name}]，共 15 项（含「全国」100010000）。
-  GET /wapi/zpCommon/data/city.json
-      → 省→市→区三级树，体量约 900KB，不适合写死；兜底时只留热点城市。
-
-**公司行业有独立接口**：``/wapi/zpCommon/data/industry.json`` 返回完整的行业树
-（15 个分组 + 134 个子行业，code 为 ``1000xx`` 格式）。当前 chunk（
-``app~2.1a6c0514.js``）里另有 ``/wapi/zpgeek/recommend/industry/query.json``
-（要登录态，返回用户选中的子集）。本表已与 ``industry.json`` 对齐。
-兜底时直接用写死表；在线时 :func:`boss_filter.client.load_industries` 会优先拉接口。
-
-下表中的文案与 code 与线上接口逐项对齐，不是手抄界面。
+Attributes:
+    SALARIES: 薪资待遇；code 与接口一致，low/high 单位为 K（千元）。
+    PAY_TYPES: 结算方式（接口顺带返回）。
+    INDUSTRY_GROUPS: 公司行业树，code 为 1000xx；搜索接口 `industry` 参数要的正是这些码。
+    HOT_CITIES: 热点城市；完整城市树太大不写死，兜底只留热点。
 """
 
 from __future__ import annotations
 from typing import Final
 
-#: 求职类型 jobTypeList —— 对应职位页「求职类型」下拉（ka="sel-job-rec-jobType-*"）
 JOB_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("0", "不限"),
     ("1901", "全职"),
     ("1903", "兼职"),
 )
 
-#: 薪资待遇 salaryList —— code 与接口一致；low/high 单位为 K（千元）
 SALARIES: Final[tuple[tuple[str, str, int, int], ...]] = (
     ("0", "不限", 0, 0),
     ("402", "3K以下", 0, 3),
@@ -43,7 +29,6 @@ SALARIES: Final[tuple[tuple[str, str, int, int], ...]] = (
     ("407", "50K以上", 50, 0),
 )
 
-#: 工作经验 experienceList
 EXPERIENCES: Final[tuple[tuple[str, str], ...]] = (
     ("0", "不限"),
     ("108", "在校生"),
@@ -56,7 +41,6 @@ EXPERIENCES: Final[tuple[tuple[str, str], ...]] = (
     ("107", "10年以上"),
 )
 
-#: 学历要求 degreeList
 DEGREES: Final[tuple[tuple[str, str], ...]] = (
     ("0", "不限"),
     ("209", "初中及以下"),
@@ -68,7 +52,6 @@ DEGREES: Final[tuple[tuple[str, str], ...]] = (
     ("205", "博士"),
 )
 
-#: 公司规模 scaleList
 SCALES: Final[tuple[tuple[str, str], ...]] = (
     ("0", "不限"),
     ("301", "0-20人"),
@@ -79,7 +62,6 @@ SCALES: Final[tuple[tuple[str, str], ...]] = (
     ("306", "10000人以上"),
 )
 
-#: 结算方式 payTypeList（接口顺带返回，todo.md 未列，先收下备用）
 PAY_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("0", "不限"),
     ("2501", "日结"),
@@ -88,7 +70,6 @@ PAY_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("2504", "完工结"),
 )
 
-#: 融资阶段 stageList（接口顺带返回）
 STAGES: Final[tuple[tuple[str, str], ...]] = (
     ("0", "不限"),
     ("801", "未融资"),
@@ -101,7 +82,6 @@ STAGES: Final[tuple[tuple[str, str], ...]] = (
     ("808", "不需要融资"),
 )
 
-#: 兼职类型 partTimeList（接口顺带返回）
 PART_TIMES: Final[tuple[tuple[str, str], ...]] = (
     ("0", "不限"),
     ("2701", "周末/节假日"),
@@ -112,8 +92,6 @@ PART_TIMES: Final[tuple[tuple[str, str], ...]] = (
     ("2706", "夜班"),
 )
 
-#: 公司行业 —— 从 ``/wapi/zpCommon/data/industry.json`` 拉的真接口码（2026-10-19 实测）。
-#: 搜索接口 ``industry`` 参数要的正是这些 ``1000xx`` 码，不是 HTML ``ka="sel-industry-N"`` 里的 0-144。
 INDUSTRY_GROUPS: Final[tuple[tuple[str, tuple[tuple[str, str], ...]], ...]] = (
     (
         "互联网/AI",
@@ -326,7 +304,6 @@ INDUSTRY_GROUPS: Final[tuple[tuple[str, tuple[tuple[str, str], ...]], ...]] = (
     ),
 )
 
-#: 热点城市 hotCityList —— 兜底用（完整城市树太大，不写死）
 HOT_CITIES: Final[tuple[tuple[str, str], ...]] = (
     ("100010000", "全国"),
     ("101010100", "北京"),

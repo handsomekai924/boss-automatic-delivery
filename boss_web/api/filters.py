@@ -18,7 +18,11 @@ router = APIRouter()
 
 
 class SearchFilterBody(BaseModel):
-    """与库里 ``doc('search_filter')`` 同款字段（空 = 不限）。"""
+    """与库里 `doc('search_filter')` 同款字段（空 = 不限）。
+
+    Attributes:
+        encryptExpectId: 期望上下文（期望 + 关键词）；空 = 不带。
+    """
 
     query: str = ""
     city: str = ""
@@ -31,7 +35,6 @@ class SearchFilterBody(BaseModel):
     payType: list[str] = Field(default_factory=list)
     partTime: list[str] = Field(default_factory=list)
     stage: list[str] = Field(default_factory=list)
-    #: 期望上下文（期望 + 关键词）；空 = 不带
     encryptExpectId: str = ""
     pageSize: int = Field(15, ge=1, le=50)
 
@@ -40,7 +43,7 @@ class SearchFilterBody(BaseModel):
 
 @router.get("/conditions")
 def conditions() -> dict[str, Any]:
-    """选项表；``source``/``degraded`` 供前端提示「接口/离线兜底」。"""
+    """选项表；`source`/`degraded` 供前端提示「接口/离线兜底」。"""
     cond = get_filter_conditions()
     data = cond.to_dict()
     data["source"] = getattr(cond, "source", "")
@@ -50,12 +53,14 @@ def conditions() -> dict[str, Any]:
 
 @router.get("/search")
 def get_search() -> dict[str, Any]:
+    """读库里的搜索条件。"""
     f = load_search_filter()
     return _filter_payload(f)
 
 
 @router.put("/search")
 def put_search(body: SearchFilterBody) -> dict[str, Any]:
+    """写库里的搜索条件。"""
     f = JobSearchFilter(
         query=body.query,
         city=body.city,
@@ -77,12 +82,14 @@ def put_search(body: SearchFilterBody) -> dict[str, Any]:
 
 @router.post("/search/reset")
 def reset_search() -> dict[str, Any]:
+    """把搜索条件重置为默认（空）。"""
     f = JobSearchFilter()
     path = save_search_filter(f)
     return {**_filter_payload(f), "path": str(path)}
 
 
 def _filter_payload(f: JobSearchFilter) -> dict[str, Any]:
+    """把搜索条件转成前端字段名的字典。"""
     return {
         "query": f.query,
         "city": f.city,
@@ -95,7 +102,6 @@ def _filter_payload(f: JobSearchFilter) -> dict[str, Any]:
         "payType": list(f.pay_type),
         "partTime": list(f.part_time),
         "stage": list(f.stage),
-        # 期望上下文（期望 + 关键词）；is_blank 不算它
         "encryptExpectId": f.encrypt_expect_id,
         "pageSize": f.page_size,
         "is_blank": f.is_blank,
@@ -104,6 +110,7 @@ def _filter_payload(f: JobSearchFilter) -> dict[str, Any]:
 
 
 def _summary(f: JobSearchFilter) -> str:
+    """拼一句人类可读的筛选摘要。"""
     parts = []
     if f.query:
         parts.append(f"关键词「{f.query}」")

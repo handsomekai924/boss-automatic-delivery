@@ -1,6 +1,7 @@
-"""投递配置（一键投递评分阈值）的测试：落状态库 ``doc('deliver_config')``。
+"""投递配置与一键投递发送任务的测试。
 
-这里传的 ``p`` 是**库路径**；接口层由 conftest 的 ``isolated_db`` 把库指到 tmp_path。
+配置落状态库 `doc('deliver_config')`；这里传的 `p` 是库路径，
+接口层由 conftest 的 `isolated_db` 把库指到 tmp_path。
 """
 
 from __future__ import annotations
@@ -34,18 +35,19 @@ from boss_web.services.resume_store import load_analysis, save_analysis
 
 
 class FakeGreetClient:
-    """假的 ``JobClient``：按序回脚本化结果，异常实例直接抛，并记下每次调的参数。
+    """假的 `JobClient`：按序回脚本化结果，异常实例直接抛，并记下每次调的参数。
 
-    按的是 :meth:`boss_web.services.deliver_task` 真正调的那个方法
-    （``deliver_greeting``，建会话 + 把正文投出去那步）；响应池空了就一律成功
-    ——多数用例只关心前几条怎么排。
+    按的是 `boss_web.services.deliver_task` 真正调的那个方法（`deliver_greeting`，
+    建会话 + 把正文投出去那步）；响应池空了就一律成功——多数用例只关心前几条怎么排。
     """
 
     def __init__(self, results=()) -> None:
+        """初始化。"""
         self._results = list(results)
         self.calls: list[dict] = []
 
     def deliver_greeting(self, **kwargs) -> GreetingDelivery:
+        """记下调用并按脚本回结果或抛异常。"""
         self.calls.append(kwargs)
         item = self._results.pop(0) if self._results else None
         if isinstance(item, BaseException):
@@ -57,10 +59,8 @@ class FakeGreetClient:
 
 @pytest.fixture
 def client():
-    """状态库由 ``isolated_db`` 统一指到 ``tmp_path``，这里只起 app。"""
+    """状态库由 `isolated_db` 统一指到 `tmp_path`，这里只起 app。"""
     return TestClient(create_app())
-
-
 
 
 def test_default_is_70(tmp_path):
@@ -70,6 +70,7 @@ def test_default_is_70(tmp_path):
 
 
 def test_save_load_roundtrip(tmp_path):
+    """验配置写进状态库后能原样读出。"""
     p = tmp_path / "boss.db"
     save_config(DeliverConfig(min_score=85), p)
     assert load_config(p).min_score == 85
@@ -79,14 +80,15 @@ def test_save_load_roundtrip(tmp_path):
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        (150, 100),  # 上越界夹到 100
-        (-5, 0),  # 下越界夹到 0
-        ("88", 88),  # 数字串能收
-        ("abc", C.DEFAULT_DELIVER_MIN_SCORE),  # 非数字回默认
-        (None, C.DEFAULT_DELIVER_MIN_SCORE),  # 空值回默认
+        (150, 100),
+        (-5, 0),
+        ("88", 88),
+        ("abc", C.DEFAULT_DELIVER_MIN_SCORE),
+        (None, C.DEFAULT_DELIVER_MIN_SCORE),
     ],
 )
 def test_min_score_is_normalized(tmp_path, raw, expected):
+    """验 min_score 归一化：夹到 0-100，非法或空值回默认。"""
     p = tmp_path / "boss.db"
     save_config(DeliverConfig(min_score=raw), p)
     assert load_config(p).min_score == expected
@@ -100,22 +102,22 @@ def test_corrupt_payload_falls_back(tmp_path):
 
 
 def test_update_config_persists(tmp_path):
-    """写得进、读得出；传 ``None`` = 不改原值。"""
+    """写得进、读得出；传 `None` = 不改原值。"""
     p = tmp_path / "boss.db"
     assert update_config({"min_score": 60}, p).min_score == 60
     assert load_config(p).min_score == 60
     assert update_config({"min_score": None}, p).min_score == 60
 
 
-
-
 def test_api_get_default(client: TestClient):
+    """验接口读默认配置分。"""
     r = client.get("/api/deliver/config")
     assert r.status_code == 200
     assert r.json()["min_score"] == C.DEFAULT_DELIVER_MIN_SCORE
 
 
 def test_api_put_roundtrip(client: TestClient):
+    """验接口写后能读回新分。"""
     r = client.put("/api/deliver/config", json={"min_score": 85})
     assert r.status_code == 200
     assert r.json()["min_score"] == 85
@@ -130,9 +132,8 @@ def test_api_put_rejects_out_of_range(client: TestClient, bad: int):
     assert client.get("/api/deliver/config").json()["min_score"] == C.DEFAULT_DELIVER_MIN_SCORE
 
 
-
-
 def _match(jid: str, **overrides) -> dict:
+    """造一条分析结果里的匹配记录。"""
     item = {
         "encrypt_job_id": jid,
         "job_name": f"岗位 {jid}",
@@ -147,7 +148,7 @@ def _match(jid: str, **overrides) -> dict:
 
 
 def _seed_job(jid: str) -> None:
-    """把这条职位写进 ``jobs``（``last_greeted_at`` 的权威落点）。"""
+    """把这条职位写进 `jobs`（`last_greeted_at` 的权威落点）。"""
     from boss_jobs.models import Job, PageResult
 
     job = Job(
@@ -174,6 +175,7 @@ def _seed_job(jid: str) -> None:
 
 
 def _seed_analysis(matches, analysis_id: str = "an_t1") -> str:
+    """落一份含给定匹配列表的分析结果，回分析 id。"""
     return save_analysis(
         {
             "analysis_id": analysis_id,
@@ -198,7 +200,7 @@ def _wait_task(mgr, timeout: float = 5.0) -> dict:
 
 
 def _run_deliver(matches, job_ids, client, *, interval: float = 0.0):
-    """起一个发送任务（假客户端 + no-op sleep）并等它跑完，回 ``(snapshot, analysis_id)``。"""
+    """起一个发送任务（假客户端 + no-op sleep）并等它跑完，回 `(snapshot, analysis_id)`。"""
     aid = _seed_analysis(matches)
     mgr = DeliverTaskManager(
         client_factory=lambda: client, sleeper=lambda _s: None, interval=interval
@@ -208,14 +210,12 @@ def _run_deliver(matches, job_ids, client, *, interval: float = 0.0):
 
 
 def _match_of(analysis_id: str, jid: str) -> dict:
+    """取分析结果里指定职位的那条匹配记录。"""
     return next(m for m in load_analysis(analysis_id)["matches"] if m["encrypt_job_id"] == jid)
 
 
 def test_deliver_happy_path_sends_and_writes_back():
-    """正常：逐条发完 → 任务 done，结果写回 payload（status ok + delivered_at）。
-
-    打招呼用 payload 里的 securityId / lid（库里没有这条职位时的兜底）。
-    """
+    """正常：逐条发完 → 任务 done，结果写回 payload（status ok + delivered_at）。"""
     client = FakeGreetClient()
     snap, aid = _run_deliver([_match("j1"), _match("j2")], ["j1", "j2"], client)
 
@@ -233,13 +233,9 @@ def test_deliver_happy_path_sends_and_writes_back():
 
 
 def test_deliver_skips_within_30_day_cooldown():
-    """30 天内发过（``delivered_at`` 是最近）→ 跳过、不打请求，原因写清楚。
-
-    规则：``可发送 ⇔ now - last_greeted_at(job) ≥ 30 天``。跳过原因
-    ``30 天内已发送（MM-DD）``。
-    """
+    """30 天内发过（`delivered_at` 是最近）→ 跳过、不打请求，原因写清楚。"""
     client = FakeGreetClient()
-    recent = time.time() - 3600  # 1 小时前，远在 30 天内
+    recent = time.time() - 3600
     matches = [_match("j1", delivered_at=recent), _match("j2")]
     snap, aid = _run_deliver(matches, ["j1", "j2"], client)
 
@@ -263,10 +259,7 @@ def test_deliver_all_in_cooldown_is_done_not_error():
 
 
 def test_deliver_resends_after_cooldown_expired():
-    """超过 30 天 → 允许再发（恰好 30 天整也算过）。
-
-    ``delivered_at=123.0`` 是 1970 年，远超 30 天，按规则必须放行。
-    """
+    """超过 30 天（含恰好 30 天整）→ 允许再发。"""
     client = FakeGreetClient()
     snap, aid = _run_deliver([_match("j1", delivered_at=123.0)], ["j1"], client)
     assert snap["status"] == "done"
@@ -276,12 +269,12 @@ def test_deliver_resends_after_cooldown_expired():
 
 
 def test_deliver_respects_job_level_last_greeted_at():
-    """``jobs.last_greeted_at`` 是跨分析的权威：快照没写 ``delivered_at`` 也照样拦。"""
+    """`jobs.last_greeted_at` 是跨分析的权威：快照没写 `delivered_at` 也照样拦。"""
     client = FakeGreetClient()
     _seed_job("j1")
     _seed_job("j2")
     with JobStore() as store:
-        assert store.update_last_greeted_at("j1") is True  # 刚发过 → 30 天内
+        assert store.update_last_greeted_at("j1") is True
     snap, _ = _run_deliver([_match("j1"), _match("j2")], ["j1", "j2"], client)
 
     assert snap["status"] == "done"
@@ -290,7 +283,7 @@ def test_deliver_respects_job_level_last_greeted_at():
 
 
 def test_deliver_success_writes_job_level_last_greeted_at():
-    """发送成功 → 双写 ``jobs.last_greeted_at`` + ``item.delivered_at``（跨分析冷却依据）。"""
+    """发送成功 → 双写 `jobs.last_greeted_at` + `item.delivered_at`（跨分析冷却依据）。"""
     client = FakeGreetClient()
     _seed_job("j1")
     with JobStore() as store:
@@ -305,7 +298,7 @@ def test_deliver_success_writes_job_level_last_greeted_at():
 
 
 def test_deliver_failure_does_not_start_cooldown():
-    """失败**不**开冷却：``jobs.last_greeted_at`` 不写，下次还能重试。"""
+    """失败不开冷却：`jobs.last_greeted_at` 不写，下次还能重试。"""
     client = FakeGreetClient([JobApiError(5, "网络打了个盹")])
     _seed_job("j1")
     snap, aid = _run_deliver([_match("j1")], ["j1"], client)
@@ -355,7 +348,7 @@ def test_deliver_session_expired_stops_batch():
 
 
 def _chat_remind_exc(content: str) -> JobApiError:
-    """按真实弹窗结构造一个「开聊提醒」异常，让 ``is_chat_remind`` 靠结构认出来。"""
+    """按真实弹窗结构造一个「开聊提醒」异常，让 `is_chat_remind` 靠结构认出来。"""
     from boss_jobs.errors import format_api_message
 
     raw = {
@@ -376,16 +369,7 @@ def _chat_remind_exc(content: str) -> JobApiError:
 
 
 def test_deliver_chat_remind_continues_batch_without_login_hint():
-    """「开聊提醒」是**提示弹窗**，不是停批信号；更别叫人去重新登录。
-
-    实测（2026-10-09）：``friend/add.json`` 回 code 1 + chatRemindDialog，
-    话术是「您今天已与120位BOSS沟通，还剩30次沟通机会哦」——那 30 是**还能再
-    发的次数**。以前 code 1 被一律当登录态失效，界面提示「请先到登录页重新
-    登录」；后来又改成整批停手，剩下的 30 次白白浪费。
-
-    ``JobClient.greet`` 里已经做过「模拟点击确认」（cid=1）；确认完还被拦
-    （这条用例）只记这一条，**继续发剩下的**。
-    """
+    """「开聊提醒」是提示弹窗不是停批信号，只记这一条并继续发剩下的。"""
     exc = _chat_remind_exc("您今天已与120位BOSS沟通，还剩30次沟通机会哦")
     client = FakeGreetClient([exc, None])
     snap, aid = _run_deliver([_match("j1"), _match("j2")], ["j1", "j2"], client)
@@ -559,14 +543,14 @@ def test_deliver_unknown_analysis_fails_task():
 
 
 def test_deliver_cancel_stops_between_items():
-    """取消：发完手上这条就停，状态置 cancelled；已发的不回滚。
-
-    sleep 留出窗口，让测试在第一条发完前按下取消。
-    """
+    """取消：发完手上这条就停，状态置 cancelled；已发的不回滚。"""
     started = threading.Event()
 
     class BlockingClient(FakeGreetClient):
+        """发信前先卡一下，给取消留出窗口。"""
+
         def deliver_greeting(self, **kwargs):
+            """置位后略停，再走默认发信。"""
             started.set()
             time.sleep(0.15)
             return super().deliver_greeting(**kwargs)
@@ -592,7 +576,10 @@ def test_deliver_refuses_second_task_while_running():
     gate = threading.Event()
 
     class BlockingClient(FakeGreetClient):
+        """发信前堵住，模拟任务仍在跑。"""
+
         def greet(self, **kwargs):
+            """等闸门放行后再走默认发信。"""
             gate.wait(2.0)
             return super().greet(**kwargs)
 
@@ -610,10 +597,9 @@ def test_deliver_refuses_second_task_while_running():
     assert _wait_task(mgr)["status"] == "done"
 
 
-
-
 @pytest.fixture
 def fake_client() -> FakeGreetClient:
+    """空脚本的假发信客户端。"""
     return FakeGreetClient()
 
 
@@ -630,16 +616,19 @@ def patched_manager(monkeypatch, fake_client):
 
 
 def test_api_status_idle_before_any_task(client: TestClient, patched_manager):
+    """验还没开跑时状态接口回 idle。"""
     assert client.get("/api/deliver/status").json() == {"task_id": None, "status": "idle"}
 
 
 def test_api_start_rejects_empty_ids(client: TestClient, patched_manager):
+    """验空岗位清单被 422 拒绝。"""
     r = client.post("/api/deliver/start", json={"analysis_id": "an_x", "encrypt_job_ids": []})
     assert r.status_code == 422
     assert "没有要发送的岗位" in r.json()["message"]
 
 
 def test_api_start_then_status(client: TestClient, fake_client, patched_manager):
+    """验启动后状态接口能读到发送结果。"""
     aid = _seed_analysis([_match("j1"), _match("j2")])
     r = client.post(
         "/api/deliver/start", json={"analysis_id": aid, "encrypt_job_ids": ["j1", "j2"]}
@@ -656,5 +645,6 @@ def test_api_start_then_status(client: TestClient, fake_client, patched_manager)
 
 
 def test_api_cancel_without_task_is_404(client: TestClient, patched_manager):
+    """验取消不存在的任务回 404。"""
     r = client.post("/api/deliver/dv_不存在/cancel")
     assert r.status_code == 404

@@ -1,4 +1,13 @@
-"""简历 vs 职位的匹配分析：组装 prompt、串行调 LLM、聚合结果落盘。"""
+"""简历 vs 职位的匹配分析：组装 prompt、串行调 LLM、聚合结果落盘。
+
+Attributes:
+    SYSTEM_PROMPT: 人岗匹配的系统提示词（含招呼语人称约定）。
+    USER_TEMPLATE: 单条职位的用户提示词模板。
+    STATUS_RUNNING: 任务状态：进行中。
+    STATUS_DONE: 任务状态：完成。
+    STATUS_ERROR: 任务状态：失败。
+    STATUS_CANCELLED: 任务状态：已取消。
+"""
 
 from __future__ import annotations
 
@@ -64,7 +73,29 @@ STATUS_CANCELLED = "cancelled"
 
 
 class AnalyzeTask:
+    """内存里的分析任务状态与事件流水。
+
+    Attributes:
+        task_id: 任务 id。
+        resume_id: 简历 id。
+        job_ids: 指定职位 id；空则取库内前 top_k 条。
+        top_k: 未指定 job_ids 时取几条。
+        status: 任务状态。
+        created_at: 创建时间戳。
+        ended_at: 结束时间戳。
+        error: 错误文案。
+        done: 已分析条数。
+        total: 本批总条数。
+        current_job: 当前职位名。
+        matches: 逐条匹配结果。
+        events: 最近事件流水。
+        cancel_flag: 取消标记。
+        lock: 状态锁。
+        analysis_id: 落盘用的分析 id（与 task_id 同值）。
+    """
+
     def __init__(self, resume_id: str, job_ids: Sequence[str], top_k: int) -> None:
+        """初始化。"""
         self.task_id = "an_" + uuid.uuid4().hex[:10]
         self.resume_id = resume_id
         self.job_ids = list(job_ids)
@@ -83,10 +114,21 @@ class AnalyzeTask:
         self.analysis_id = self.task_id
 
     def push(self, name: str, payload: dict[str, Any] | None = None) -> None:
+        """记一条事件。
+
+        Args:
+            name: 事件名。
+            payload: 事件载荷。
+        """
         with self.lock:
             self.events.append({"at": time.time(), "name": name, "payload": payload or {}})
 
     def snapshot(self) -> dict[str, Any]:
+        """当前状态副本。
+
+        Returns:
+            含进度、matches 与最近事件的 dict。
+        """
         with self.lock:
             return {
                 "task_id": self.task_id,
@@ -105,15 +147,39 @@ class AnalyzeTask:
 
 
 class AnalyzeTaskManager:
+    """同一时刻只跑一个分析任务。
+
+    Attributes:
+        _lock: 任务槽锁。
+        _task: 当前任务。
+    """
+
     def __init__(self) -> None:
+        """初始化。"""
         self._lock = threading.Lock()
         self._task: AnalyzeTask | None = None
 
     def current(self) -> AnalyzeTask | None:
+        """当前任务；没有则 `None`。
+
+        Returns:
+            当前任务或 `None`。
+        """
         with self._lock:
             return self._task
 
     def snapshot(self, task_id: str | None = None) -> dict[str, Any]:
+        """查询进度快照。
+
+        Args:
+            task_id: 可选，校验是否就是当前任务。
+
+        Returns:
+            任务快照；空闲时为 idle。
+
+        Raises:
+            NotFoundError: 指定 task_id 不是当前任务。
+        """
         task = self.current()
         if task is None:
             return {"task_id": None, "status": "idle"}
@@ -122,6 +188,19 @@ class AnalyzeTaskManager:
         return task.snapshot()
 
     def start(self, *, resume_id: str, job_ids: Sequence[str] | None = None, top_k: int | None = None) -> AnalyzeTask:
+        """启动一次分析并起后台线程。
+
+        Args:
+            resume_id: 简历 id。
+            job_ids: 指定职位；空则取库内前 top_k 条。
+            top_k: 取几条职位。
+
+        Returns:
+            新建的分析任务。
+
+        Raises:
+            ConflictError: 已有分析任务在跑。
+        """
         with self._lock:
             if self._task is not None and self._task.status == STATUS_RUNNING:
                 raise ConflictError("已有分析任务在跑")
@@ -133,15 +212,29 @@ class AnalyzeTaskManager:
         return task
 
     def cancel(self, task_id: str | None = None) -> AnalyzeTask:
+        """请求取消当前任务。
+
+        Args:
+            task_id: 可选，校验是否就是当前任务。
+
+        Returns:
+            被取消的任务。
+
+        Raises:
+            NotFoundError: 没有在跑的分析任务。
+        """
         task = self.current()
         if task is None or (task_id and task.task_id != task_id):
             raise NotFoundError("没有在跑的分析任务")
         task.cancel_flag = True
         return task
 
-    # ------------------------------------------------------------------ #
-
     def _run(self, task: AnalyzeTask) -> None:
+        """线程体：串行分析各职位并落盘。
+
+        Args:
+            task: 分析任务。
+        """
         try:
             resume = load_resume(task.resume_id)
         except FileNotFoundError as exc:
@@ -213,6 +306,14 @@ class AnalyzeTaskManager:
 
 
 def _pick_jobs(task: AnalyzeTask) -> list[Job]:
+    """按 task.job_ids 或 top_k 取本批职位。
+
+    Args:
+        task: 分析任务。
+
+    Returns:
+        职位列表。
+    """
     from boss_jobs.store import JobStore
 
     with JobStore() as store:
@@ -227,6 +328,14 @@ def _pick_jobs(task: AnalyzeTask) -> list[Job]:
 
 
 def _work_brief(resume: ResumeDraft) -> str:
+    """拼提示词里的经历摘录。
+
+    Args:
+        resume: 简历骨架。
+
+    Returns:
+        摘录行；没有经历则空串。
+    """
     work = resume.sections.get("工作经历") or resume.sections.get("项目经历") or ""
     work = work.strip()
     if len(work) > 500:
@@ -237,8 +346,14 @@ def _work_brief(resume: ResumeDraft) -> str:
 def _safety_snapshot(job: Job) -> dict[str, Any]:
     """把职位当前安全状态拷进 match（与 match_task 同款字段）。
 
-    老的 ``/api/resume/analyze`` 路径仍然可达；没有这些字段的分析
+    老的 `/api/resume/analyze` 路径仍然可达；没有这些字段的分析
     在发送侧会被当成「缺少匹配时安全快照」，自动投递一律拒绝。
+
+    Args:
+        job: 职位。
+
+    Returns:
+        安全快照字段。
     """
     return {
         "is_blacklisted": bool(getattr(job, "is_blacklisted", False)),
@@ -256,6 +371,19 @@ def _safety_snapshot(job: Job) -> dict[str, Any]:
 
 
 def _analyze_one(llm: LLMClient, resume: ResumeDraft, job: Job) -> dict[str, Any]:
+    """单条职位跑一次 LLM 匹配。
+
+    Args:
+        llm: LLM 客户端。
+        resume: 简历骨架。
+        job: 职位。
+
+    Returns:
+        模板形状的匹配结果。
+
+    Raises:
+        ValueError: LLM 没回合法 JSON。
+    """
     user = USER_TEMPLATE.format(
         intent=(resume.sections.get("求职意向") or "未填写").strip()[:120],
         skills="、".join(resume.skills[:20]) or "未填写",
@@ -305,6 +433,13 @@ def _analyze_one(llm: LLMClient, resume: ResumeDraft, job: Job) -> dict[str, Any
 
 
 def _finalize(task: AnalyzeTask, resume: ResumeDraft, cfg: Any) -> None:
+    """聚合排序、写 analysis 行并把任务置为完成。
+
+    Args:
+        task: 分析任务。
+        resume: 简历骨架。
+        cfg: LLM 配置。
+    """
     gaps: Counter[str] = Counter()
     for item in task.matches:
         for skill in item.get("missing_skills") or []:

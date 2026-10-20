@@ -1,40 +1,6 @@
 """BOSS直聘职位筛选条件获取。
 
-按 todo.md 第二节，拿齐 7 类筛选维度的**可选值**（供用户配置筛选条件用）：
-
-    城市 / 求职类型 / 薪资待遇 / 工作经验 / 学历要求 / 公司行业 / 公司规模
-
-优先打真实 wapi 接口，接口不可用时退回项目内写死表（数据来自线上接口与
-已保存的职位页 HTML）。公司行业没有接口，永远用写死表。
-
->>> from boss_filter import get_filter_conditions
->>> cond = get_filter_conditions()          # 打真实接口，挂了自动兜底
->>> cond.source
-'api'
->>> [o.name for o in cond.job_types]
-['不限', '全职', '兼职']
->>> cond.find_option("salaries", "405").name
-'10-20K'
-
-离线（不打接口）::
-
-    cond = get_filter_conditions(html_path=".saved_web/求职_找工作_招聘信息-BOSS直聘.html")
-
-搜索条件的**用户配置**落在状态库 ``data/boss.db``（没有就留空 = 全部「不限」）::
-
-    from boss_filter import load_search_filter
-    f = load_search_filter()            # 读库里的 doc('search_filter')，没有就是全空
-    f.to_params()                       # → {'page': '1', 'pageSize': '15', 'scene': '1'}
-
-    # 用户点名的 JSON 文件只读一次，不写库（CLI --filter my.json）
-    from boss_filter import search_filter_from_file
-    f = search_filter_from_file("my.json")
-
-CLI::
-
-    python -m boss_filter show
-    python -m boss_filter export --out filters.json
-    python -m boss_filter show --fallback
+接口不可用时退回项目内写死表。搜索条件的用户配置落在状态库 `data/boss.db`。
 """
 
 from __future__ import annotations
@@ -77,32 +43,26 @@ from .expect import EXPECT_KINDS, PART_TIME_JOB_TYPE, JobExpectFilter
 __version__ = "0.1.0"
 
 __all__ = [
-    # 核心
     "FilterClient",
     "get_filter_conditions",
-    # 模型
     "CityNode",
     "FilterConditions",
     "FilterOption",
     "IndustryGroup",
     "JobSearchFilter",
     "ResolvedSearchFilter",
-    # 搜索条件（状态库 + 用户点名的 JSON）
     "filter_path",
     "load_search_filter",
     "save_search_filter",
     "search_filter_from_dict",
     "search_filter_from_file",
-    # 期望流（recommend/job/list.json）
     "EXPECT_KINDS",
     "PART_TIME_JOB_TYPE",
     "JobExpectFilter",
-    # 异常
     "FilterApiError",
     "FilterDataError",
     "FilterError",
     "FilterTransportError",
-    # 兜底 / HTML
     "build_fallback_conditions",
     "conditions_from_html",
     "load_industries",
@@ -110,11 +70,9 @@ __all__ = [
     "parse_conditions_payload",
     "parse_html_conditions",
     "parse_html_industries",
-    # 工具
     "normalize_code",
     "options_from_api",
     "options_from_rows",
-    # 常量
     "BASE_URL",
     "DEFAULT_DB_PATH",
     "DEFAULT_SAVED_HTML",

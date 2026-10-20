@@ -51,16 +51,21 @@ def api_item(**overrides) -> dict:
 
 
 def ok_payload(items, *, has_more: bool = True, lid: str = "") -> dict:
+    """构造成功响应体。
+
+    Args:
+        items (list): jobList 元素列表。
+        has_more (bool): 是否还有下一页。
+        lid (str): 分页追踪标识。
+
+    Returns:
+        带 `code` / `zpData` 的完整响应 dict。
+    """
     return {
         "code": 0,
         "message": "Success",
         "zpData": {"jobList": items, "hasMore": has_more, "lid": lid},
     }
-
-
-# --------------------------------------------------------------------------- #
-# 文本清洗
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -74,33 +79,32 @@ def ok_payload(items, *, has_more: bool = True, lid: str = "") -> dict:
     ],
 )
 def test_clean_text(raw, want):
+    """验 `clean_text` 对空白与非字符串输入都归一成规范文本。"""
     assert clean_text(raw) == want
 
 
 def test_decode_salary_font_entities_and_chars():
-    # S 表：&#xe031;→0 … &#xe03a;→9
+    """验字体实体与私有区字符都能解出薪资数字。"""
     assert decode_salary_font("&#xe039;-&#xe032;&#xe034;K") == "8-13K"
     assert decode_salary_font(f"{chr(0xE039)}-{chr(0xE032)}{chr(0xE034)}K") == "8-13K"
 
 
 def test_clean_salary_normalizes_k_and_whitespace():
+    """验 `clean_salary` 规范化 K 大小写与空白，全角连字符原样保留。"""
     assert clean_salary("  8-15k  ") == "8-15K"
-    assert clean_salary("10－20K") == "10－20K"  # 全角连字符原样保留
+    assert clean_salary("10－20K") == "10－20K"
     assert clean_salary(None) == ""
 
 
 def test_join_location_skips_empty_segments():
+    """验 `join_location` 跳过空段并用间隔号拼接。"""
     assert join_location("广州", "天河区", "棠下") == "广州·天河区·棠下"
     assert join_location("广州", "", "棠下") == "广州·棠下"
     assert join_location("", "", "") == ""
 
 
-# --------------------------------------------------------------------------- #
-# Job.from_api
-# --------------------------------------------------------------------------- #
-
-
 def test_from_api_maps_todo_fields():
+    """验 `Job.from_api` 映射展示字段并保留有效性。"""
     job = Job.from_api(api_item())
     assert job.job_name == "Python 开发工程师"
     assert job.brand_name == "示例 科技"
@@ -114,34 +118,34 @@ def test_from_api_maps_todo_fields():
 
 
 def test_from_api_falls_back_to_job_labels_for_experience_and_degree():
+    """验经验/学历缺失时从 jobLabels 回退。"""
     job = Job.from_api(api_item(jobExperience="", jobDegree="", jobLabels=["1-3年", "大专", "Java"]))
     assert job.job_experience == "1-3年"
     assert job.job_degree == "大专"
 
 
 def test_from_api_keeps_raw_json():
+    """验原始 JSON 被完整保留。"""
     item = api_item()
     job = Job.from_api(item)
     assert json.loads(job.raw_json) == item
 
 
 def test_is_valid_requires_id_name_brand():
+    """验主键、职位名、公司名缺一即无效。"""
     assert not Job.from_api(api_item(encryptJobId="")).is_valid
     assert not Job.from_api(api_item(jobName="  ")).is_valid
     assert not Job.from_api(api_item(brandName="")).is_valid
 
 
 def test_from_api_rejects_non_dict():
+    """验 `from_api` 对非 dict 输入抛 `TypeError`。"""
     with pytest.raises(TypeError):
         Job.from_api("not-a-dict")
 
 
-# --------------------------------------------------------------------------- #
-# clean_page
-# --------------------------------------------------------------------------- #
-
-
 def test_clean_page_keeps_valid_drops_invalid():
+    """验单页清洗保留有效职位并统计丢弃原因。"""
     payload = ok_payload(
         [
             api_item(encryptJobId="a", jobName="岗位A"),
@@ -158,6 +162,7 @@ def test_clean_page_keeps_valid_drops_invalid():
 
 
 def test_clean_page_dedupes_within_page():
+    """验同页内主键重复只留一条。"""
     payload = ok_payload(
         [
             api_item(encryptJobId="same", jobName="重复"),
@@ -171,6 +176,7 @@ def test_clean_page_dedupes_within_page():
 
 
 def test_clean_page_reads_has_more_and_lid():
+    """验翻页标记与 lid 落到清洗结果上。"""
     payload = ok_payload([api_item()], has_more=True, lid="page-lid")
     result = clean_page(payload, page=3)
     assert result.has_more is True
@@ -180,14 +186,15 @@ def test_clean_page_reads_has_more_and_lid():
 
 
 def test_clean_page_handles_empty_or_broken_payload():
+    """验残缺或错型 payload 一律视为空页不抛错。"""
     assert clean_page({"code": 0, "zpData": {}}, page=1).is_empty
     assert clean_page({"code": 0, "zpData": {"jobList": None}}, page=1).is_empty
     assert clean_page({"code": 0}, page=1).is_empty
-    # zpData 整个不是对象也不该炸
     assert clean_page({"code": 0, "zpData": "oops"}, page=1).is_empty
 
 
 def test_clean_pages_stitches_across_pages():
+    """验多页清洗结果按顺序拼接并标注页码。"""
     pages = [
         ok_payload([api_item(encryptJobId="p1")]),
         ok_payload([api_item(encryptJobId="p2")]),
@@ -197,12 +204,8 @@ def test_clean_pages_stitches_across_pages():
     assert [j.page for j in jobs] == [1, 2]
 
 
-# --------------------------------------------------------------------------- #
-# 职位描述（JD）
-# --------------------------------------------------------------------------- #
-
-
 def test_clean_desc_strips_html_and_keeps_lines():
+    """验职位描述去标签并保留段落空行。"""
     from boss_jobs.models import clean_desc
 
     raw = "<p>岗位职责：</p><br>1. 写代码&nbsp;&nbsp;\n\n\n\n2. 测试"
@@ -210,6 +213,7 @@ def test_clean_desc_strips_html_and_keeps_lines():
 
 
 def test_clean_desc_plain_text_passthrough():
+    """验纯文本原样通过，空值转空串。"""
     from boss_jobs.models import clean_desc
 
     assert clean_desc("岗位职责：\n1. 写代码") == "岗位职责：\n1. 写代码"
@@ -218,7 +222,7 @@ def test_clean_desc_plain_text_passthrough():
 
 
 def test_extract_job_desc_reads_job_info():
-    """实测：正文在 ``zpData.jobInfo.postDescription``，不是顶层。"""
+    """验正文取自 `zpData.jobInfo.postDescription`。"""
     from boss_jobs.models import extract_job_desc
 
     payload = {
@@ -232,6 +236,7 @@ def test_extract_job_desc_reads_job_info():
 
 
 def test_extract_job_desc_falls_back_to_top_level():
+    """验取不到 jobInfo 时回退顶层字段，缺字段给空串。"""
     from boss_jobs.models import extract_job_desc
 
     assert extract_job_desc({"zpData": {"postDescription": "顶层兜底"}}) == "顶层兜底"
@@ -240,6 +245,7 @@ def test_extract_job_desc_falls_back_to_top_level():
 
 
 def test_job_to_dict_includes_desc():
+    """验 `to_dict` 含描述相关字段。"""
     job = Job.from_api(
         {
             "encryptJobId": "x1",
@@ -253,13 +259,8 @@ def test_job_to_dict_includes_desc():
     assert data["detail_fetched_at"] == ""
 
 
-# --------------------------------------------------------------------------- #
-# clean_expects：三类期望的字段映射
-# --------------------------------------------------------------------------- #
-
-
 def test_clean_expects_三类字段映射():
-    """字段名不对称是前端真实行为：expectList 用 encryptId，另两类用 encryptExpectId。"""
+    """验三类期望各自的字段映射与 label 拼装。"""
     payload = {
         "code": 0,
         "zpData": {
@@ -289,16 +290,16 @@ def test_clean_expects_三类字段映射():
 
     assert len(result.expects) == 1
     assert result.expects[0].kind == "expect"
-    assert result.expects[0].encrypt_expect_id == "E1"  # 来自 encryptId
+    assert result.expects[0].encrypt_expect_id == "E1"
     assert result.expects[0].label == "Python(广州)"
 
     assert len(result.part_time) == 1
     assert result.part_time[0].kind == "part_time"
-    assert result.part_time[0].encrypt_expect_id == "PT1"  # 来自 encryptExpectId
+    assert result.part_time[0].encrypt_expect_id == "PT1"
 
 
 def test_clean_expects_两个id键名都认():
-    """防御：接口侧字段名一变就整批丢不划算，两个键名都收。"""
+    """验 `encryptId` 与 `encryptExpectId` 两个键名都识别。"""
     payload = {
         "code": 0,
         "zpData": {
@@ -312,24 +313,25 @@ def test_clean_expects_两个id键名都认():
 
 
 def test_clean_expects_缺字段按空处理不抛():
+    """验缺字段按空列表处理，坏条目直接丢弃。"""
     assert clean_expects({"code": 0, "zpData": {}}) == ExpectList()
     assert clean_expects({"code": 0}) == ExpectList()
     assert clean_expects({"code": 0, "zpData": None}) == ExpectList()
-    # 没 id 的条目直接丢
     result = clean_expects({"code": 0, "zpData": {"expectList": [{"positionName": "没id"}]}})
     assert result.expects == ()
-    # 非 dict 元素也丢
     result = clean_expects({"code": 0, "zpData": {"partTimeExpectList": ["oops", None]}})
     assert result.part_time == ()
 
 
 def test_expect_item_label_缺哪段跳过哪段():
+    """验 label 缺哪段就跳过哪段。"""
     assert ExpectItem(kind="expect", encrypt_expect_id="E1", position_name="Python").label == "Python"
     assert ExpectItem(kind="expect", encrypt_expect_id="E1", position_name="", location_name="广州").label == "广州"
     assert ExpectItem(kind="expect", encrypt_expect_id="E1", position_name="").label == "E1"
 
 
 def test_expect_list_pick_按kind取首条():
+    """验 `pick` 按 kind 取首条，未知 kind 返回 `None`。"""
     result = clean_expects(
         {
             "code": 0,

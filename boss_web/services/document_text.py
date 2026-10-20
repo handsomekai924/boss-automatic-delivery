@@ -1,12 +1,11 @@
 """把 Word / PDF 简历抽成纯文本，让它和 .md / .txt 走同一条解析流水线。
 
-普通用户的简历基本都是 Word 或 PDF，只有这个仓库的作者用 Markdown。所以上传
-这一步必须能吃下二进制文档，**抽完之后的流程一行都不用改**——下游拿到的还是
-一段纯文本。
+`python-docx` / `pypdf` 都在函数内才 import：装不上时只让「上传 Word/PDF」这一个
+动作失败，不让整个服务起不来。
 
-依赖 ``python-docx`` / ``pypdf`` 都是**函数内才 import**：装不上时只让「上传
-Word/PDF」这一个动作失败，且失败信息告诉用户怎么绕（复制到记事本另存 .txt），
-而不是让整个服务起不来。
+Attributes:
+    TEXT_EXTS: 直接解码的纯文本后缀。
+    BINARY_EXTS: 需要抽正文的二进制文档后缀。
 """
 
 from __future__ import annotations
@@ -14,9 +13,7 @@ from __future__ import annotations
 import io
 import re
 
-#: 直接解码的纯文本后缀
 TEXT_EXTS = {".md", ".markdown", ".txt"}
-#: 需要抽正文的二进制文档后缀
 BINARY_EXTS = {".docx", ".pdf"}
 ALLOWED_EXT = TEXT_EXTS | BINARY_EXTS
 
@@ -26,26 +23,25 @@ class DocumentTextError(Exception):
 
 
 def ext_of(filename: str) -> str:
-    """取小写后缀（含点）。没有后缀返回空串。"""
+    """取小写后缀（含点）；没有后缀回空串。"""
     name = (filename or "").strip().lower()
     dot = name.rfind(".")
     return name[dot:] if dot > 0 else ""
 
 
 def _tidy(text: str) -> str:
-    """统一换行、去空字节、压掉三连空行——LLM 读起来干净，也省 token。"""
+    """统一换行、去空字节、压掉三连空行。"""
     text = text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-# --------------------------------------------------------------------------- #
-# Word
-# --------------------------------------------------------------------------- #
-
-
 def extract_docx(raw: bytes) -> str:
+    """抽出 `.docx` 正文；读不出或没文字时抛 `DocumentTextError`。
+
+    正文与表格按文档顺序交错取，表格行用 ` | ` 连单元格并去掉相邻重复。
+    """
     try:
         from docx import Document
         from docx.oxml.ns import qn
@@ -65,8 +61,6 @@ def extract_docx(raw: bytes) -> str:
             "请用 Word 打开后「另存为」.docx 再传；也可能是文件本身损坏了。"
         ) from exc
 
-    # 简历常用表格排版，所以正文和表格要**按文档顺序**取，不能先段落再表格——
-    # 那样经历和技能会串位。这是 python-docx 官方 recipe 的做法。
     parts: list[str] = []
     for child in document.element.body.iterchildren():
         if child.tag == qn("w:p"):
@@ -78,7 +72,6 @@ def extract_docx(raw: bytes) -> str:
                 cells: list[str] = []
                 for cell in row.cells:
                     value = cell.text.strip()
-                    # 合并单元格会被重复列出来，去掉相邻重复
                     if value and (not cells or cells[-1] != value):
                         cells.append(value)
                 if cells:
@@ -92,12 +85,8 @@ def extract_docx(raw: bytes) -> str:
     return text
 
 
-# --------------------------------------------------------------------------- #
-# PDF
-# --------------------------------------------------------------------------- #
-
-
 def extract_pdf(raw: bytes) -> str:
+    """抽出 `.pdf` 正文；读不出、有密码或没文字时抛 `DocumentTextError`。"""
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - 依赖没装
@@ -109,7 +98,6 @@ def extract_pdf(raw: bytes) -> str:
     try:
         reader = PdfReader(io.BytesIO(raw))
         if reader.is_encrypted:
-            # 不少 PDF 只是「空密码」保护，先试试能不能直接开
             try:
                 opened = reader.decrypt("")
             except Exception:
@@ -134,15 +122,10 @@ def extract_pdf(raw: bytes) -> str:
     return text
 
 
-# --------------------------------------------------------------------------- #
-# 入口
-# --------------------------------------------------------------------------- #
-
-
 def extract_text(raw: bytes, filename: str) -> str | None:
-    """二进制文档 → 抽出的正文；纯文本 → ``None``（交回调用方按编码解码）。
+    """二进制文档 → 抽出的正文；纯文本 → `None`（交回调用方按编码解码）。
 
-    后缀不认识时也返回 ``None``，让调用方的后缀白名单去拦。
+    后缀不认识时也回 `None`，让调用方的后缀白名单去拦。
     """
     ext = ext_of(filename)
     if ext == ".docx":

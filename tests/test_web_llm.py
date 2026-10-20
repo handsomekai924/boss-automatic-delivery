@@ -1,6 +1,9 @@
 """LLM 配置与客户端的单元测试（离线，网络层可注入）。
 
-配置落状态库 ``doc('llm_config')``；这里传的 ``p`` 是**库路径**。
+配置落状态库 `doc('llm_config')`；这里传的 `p` 是库路径。
+
+Attributes:
+    REQUESTS_ERRORS: 抄自真实 requests 异常的文本。
 """
 
 from __future__ import annotations
@@ -23,41 +26,51 @@ from boss_web.services.llm_config_store import (
 
 
 class FakeResp:
+    """假 HTTP 响应。"""
     def __init__(self, payload, status=200):
+        """初始化。"""
         self._payload = payload
         self.status_code = status
         self.text = json.dumps(payload, ensure_ascii=False)
 
     def json(self):
+        """返回预置 payload。"""
         return self._payload
 
 
 class FakeHttp:
+    """假 HTTP 客户端，记录调用并返回预置响应。"""
     def __init__(self, resp=None, exc=None):
+        """初始化。"""
         self.resp = resp
         self.exc = exc
         self.calls = []
 
     def _hit(self, method, url, **kwargs):
+        """记录一次调用并返回响应或抛出预置异常。"""
         self.calls.append((method, url, kwargs))
         if self.exc:
             raise self.exc
         return self.resp
 
     def post(self, url, **kwargs):
+        """记录 POST 调用。"""
         return self._hit("POST", url, **kwargs)
 
     def get(self, url, **kwargs):
+        """记录 GET 调用。"""
         return self._hit("GET", url, **kwargs)
 
 
 def test_mask_key():
+    """验证 mask_key 打码前后保留可辨识片段。"""
     assert mask_key("") == ""
     assert mask_key("sk-abcdef123456").startswith("sk-")
     assert mask_key("sk-abcdef123456").endswith("3456")
 
 
 def test_save_load_roundtrip(tmp_path):
+    """验证 LLM 配置存取往返与默认采样参数。"""
     p = tmp_path / "boss.db"
     cfg = LLMConfig(api_key="sk-secret", base_url="https://x/v1", model="m1", temperature=0.3)
     save_config(cfg, p)
@@ -67,13 +80,13 @@ def test_save_load_roundtrip(tmp_path):
     assert loaded.configured
     assert loaded.masked()["api_key"] == "sk-***cret"
     assert loaded.masked()["has_key"] is True
-    # 采样参数被拉回系统常量，0.3 存不进去
     assert loaded.temperature == C.LLM_TEMPERATURE
     assert loaded.max_tokens == C.LLM_MAX_TOKENS
     assert loaded.timeout == C.LLM_TIMEOUT
 
 
 def test_update_keeps_old_key(tmp_path):
+    """验证空 api_key 更新时保留旧密钥。"""
     p = tmp_path / "boss.db"
     save_config(LLMConfig(api_key="sk-old", model="m"), p)
     cfg = update_config({"api_key": "", "model": "m2"}, p)
@@ -98,7 +111,6 @@ def test_update_ignores_sampling_params(tmp_path):
     assert cfg.temperature == C.LLM_TEMPERATURE
     assert cfg.max_tokens == C.LLM_MAX_TOKENS
     assert cfg.timeout == C.LLM_TIMEOUT
-    # 落库的也是常量
     raw = boss_db.doc_get(boss_db.DOC_LLM_CONFIG, p)
     assert raw["temperature"] == C.LLM_TEMPERATURE
     assert raw["max_tokens"] == C.LLM_MAX_TOKENS
@@ -126,6 +138,7 @@ def test_load_normalizes_legacy_values(tmp_path):
 
 
 def test_masked_exposes_fixed_params():
+    """验证 masked() 暴露固定采样参数。"""
     cfg = LLMConfig(api_key="sk-12345678", model="m").masked()
     assert cfg["fixed"]["temperature"] == C.LLM_TEMPERATURE
     assert cfg["fixed"]["max_tokens"] == C.LLM_MAX_TOKENS
@@ -135,6 +148,7 @@ def test_masked_exposes_fixed_params():
 
 
 def test_chat_with_metadata_returns_finish_reason_without_changing_chat_contract():
+    """验证 chat_with_metadata 带回 finish_reason 且不改 chat 契约。"""
     client = LLMClient(
         LLMConfig(api_key="sk-1", base_url="https://api.x/v1", model="m1"),
         http=FakeHttp(FakeResp({"choices": [{"message": {"content": "你好"}, "finish_reason": "length"}]})),
@@ -146,6 +160,7 @@ def test_chat_with_metadata_returns_finish_reason_without_changing_chat_contract
 
 
 def test_chat_with_metadata_accepts_missing_finish_reason():
+    """验证 finish_reason 缺失时返回 None。"""
     client = LLMClient(
         LLMConfig(api_key="sk-1", base_url="https://api.x/v1", model="m1"),
         http=FakeHttp(FakeResp({"choices": [{"message": {"content": "你好"}}]})),
@@ -157,6 +172,7 @@ def test_chat_with_metadata_accepts_missing_finish_reason():
 
 
 def test_chat_posts_to_completions():
+    """验证 chat 打到 chat/completions 并带上固定参数。"""
     http = FakeHttp(
         FakeResp({"choices": [{"message": {"content": "你好"}}], "model": "m1"})
     )
@@ -169,12 +185,12 @@ def test_chat_posts_to_completions():
     assert kwargs["headers"]["Authorization"] == "Bearer sk-1"
     body = json.loads(kwargs["data"].decode("utf-8"))
     assert body["model"] == "m1"
-    # 采样参数来自系统常量
     assert body["temperature"] == C.LLM_TEMPERATURE
     assert body["max_tokens"] == C.LLM_MAX_TOKENS
 
 
 def test_connection_test_uses_small_token_limit():
+    """验证连通性测试使用小 token 上限。"""
     http = FakeHttp(FakeResp({"choices": [{"message": {"content": "正常"}}]}))
     client = LLMClient(
         LLMConfig(api_key="sk-1", base_url="https://api.x/v1", model="m1"),
@@ -189,19 +205,21 @@ def test_connection_test_uses_small_token_limit():
 
 
 def test_chat_requires_config():
+    """验证未配置时 chat 直接报错。"""
     client = LLMClient(LLMConfig())
     with pytest.raises(Exception):
         client.chat([{"role": "user", "content": "hi"}])
 
 
 def test_list_models():
+    """验证 list_models 去重并丢掉空 id。"""
     http = FakeHttp(
         FakeResp(
             {
                 "data": [
                     {"id": "deepseek-chat"},
                     {"id": "deepseek-reasoner"},
-                    {"id": "deepseek-chat"},  # 重复，去重
+                    {"id": "deepseek-chat"},
                     {"id": ""},
                 ]
             }
@@ -216,12 +234,14 @@ def test_list_models():
 
 
 def test_list_models_requires_key():
+    """验证无密钥时 list_models 报错。"""
     client = LLMClient(LLMConfig(base_url="https://api.x/v1"), http=FakeHttp())
     with pytest.raises(Exception):
         client.list_models()
 
 
 def test_list_models_rejects_bad_payload():
+    """验证 list_models 拒绝非 OpenAI 结构。"""
     client = LLMClient(
         LLMConfig(api_key="sk-1", base_url="https://api.x/v1"),
         http=FakeHttp(FakeResp({"oops": 1})),
@@ -231,21 +251,14 @@ def test_list_models_rejects_bad_payload():
 
 
 def test_extract_json_variants():
+    """验证 extract_json 的各种包裹形式。"""
     assert extract_json('{"a":1}') == {"a": 1}
     assert extract_json('```json\n{"a": 1}\n```') == {"a": 1}
     assert extract_json('前言 {"match_score": 80} 后语')["match_score"] == 80
     assert extract_json("没有 JSON") is None
 
 
-# --------------------------------------------------------------------------- #
-# 上游报错的人话化
-#
-# 这里的花样最多：requests 的异常原文是「HTTPSConnectionPool(host=…)」，
-# 上游响应体是两三百字英文。**一个都不许原样出现在界面上**——
-# 原文只进日志。这几条测试就是拿真实原文来钉这件事。
-# --------------------------------------------------------------------------- #
 
-#: 抄自真实 requests 异常的文本
 REQUESTS_ERRORS = [
     "HTTPSConnectionPool(host='api.deepseek.com', port=443): Max retries exceeded "
     "with url: /v1/chat/completions (Caused by ConnectTimeoutError("
@@ -261,6 +274,7 @@ REQUESTS_ERRORS = [
 
 
 def _client(resp=None, exc=None):
+    """造一个注入假 HTTP 的 LLMClient。"""
     import requests
 
     kwargs = {}
@@ -276,6 +290,7 @@ def _client(resp=None, exc=None):
 
 @pytest.mark.parametrize("raw", REQUESTS_ERRORS)
 def test_network_error_never_shows_requests_internals(raw):
+    """验证网络错误文案不泄漏 requests 内部细节。"""
     import requests
 
     exc = requests.ConnectionError(raw)
@@ -299,6 +314,7 @@ def test_network_error_never_shows_requests_internals(raw):
     ],
 )
 def test_upstream_status_becomes_actionable(status, hint):
+    """验证上游状态码转成可操作中文提示。"""
     resp = FakeResp({"error": {"message": "some upstream english text"}}, status=status)
     with pytest.raises(UpstreamError) as ei:
         _client(resp=resp).chat([{"role": "user", "content": "hi"}])
@@ -309,6 +325,7 @@ def test_upstream_status_becomes_actionable(status, hint):
 
 
 def test_upstream_5xx_blames_the_server_not_the_user():
+    """验证 5xx 归咎服务商而非用户。"""
     resp = FakeResp({"error": "internal"}, status=503)
     with pytest.raises(UpstreamError) as ei:
         _client(resp=resp).chat([{"role": "user", "content": "hi"}])
@@ -324,6 +341,7 @@ def test_keyword_in_body_wins_over_plain_status_table():
 
 
 def test_unknown_status_keeps_the_code_but_not_the_body():
+    """验证未知状态保留状态码但不透出响应体。"""
     from boss_web.services.llm_client import _friendly_http_error
 
     out = _friendly_http_error(418, "<html>teapot 内部堆栈 xxx</html>")
@@ -333,8 +351,11 @@ def test_unknown_status_keeps_the_code_but_not_the_body():
 
 
 def test_bad_json_response_is_explained_not_dumped():
+    """验证非 JSON 响应被解释而非原文倾倒。"""
     class NotJson(FakeResp):
+        """json() 会抛错的假响应。"""
         def json(self):
+            """抛出 ValueError。"""
             raise ValueError("Expecting value: line 1 column 1 (char 0)")
 
     resp = NotJson({"x": 1})
@@ -346,6 +367,7 @@ def test_bad_json_response_is_explained_not_dumped():
 
 
 def test_models_error_paths_also_humanized():
+    """验证 models 接口错误同样人话化。"""
     resp = FakeResp({"error": "Unauthorized"}, status=401)
     with pytest.raises(UpstreamError) as ei:
         _client(resp=resp).list_models()
@@ -353,6 +375,7 @@ def test_models_error_paths_also_humanized():
 
 
 def test_models_rejects_non_openai_shape_with_advice():
+    """验证 models 非 OpenAI 结构给出改配建议。"""
     with pytest.raises(UpstreamError) as ei:
         _client(resp=FakeResp({"oops": 1})).list_models()
     assert "OpenAI" in str(ei.value)

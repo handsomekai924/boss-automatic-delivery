@@ -1,4 +1,4 @@
-"""``python -m boss_jobs`` 入口。"""
+"""`python -m boss_jobs` 入口。"""
 
 import sys
 

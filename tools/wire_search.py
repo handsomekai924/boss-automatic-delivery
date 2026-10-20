@@ -1,18 +1,11 @@
-"""接通三件事的端到端脚本：JobSearchFilter → fetch_search_page → 会话带 __zp_stoken__。
+"""接通三件事的端到端脚本：JobSearchFilter → fetch_search_page → 会话带 `__zp_stoken__`。
 
-跑一遍真实站点的搜索流水线，并把每一段的耗时打出来：
+跑一遍真实站点的搜索流水线，并把每一段的耗时打出来：装配会话、自动获取
+`__zp_stoken__`、拿筛选条件、装配 `JobSearchFilter`、抓一页搜索结果并清洗。
+筛选条件默认读状态库里那份；`--filter` 可指定一份只读 JSON，其余命令行参数只做覆盖。
+`__zp_stoken__` 的来源见 `boss_jobs.cdp_stoken`。
 
-    1. 装配会话（状态库 data/boss.db 的 doc('session')）
-    2. **全自动**获取 ``__zp_stoken__``（拉 Chrome，CDP，让站点自己算一枚并落盘）
-    3. 拿筛选条件（boss_filter.get_filter_conditions）
-    4. 装配 JobSearchFilter（**库里的条件** → 查询串）
-    5. fetch_search_page 抓一页搜索结果并清洗
-
-筛选条件默认读状态库里那份（没有就留空 = 全部「不限」）；``--filter my.json``
-可指定一份 JSON（只读，不写库），命令行其余参数只做覆盖。
-``__zp_stoken__`` 的来源见 :mod:`boss_jobs.cdp_stoken`。
-
-用法::
+用法：
 
     python tools/wire_search.py                          # 读库里的搜索条件
     python tools/wire_search.py --filter my.json         # 用这份 JSON 条件
@@ -46,13 +39,19 @@ from boss_jobs.stoken import StokenError  # noqa: E402
 
 
 class Timer:
-    """分段计时，最后汇总成表。"""
+    """分段计时，最后汇总成表。
+
+    Attributes:
+        spans: 已记下的分段 `(标签, 耗时秒)`。
+    """
 
     def __init__(self) -> None:
+        """初始化。"""
         self.spans: list[tuple[str, float]] = []
         self._t0 = time.perf_counter()
 
     def mark(self, label: str) -> float:
+        """记下一段并返回该段耗时（秒）。"""
         now = time.perf_counter()
         elapsed = now - self._t0
         self.spans.append((label, elapsed))
@@ -61,9 +60,11 @@ class Timer:
 
     @property
     def total(self) -> float:
+        """全部分段耗时之和（秒）。"""
         return sum(e for _, e in self.spans)
 
     def report(self) -> str:
+        """渲染成人读的分段耗时表。"""
         lines = ["分段耗时："]
         for label, elapsed in self.spans:
             lines.append(f"  {label:<36} {elapsed * 1000:8.1f} ms")
@@ -72,7 +73,7 @@ class Timer:
 
 
 def _split_codes(value: str | None) -> tuple[str, ...] | None:
-    """"104,105" → ("104","105")；没传返回 None（表示不覆盖）。"""
+    """"104,105" → ("104","105")；没传返回 `None`（表示不覆盖）。"""
     if value is None:
         return None
     return tuple(x for x in value.split(",") if x)
@@ -90,7 +91,8 @@ def build_filter(
 ) -> tuple[JobSearchFilter, str]:
     """配置文件打底，命令行覆盖；城市中文名就地换成 code。
 
-    返回 ``(filter, 来源说明)``。
+    Returns:
+        `(filter, 来源说明)`。
     """
     overrides: dict[str, object] = {}
     notes: list[str] = []
@@ -116,7 +118,6 @@ def build_filter(
             notes.append(key)
 
     merged = replace(base, **overrides) if overrides else base
-    # 页码永远从 1 起步（配置文件不存页码）
     merged = replace(merged, page=1)
     source = "命令行覆盖 " + ",".join(notes) if notes else "配置文件"
     return merged, source
@@ -131,6 +132,7 @@ def _force_utf8_streams() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """跑搜索流水线并打印分段耗时；抓不到职位时返回 1。"""
     _force_utf8_streams()
     parser = argparse.ArgumentParser(description="接通 JobSearchFilter + fetch_search_page + __zp_stoken__")
     parser.add_argument(
@@ -153,7 +155,6 @@ def main(argv: list[str] | None = None) -> int:
     timer = Timer()
     summary: dict[str, object] = {}
 
-    # 1. 会话装配
     client = create_client(
         page_interval=args.interval,
         stoken=args.stoken or None,
@@ -161,7 +162,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     session_span = timer.mark("会话装配 状态库 doc('session')")
 
-    # 2. __zp_stoken__ 全自动获取
     stoken_len = 0
     stoken_note = "跳过"
     if args.skip_stoken:
@@ -176,7 +176,6 @@ def main(argv: list[str] | None = None) -> int:
             timer.mark("__zp_stoken__（未挂 Provider）")
         else:
             try:
-                # 先判过期再决定要不要拉 Chrome：新鲜就直接复用
                 record = provider.store.load() if getattr(provider, "store", None) else None
                 was_fresh = bool(record and record.is_fresh())
                 token = provider.ensure()
@@ -195,7 +194,6 @@ def main(argv: list[str] | None = None) -> int:
     stoken_value = client._http.cookies.get(STOKEN_COOKIE) or ""
     stoken_len = stoken_len or len(stoken_value)
 
-    # 3. 筛选条件（代码里的 7 类可选值表，跟用户配置无关）
     try:
         conditions = get_filter_conditions()
     except Exception as exc:  # noqa: BLE001 - 兜底表救回来
@@ -203,7 +201,6 @@ def main(argv: list[str] | None = None) -> int:
         conditions = get_filter_conditions(html_path=str(ROOT / ".saved_web" / "求职_找工作_招聘信息-BOSS直聘.html"))
     filter_span = timer.mark("拿筛选条件 get_filter_conditions")
 
-    # 4. JobSearchFilter 装配：库里的条件打底 + 命令行覆盖
     if args.filter:
         base = search_filter_from_file(args.filter)
         filter_file = args.filter
@@ -232,7 +229,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{STOKEN_COOKIE}：{stoken_note}（长度 {stoken_len or '（缺）'}）")
     print()
 
-    # 5. fetch_search_page
     jobs_total = 0
     pages_done = 0
     stopped = ""

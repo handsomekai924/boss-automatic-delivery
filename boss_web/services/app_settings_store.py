@@ -1,20 +1,8 @@
-"""用户级应用设置：状态库 ``doc('app_settings')``。
+"""用户级应用设置：状态库 `doc('app_settings')`。
 
-目前两项：
-
-- ``chrome_mode``——Chrome 窗口档位。为什么它：``boss_jobs`` 默认用
-  ``hidden``（屏幕外 + Win32 隐藏）拉 Chrome，用户不必被弹一脸窗口——
-  可一旦账号命中风控、**需要人工过滑块**，隐藏的窗口连任务栏里都没有，人是
-  够不着的。打包给非技术用户后必须有个界面开关能把它切成 ``visible``。
-- ``ignored_update_version``——用户点过「忽略此版本」的版本号，见
-  :mod:`boss_web.services.update_check`。
-
-做法照搬 :mod:`boss_web.services.deliver_config_store`：整包存 JSON、读时归一
-化、坏值不报错只回默认。
-
-**时效坑**：``boss_jobs.cdp_stoken._mode()`` 是**调用时**才读环境变量，所以这
-里一改就得立刻同步到 ``os.environ``，否则要重启程序才生效——见
-:func:`apply_chrome_mode`。
+目前两项：`chrome_mode`（Chrome 窗口档位）与 `ignored_update_version`
+（忽略更新的水位线版本号）。整包存 JSON、读时归一化、坏值不报错只回默认。
+档位一改就要立刻同步到 `os.environ`，否则要重启才生效。
 """
 
 from __future__ import annotations
@@ -34,10 +22,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AppSettings:
-    #: 空串 = 跟随 ``boss_jobs`` 的默认档位（``hidden``）
+    """用户级应用设置。
+
+    Attributes:
+        chrome_mode: 空串 = 跟随 `boss_jobs` 的默认档位（`hidden`）。
+        ignored_update_version: 空串 = 没忽略过任何版本；否则是「忽略水位线」
+            的版本号（不带 `v` 前缀）。连续忽略多个版本只留最高那一版，
+            比它旧的忽略自动作废。
+    """
+
     chrome_mode: str = ""
-    #: 空串 = 没忽略过任何版本；否则是「忽略水位线」的版本号（不带 ``v`` 前缀）。
-    #: 连续忽略多个版本只留最高那一版，比它旧的忽略自动作废。
     ignored_update_version: str = ""
 
     def normalize(self) -> "AppSettings":
@@ -48,11 +42,12 @@ class AppSettings:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """归一化后转普通字典。"""
         return asdict(self.normalize())
 
 
 def normalize_chrome_mode(value: Any) -> str:
-    """只接受 ``boss_jobs`` 认得的档位；其余一律回空串。"""
+    """只接受 `boss_jobs` 认得的档位；其余一律回空串。"""
     from boss_jobs.cdp_stoken import CHROME_MODES
 
     text = str(value or "").strip().lower()
@@ -92,13 +87,22 @@ def load_settings(path: Path | str | None = None) -> AppSettings:
 
 
 def save_settings(settings: AppSettings, path: Path | str | None = None) -> Path:
+    """归一化后写回状态库。
+
+    Args:
+        settings: 待保存的设置。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+
+    Returns:
+        实际写入的库路径。
+    """
     resolved = boss_db.doc_set(boss_db.DOC_APP_SETTINGS, settings.normalize().to_dict(), path)
     logger.info("应用设置已保存到 %s", resolved)
     return resolved
 
 
 def _patch(patch: dict[str, Any], path: Path | str | None = None) -> AppSettings:
-    """在**已有**设置上改一两个字段，别把其它字段冲掉。"""
+    """在已有设置上改一两个字段，别把其它字段冲掉。"""
     current = load_settings(path)
     merged = asdict(current) | {k: v for k, v in patch.items()}
     settings = AppSettings(**merged).normalize()
@@ -107,7 +111,12 @@ def _patch(patch: dict[str, Any], path: Path | str | None = None) -> AppSettings
 
 
 def apply_chrome_mode(mode: str, path: Path | str | None = None) -> AppSettings:
-    """存下档位**并立即生效**。``mode=""`` = 恢复跟随默认。"""
+    """存下档位并立即生效。`mode=""` = 恢复跟随默认。
+
+    Args:
+        mode: 目标档位；不认识的值会被收成空串。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+    """
     from boss_jobs.cdp_stoken import CHROME_MODE_ENV
 
     settings = _patch({"chrome_mode": normalize_chrome_mode(mode)}, path)
@@ -120,20 +129,24 @@ def apply_chrome_mode(mode: str, path: Path | str | None = None) -> AppSettings:
 
 
 def apply_ignored_update_version(version: str, path: Path | str | None = None) -> str:
-    """把忽略**水位线**抬到 ``version``；空串 = 撤销忽略。返回归一化后的值。
+    """把忽略水位线抬到 `version`；空串 = 撤销忽略。
 
-    不是往列表里追加：忽略 ``1.2.0`` 再忽略 ``1.3.0`` 只留下 ``1.3.0``，
-    ``≤ 1.3.0`` 全部静音。要更细粒度得存列表，但那会让「已经手滑忽略过一个
-    更新的版本，中间的旧版又跳出来」这种事发生，不是用户要的。
+    Args:
+        version: 要忽略到的版本号。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+
+    Returns:
+        归一化后的水位线版本号。
     """
     settings = _patch({"ignored_update_version": version}, path)
     return settings.ignored_update_version
 
 
 def restore_on_startup(path: Path | str | None = None) -> AppSettings:
-    """启动时把存过的档位写回环境变量。
+    """启动时把存过的档位写回环境变量，必须在任何 Chrome 启动之前跑。
 
-    必须在任何 Chrome 启动调用之前跑（``cli.main`` 里紧跟 ``bootstrap()``）。
+    Args:
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
     """
     settings = load_settings(path)
     if settings.chrome_mode:

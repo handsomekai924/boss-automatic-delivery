@@ -21,12 +21,10 @@ from boss_web.services.resume_store import (
 )
 
 
-# --------------------------------------------------------------------------- #
-# resume_parser
-# --------------------------------------------------------------------------- #
 
 
 def test_build_messages_shape():
+    """验证 build_messages 的消息形状与重试提示。"""
     msgs = build_messages("# 张三\n## 工作经历\nxxx")
     assert msgs[0]["role"] == "system"
     assert "JSON" in msgs[0]["content"]
@@ -37,6 +35,7 @@ def test_build_messages_shape():
 
 
 def test_normalize_fills_template_shape():
+    """验证 normalize 补齐模板字段并去重截断。"""
     data = normalize(
         {
             "basic": {"name": "张三", "phone": "138"},
@@ -58,7 +57,9 @@ def test_normalize_fills_template_shape():
 
 
 class _FakeLLM:
+    """按序回脚本的假 LLM。"""
     def __init__(self, replies):
+        """初始化。"""
         self.replies = list(replies)
         self.calls = 0
         self.messages = []
@@ -66,6 +67,7 @@ class _FakeLLM:
         self.config = type("C", (), {"model": "fake-model"})()
 
     def chat(self, messages, **kw):
+        """回下一条脚本文本并记录调用。"""
         self.calls += 1
         self.messages.append(messages)
         self.kwargs.append(kw)
@@ -73,11 +75,14 @@ class _FakeLLM:
 
 
 class _MetadataLLM(_FakeLLM):
+    """带回 finish_reason 的假 LLM。"""
     def __init__(self, replies):
+        """初始化。"""
         super().__init__(replies)
         self.finish_reasons = []
 
     def chat_with_metadata(self, messages, **kw):
+        """回脚本文本与 finish_reason。"""
         from boss_web.services.llm_client import ChatResult
 
         self.calls += 1
@@ -89,6 +94,7 @@ class _MetadataLLM(_FakeLLM):
 
 
 def test_parse_resume_llm_ok():
+    """验证 LLM 解析成功并带上 token 上限。"""
     llm = _FakeLLM([json.dumps({"basic": {"name": "A"}, "summary": "s"}, ensure_ascii=False)])
     data = parse_resume_llm("简历原文", llm=llm)
     assert data["basic"]["name"] == "A"
@@ -99,6 +105,7 @@ def test_parse_resume_llm_ok():
 
 
 def test_parse_resume_llm_retries_then_fails():
+    """验证连续非 JSON 重试后仍失败。"""
     llm = _FakeLLM(["这不是 JSON", "仍然不是 JSON"])
     with pytest.raises(ResumeParseError):
         parse_resume_llm("简历原文", llm=llm)
@@ -106,6 +113,7 @@ def test_parse_resume_llm_retries_then_fails():
 
 
 def test_parse_resume_llm_retry_succeeds():
+    """验证重试后解析成功。"""
     llm = _FakeLLM(
         ["废话", json.dumps({"summary": "ok"}, ensure_ascii=False)]
     )
@@ -121,6 +129,7 @@ def test_parse_resume_llm_retry_succeeds():
 
 
 def test_parse_resume_llm_retries_with_higher_limit_after_truncation():
+    """验证截断后用更高 token 上限重试。"""
     from boss_web import config as C
 
     llm = _MetadataLLM(["{\"summary\": \"partial\"}", json.dumps({"summary": "ok"})])
@@ -136,6 +145,7 @@ def test_parse_resume_llm_retries_with_higher_limit_after_truncation():
 
 
 def test_parse_resume_llm_reports_truncation_after_retry():
+    """验证重试仍截断时报长度上限错误。"""
     from boss_web import config as C
 
     llm = _MetadataLLM(["截断的 JSON", "仍然截断"])
@@ -151,10 +161,13 @@ def test_parse_resume_llm_reports_truncation_after_retry():
 
 
 def test_parse_resume_llm_propagates_upstream_error():
+    """验证上游错误原样上抛。"""
     from boss_web.errors import UpstreamError
 
     class FailingLLM(_FakeLLM):
+        """chat 会抛上游错误的假 LLM。"""
         def chat_with_metadata(self, messages, **kw):
+            """抛出 UpstreamError。"""
             raise UpstreamError("AI 服务暂时不可用")
 
     with pytest.raises(UpstreamError):
@@ -162,6 +175,7 @@ def test_parse_resume_llm_propagates_upstream_error():
 
 
 def test_parse_and_stamp_shape():
+    """验证 parse_and_stamp 的落库形状。"""
     llm = _FakeLLM([json.dumps({"summary": "s"}, ensure_ascii=False)])
     payload = parse_and_stamp("原文", model="m1", llm=llm)
     assert set(payload) == {"parsed_at", "model", "data"}
@@ -170,18 +184,17 @@ def test_parse_and_stamp_shape():
 
 
 def test_parse_empty_content():
+    """验证空白简历直接报解析错误。"""
     llm = _FakeLLM([])
     with pytest.raises(ResumeParseError):
         parse_resume_llm("   ", llm=llm)
 
 
-# --------------------------------------------------------------------------- #
-# resume_store：meta.llm 落库 + 招呼语 PATCH
-# --------------------------------------------------------------------------- #
 
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
+    """提供隔离的临时 BOSS 数据库。"""
     import boss_db
 
     monkeypatch.setenv("BOSS_DB", str(tmp_path / "t.db"))
@@ -191,6 +204,7 @@ def db(tmp_path, monkeypatch):
 
 
 def test_save_and_load_llm_parse(db):
+    """验证 LLM 解析结果存取与简历列表标记。"""
     from boss_web.services.resume_store import save_resume
 
     draft = save_resume("# 简历\n正文", filename="a.md")
@@ -200,7 +214,6 @@ def test_save_and_load_llm_parse(db):
     save_llm_parse(draft.resume_id, payload)
     assert load_llm_parse(draft.resume_id) == payload
 
-    # 其余 meta 键不被覆盖
     from boss_web.services.resume_store import list_resumes
 
     items = list_resumes()
@@ -210,6 +223,7 @@ def test_save_and_load_llm_parse(db):
 
 
 def test_update_greeting(db):
+    """验证只改指定招呼语且不动其它项。"""
     save_analysis(
         {
             "analysis_id": "an_x",
@@ -224,19 +238,17 @@ def test_update_greeting(db):
     from boss_web.services.resume_store import load_analysis
 
     payload = load_analysis("an_x")
-    assert payload["matches"][0]["greeting"] == "你好"  # 只改那一条
+    assert payload["matches"][0]["greeting"] == "你好"
     assert payload["matches"][1]["greeting"] == "改过的招呼语"
 
     with pytest.raises(KeyError):
         update_greeting("an_x", "nope", "x")
 
 
-# --------------------------------------------------------------------------- #
-# match_task：pros/cons + JD 注入
-# --------------------------------------------------------------------------- #
 
 
 def test_match_task_start_sets_total_before_worker(monkeypatch):
+    """验证 start 先定 total 再起 worker。"""
     import threading
 
     from boss_web.services.match_task import MatchTaskManager
@@ -248,10 +260,12 @@ def test_match_task_start_sets_total_before_worker(monkeypatch):
     manager = MatchTaskManager()
 
     def pick_jobs(task):
+        """返回预置职位列表。"""
         picked.append(task)
         return jobs
 
     def run(task, selected_jobs):
+        """记录选中职位并置位事件。"""
         worker_jobs.extend(selected_jobs)
         worker_started.set()
 
@@ -268,6 +282,7 @@ def test_match_task_start_sets_total_before_worker(monkeypatch):
 
 
 def test_match_task_start_empty_jobs_is_error(monkeypatch):
+    """验证无职位时任务直接报错。"""
     from boss_web.services.match_task import MatchTaskManager
 
     monkeypatch.setattr("boss_web.services.match_task._pick_jobs", lambda task: [])
@@ -281,6 +296,7 @@ def test_match_task_start_empty_jobs_is_error(monkeypatch):
 
 
 def test_match_one_has_pros_and_cons():
+    """验证匹配结果含 pros/cons 且 JD 注入 prompt。"""
     from boss_jobs.models import Job
     from boss_web.services.match_task import _job_desc_block, _match_one
 
@@ -334,6 +350,7 @@ def test_match_one_has_pros_and_cons():
 
 
 def test_legacy_analyzer_uses_match_token_limit():
+    """验证旧分析器也用匹配 token 上限。"""
     from boss_jobs.models import Job
     from boss_web.services.resume_analyzer import _analyze_one
     from boss_web.services.resume_store import ResumeDraft
@@ -365,6 +382,7 @@ def test_legacy_analyzer_uses_match_token_limit():
 
 
 def test_job_desc_fallback_when_missing():
+    """验证缺 JD 时回退用标签与技能。"""
     from boss_jobs.models import Job
     from boss_web.services.match_task import _job_desc_block
 
@@ -386,12 +404,10 @@ def test_job_desc_fallback_when_missing():
     assert "Python" in block
 
 
-# --------------------------------------------------------------------------- #
-# API 层：parse / greeting PATCH
-# --------------------------------------------------------------------------- #
 
 
 def test_api_parse_requires_llm_config():
+    """验证未配 LLM 时 parse 接口 422。"""
     from fastapi.testclient import TestClient
 
     from boss_web import create_app
@@ -408,6 +424,7 @@ def test_api_parse_requires_llm_config():
 
 
 def test_api_greeting_patch_roundtrip():
+    """验证招呼语 PATCH 往返与 404。"""
     from fastapi.testclient import TestClient
 
     from boss_web import create_app
@@ -437,9 +454,6 @@ def test_api_greeting_patch_roundtrip():
     assert r.status_code == 404
 
 
-# --------------------------------------------------------------------------- #
-# 重新生成招呼语（只回草稿，不落库）
-# --------------------------------------------------------------------------- #
 
 
 def _seed_greet_world():
@@ -479,10 +493,12 @@ class _ScriptLLM:
     """按序回脚本化文本；顺手记下每次的 prompt，方便断言注入了 JD。"""
 
     def __init__(self, replies):
+        """初始化。"""
         self.replies = list(replies)
         self.calls = []
 
     def chat(self, messages, **kw):
+        """回下一条脚本并记录 prompt。"""
         self.calls.append(messages)
         return self.replies.pop(0) if self.replies else ""
 
@@ -496,11 +512,9 @@ def test_regenerate_returns_draft_without_saving(db):
     llm = _ScriptLLM(["您好，我有 3 年 Python 后端经验，想聊聊这个岗位"])
     text = regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=llm)
     assert "Python" in text
-    # prompt 里带上了 JD
     assert "负责后端开发" in llm.calls[0][1]["content"]
     assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
 
-    # 再生成一次也是草稿，库里的还是旧的
     llm2 = _ScriptLLM(["第二版招呼语"])
     assert regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=llm2) == "第二版招呼语"
     assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
@@ -517,6 +531,7 @@ def test_regenerate_cleans_json_and_quotes(db):
 
 
 def test_regenerate_missing_analysis_or_job(db):
+    """验证缺 analysis 或职位时报对应错误。"""
     from boss_web.services.match_task import regenerate_greeting
 
     _seed_greet_world()
@@ -542,10 +557,13 @@ def test_api_greeting_regenerate(db):
     fake = _ScriptLLM(["API 生成的草稿"])
 
     class _FakeClient:
+        """把 chat 转发到脚本 LLM 的假客户端。"""
         def __init__(self, cfg, **kw):
+            """初始化。"""
             pass
 
         def chat(self, messages, **kw):
+            """转发到脚本 LLM。"""
             return fake.chat(messages, **kw)
 
     orig = mt.LLMClient
@@ -557,10 +575,8 @@ def test_api_greeting_regenerate(db):
 
     assert r.status_code == 200
     assert r.json()["greeting"] == "API 生成的草稿"
-    # 生成不落库
     assert load_analysis("an_re")["matches"][0]["greeting"] == "旧招呼"
 
-    # 手动保存才落库
     r = c.patch(
         "/api/match/an_re/greeting",
         json={"encrypt_job_id": "j1", "greeting": "API 生成的草稿"},
@@ -582,9 +598,6 @@ def test_api_greeting_regenerate_requires_llm_config(db):
     assert "LLM" in r.json()["message"]
 
 
-# --------------------------------------------------------------------------- #
-# 重新匹配：只改不增（原地覆盖那条 match，不新插 analysis 行）
-# --------------------------------------------------------------------------- #
 
 
 def _seed_failed_world():
@@ -649,6 +662,7 @@ def _seed_failed_world():
 
 
 def _analysis_row_count() -> int:
+    """返回 analysis 表行数。"""
     import boss_db
 
     conn = boss_db.acquire()
@@ -682,7 +696,6 @@ def test_rematch_overwrites_failed_item_only(db):
     assert item["match_score"] == 88
     assert item["error"] == ""
     assert item["greeting"] == "您好，想聊聊"
-    # 职位数据复用库里的那条（JD 进了 prompt），快照 / 发送状态原样保留
     assert "负责后端开发" in llm.calls[0][1]["content"]
     assert item["job_name"] == "Python"
     assert item["security_id"] == "sid"
@@ -690,12 +703,12 @@ def test_rematch_overwrites_failed_item_only(db):
     assert item["deliver_status"] == "sending"
 
     payload = load_analysis("an_fail")
-    assert len(payload["matches"]) == 2  # 只改不增：match 条数不变
+    assert len(payload["matches"]) == 2
     assert payload["matches"][0]["match_score"] == 88
-    assert payload["matches"][1]["job_name"] == "Java"  # 另一条没动
+    assert payload["matches"][1]["job_name"] == "Java"
     assert payload["matches"][1]["greeting"] == "你好"
 
-    assert _analysis_row_count() == 1  # 只改不增：还是原来那一行
+    assert _analysis_row_count() == 1
     import boss_db
 
     row = boss_db.acquire().execute(
@@ -713,7 +726,9 @@ def test_rematch_failure_keeps_existing_fields(db):
     update_greeting("an_fail", "j1", "用户手改的招呼语")
 
     class _Boom:
+        """chat 必炸的假 LLM。"""
         def chat(self, messages, **kw):
+            """抛出 RuntimeError。"""
             raise RuntimeError("LLM 超时")
 
     item = rematch_job(analysis_id="an_fail", encrypt_job_id="j1", llm=_Boom())
@@ -726,6 +741,7 @@ def test_rematch_failure_keeps_existing_fields(db):
 
 
 def test_rematch_missing_refs(db):
+    """验证重匹配缺引用时报错。"""
     from boss_web.services.match_task import rematch_job
 
     _seed_failed_world()
@@ -754,7 +770,6 @@ def test_rematch_patches_running_task_without_insert(db):
             "error": "boom",
         }
     )
-    # 直接挂上 manager：start() 会开线程跑批，这里只要内存里的那条 match
     with mt.match_tasks._lock:
         mt.match_tasks._task = task
     try:
@@ -768,9 +783,8 @@ def test_rematch_patches_running_task_without_insert(db):
 
     assert item["match_score"] == 70
     assert item["error"] == ""
-    assert task.matches[0]["match_score"] == 70  # 内存那条被原地改掉
+    assert task.matches[0]["match_score"] == 70
     assert task.matches[0]["security_id"] == "sid"
-    # 除了 _seed_failed_world 那一行，没有新插
     assert _analysis_row_count() == 1
 
 
@@ -795,10 +809,13 @@ def test_api_rematch(db):
     )
 
     class _FakeClient:
+        """把 chat 转发到脚本 LLM 的假客户端。"""
         def __init__(self, cfg, **kw):
+            """初始化。"""
             pass
 
         def chat(self, messages, **kw):
+            """转发到脚本 LLM。"""
             return fake.chat(messages, **kw)
 
     orig = mt.LLMClient

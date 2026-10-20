@@ -1,16 +1,18 @@
 """匹配任务：简历 vs 全库/勾选岗位，并行调 LLM，出匹配度 + 优缺点 + 招呼语。
 
-跟老的 :mod:`boss_web.services.resume_analyzer` **共用输出模板**（含 ``pros`` /
-``cons``），差别在这边：
+与 `boss_web.services.resume_analyzer` 共用输出模板；差异与 C4/C6 设计
+见 `notes/boss_web/services/match_task.md`。
 
-- 简历侧优先吃 **LLM 固定模板解析结果**（``meta.llm.data`` 的 summary / skills /
-  work / intent），没解析过才退回规则切章节的摘要；
-- 职位侧注入 **JD 正文**（``job_desc``），没抓到就用标签/技能兜底；
-- 范围是**全库全部岗位**或勾选的 job_id（C4 已拍板，不再 top_k 封顶）；
-- 结果写 ``analysis`` 表，每条 match 带 ``encrypt_job_id``，招呼语可后改；
-- 单条失败可 :func:`rematch_job` 原地重跑——**只改不增**，不新插 analysis 行。
-
-并行（最多 ``MATCH_CONCURRENCY`` 条同时在途），可随时取消；单条失败只记流水，不拖垮整批。
+Attributes:
+    SYSTEM_PROMPT: 人岗匹配的系统提示词。
+    USER_TEMPLATE: 单条职位的用户提示词模板。
+    STATUS_RUNNING: 任务状态：进行中。
+    STATUS_DONE: 任务状态：完成。
+    STATUS_ERROR: 任务状态：失败。
+    STATUS_CANCELLED: 任务状态：已取消。
+    GREETING_SYSTEM_PROMPT: 只重打招呼语的短系统提示词。
+    GREETING_USER_TEMPLATE: 只重打招呼语的用户提示词模板。
+    RESULT_FIELDS: 重跑结果要回写的分析字段。
 """
 
 from __future__ import annotations
@@ -82,7 +84,6 @@ STATUS_DONE = "done"
 STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 
-#: 只重打招呼语用的短 prompt：不跑整套人岗评估，省 token 也更聚焦
 GREETING_SYSTEM_PROMPT = (
     "你是资深互联网猎头，擅长写求职打招呼私信。"
     "只输出私信正文本身，不要任何解释、引号或代码围栏。"
@@ -113,6 +114,27 @@ GREETING_USER_TEMPLATE = """# 简历（结构化摘要）
 
 
 class MatchTask:
+    """内存里的匹配任务状态与事件流水。
+
+    Attributes:
+        task_id: 任务 id。
+        resume_id: 简历 id。
+        job_ids: 指定职位 id。
+        crawl_task_id: 非空 = 只跑该抓取任务的岗位（优先级高于 job_ids）。
+        status: 任务状态。
+        created_at: 创建时间戳。
+        ended_at: 结束时间戳。
+        error: 错误文案。
+        done: 已匹配条数。
+        total: 本批总条数。
+        current_job: 当前职位名。
+        matches: 逐条匹配结果。
+        events: 最近事件流水。
+        cancel_flag: 取消标记。
+        lock: 状态锁。
+        analysis_id: 落盘用的分析 id（与 task_id 同值）。
+    """
+
     def __init__(
         self,
         resume_id: str,
@@ -120,10 +142,10 @@ class MatchTask:
         *,
         crawl_task_id: str = "",
     ) -> None:
+        """初始化。"""
         self.task_id = "mt_" + uuid.uuid4().hex[:10]
         self.resume_id = resume_id
         self.job_ids = list(job_ids)
-        #: 非空 = 只跑该抓取任务的岗位（优先级高于 job_ids）
         self.crawl_task_id = str(crawl_task_id or "")
         self.status = STATUS_RUNNING
         self.created_at = time.time()
@@ -139,11 +161,21 @@ class MatchTask:
         self.analysis_id = self.task_id
 
     def push(self, name: str, payload: dict[str, Any] | None = None) -> None:
+        """记一条事件。
+
+        Args:
+            name: 事件名。
+            payload: 事件载荷。
+        """
         with self.lock:
             self.events.append({"at": time.time(), "name": name, "payload": payload or {}})
 
     def scope_info(self) -> dict[str, Any]:
-        """范围条要的形状：``all`` / ``jobs`` / ``crawl_task``。"""
+        """范围条要的形状：`all` / `jobs` / `crawl_task`。
+
+        Returns:
+            范围描述 dict。
+        """
         if self.crawl_task_id:
             return {
                 "type": "crawl_task",
@@ -155,6 +187,11 @@ class MatchTask:
         return {"type": "all", "job_count": self.total}
 
     def snapshot(self) -> dict[str, Any]:
+        """当前状态副本。
+
+        Returns:
+            含进度、matches 与最近事件的 dict。
+        """
         with self.lock:
             return {
                 "task_id": self.task_id,
@@ -175,17 +212,39 @@ class MatchTask:
 
 
 class MatchTaskManager:
-    """同一时刻只跑一个匹配任务。"""
+    """同一时刻只跑一个匹配任务。
+
+    Attributes:
+        _lock: 任务槽锁。
+        _task: 当前任务。
+    """
 
     def __init__(self) -> None:
+        """初始化。"""
         self._lock = threading.Lock()
         self._task: MatchTask | None = None
 
     def current(self) -> MatchTask | None:
+        """当前任务；没有则 `None`。
+
+        Returns:
+            当前任务或 `None`。
+        """
         with self._lock:
             return self._task
 
     def snapshot(self, task_id: str | None = None) -> dict[str, Any]:
+        """查询进度快照。
+
+        Args:
+            task_id: 可选，校验是否就是当前任务。
+
+        Returns:
+            任务快照；空闲时为 idle。
+
+        Raises:
+            NotFoundError: 指定 task_id 不是当前任务。
+        """
         task = self.current()
         if task is None:
             return {"task_id": None, "status": "idle"}
@@ -200,6 +259,19 @@ class MatchTaskManager:
         job_ids: Sequence[str] | None = None,
         crawl_task_id: str = "",
     ) -> MatchTask:
+        """启动一次匹配并起后台线程。
+
+        Args:
+            resume_id: 简历 id。
+            job_ids: 指定职位；空则看 crawl_task_id 或全库。
+            crawl_task_id: 抓取任务 id；非空则只跑该批岗位。
+
+        Returns:
+            新建的匹配任务（启动失败也返回可查询状态）。
+
+        Raises:
+            ConflictError: 已有匹配任务在跑。
+        """
         with self._lock:
             if self._task is not None and self._task.status == STATUS_RUNNING:
                 raise ConflictError("已有匹配任务在跑")
@@ -231,15 +303,30 @@ class MatchTaskManager:
         return task
 
     def cancel(self, task_id: str | None = None) -> MatchTask:
+        """请求取消当前任务。
+
+        Args:
+            task_id: 可选，校验是否就是当前任务。
+
+        Returns:
+            被取消的任务。
+
+        Raises:
+            NotFoundError: 没有在跑的匹配任务。
+        """
         task = self.current()
         if task is None or (task_id and task.task_id != task_id):
             raise NotFoundError("没有在跑的匹配任务")
         task.cancel_flag = True
         return task
 
-    # ------------------------------------------------------------------ #
-
     def _run(self, task: MatchTask, jobs: list[Job]) -> None:
+        """线程体：并行匹配并落盘。
+
+        Args:
+            task: 匹配任务。
+            jobs: 本批职位。
+        """
         try:
             resume = load_resume(task.resume_id)
         except FileNotFoundError:
@@ -255,7 +342,6 @@ class MatchTaskManager:
             task.ended_at = time.time()
             return
 
-        # 简历侧优先吃 LLM 固定模板结果，没解析过才退回规则摘要
         try:
             llm_parse = load_llm_parse(task.resume_id)
         except FileNotFoundError:
@@ -273,10 +359,13 @@ class MatchTaskManager:
         resume_brief: str,
         jobs: list[Job],
     ) -> None:
-        """并发跑：最多 :data:`boss_web.config.MATCH_CONCURRENCY` 条在途。
+        """并发跑：最多 `MATCH_CONCURRENCY` 条在途。
 
-        派活窗口略大于并发数（留点排队余量）；取消时立刻不再派新活，
-        已经在跑的那几条收完就收工，结果照常并入，不丢已完成的。
+        Args:
+            task: 匹配任务。
+            llm: LLM 客户端。
+            resume_brief: 简历摘要块。
+            jobs: 本批职位。
         """
         workers = max(1, int(C.MATCH_CONCURRENCY))
         window = workers * 2
@@ -289,7 +378,7 @@ class MatchTaskManager:
                     task.current_job = job.job_name
                 task.push("job_start", {"job_name": job.job_name, "brand": job.brand_name})
                 pending[pool.submit(self._match_job, task, llm, resume_brief, job)] = job
-                if len(pending) >= window:  # 窗口满了，收至少一条再派，取消才不会被大队列拖住
+                if len(pending) >= window:
                     for done in wait(pending, return_when=FIRST_COMPLETED).done:
                         pending.pop(done)
                         _collect(done)
@@ -301,8 +390,15 @@ class MatchTaskManager:
 
     @staticmethod
     def _match_job(task: MatchTask, llm: LLMClient, resume_brief: str, job: Job) -> None:
-        """跑一个职位并把结果落进任务；失败只记 ``error``，不抛。"""
-        if task.cancel_flag:  # 排队期间被取消，直接不跑
+        """跑一个职位并把结果落进任务；失败只记 `error`，不抛。
+
+        Args:
+            task: 匹配任务。
+            llm: LLM 客户端。
+            resume_brief: 简历摘要块。
+            job: 职位。
+        """
+        if task.cancel_flag:
             return
         try:
             result = _match_one(llm, resume_brief, job)
@@ -329,14 +425,9 @@ class MatchTaskManager:
             "job_degree": job.job_degree,
             "brand_industry": job.brand_industry,
             "brand_scale_name": job.brand_scale_name,
-            # 发送要用的（C6），顺手带上，免得到时候再翻 raw_json
             "security_id": job.security_id,
             "lid": job.lid,
-            # 岗位维度的发送史（30 天冷却依据）。快照只记「匹配时」的值；
-            # 读接口会按 jobs 表当前值刷新冷却状态。
             "last_greeted_at": job.last_greeted_at or "",
-            # Match-time blacklist/JD state is an immutable decision snapshot.
-            # Delivery must use these fields rather than rereading mutable rules.
             **_blacklist_snapshot(job),
             **result,
         }
@@ -349,13 +440,12 @@ class MatchTaskManager:
 match_tasks = MatchTaskManager()
 
 
-# --------------------------------------------------------------------------- #
-# 内部
-# --------------------------------------------------------------------------- #
-
-
 def _collect(future: Any) -> None:
-    """收一个 worker 的结果；worker 内已吞掉业务异常，这里只兜底。"""
+    """收一个 worker 的结果；worker 内已吞掉业务异常，这里只兜底。
+
+    Args:
+        future: worker future。
+    """
     try:
         future.result()
     except Exception:  # noqa: BLE001 - 兜底，别让一个 worker 拖停整批
@@ -363,10 +453,13 @@ def _collect(future: Any) -> None:
 
 
 def _pick_jobs(task: MatchTask) -> list[Job]:
-    """范围解析优先级：``crawl_task_id`` > ``job_ids`` > 全库。
+    """范围解析优先级：`crawl_task_id` > `job_ids` > 全库。
 
-    抓取任务范围由 ``crawl_task_jobs`` 解析（与库中仍存在的职位取交集），
-    前端不用传全量 id。
+    Args:
+        task: 匹配任务。
+
+    Returns:
+        职位列表。
     """
     from boss_jobs.store import JobStore
 
@@ -386,12 +479,18 @@ def _pick_jobs(task: MatchTask) -> list[Job]:
                 if job is not None:
                     jobs.append(job)
             return jobs
-        # 一键匹配：全库全部岗位（C4 已拍板，不再 top_k 封顶）
         return store.list_jobs(limit=100000, offset=0)
 
 
 def _blacklist_snapshot(job: Job) -> dict[str, Any]:
-    """Copy current job safety state into the match payload once."""
+    """把职位当前安全状态拷进 match（与 match_task 同款字段）。
+
+    Args:
+        job: 职位。
+
+    Returns:
+        安全快照字段。
+    """
     return {
         "is_blacklisted": bool(job.is_blacklisted),
         "company_blacklisted": bool(job.company_blacklisted),
@@ -410,8 +509,14 @@ def _blacklist_snapshot(job: Job) -> dict[str, Any]:
 def _auto_delivery_blocked(item: dict[str, Any]) -> bool:
     """保守口径：命中黑名单或安全状态不完整，都不算「可自动投递」。
 
-    与投递侧 :func:`boss_web.services.deliver_task._delivery_restriction`
-    保持同一套判断，仅用于分析汇总计数，不替代投递侧的最终裁决。
+    与投递侧 `boss_web.services.deliver_task._delivery_restriction`
+    保持同一套判断，仅用于分析汇总计数。
+
+    Args:
+        item: 一条 match。
+
+    Returns:
+        是否应拦下自动投递。
     """
     return bool(
         item.get("company_blacklisted")
@@ -423,7 +528,15 @@ def _auto_delivery_blocked(item: dict[str, Any]) -> bool:
 
 
 def _resume_brief(resume: Any, llm_parse: dict[str, Any] | None) -> str:
-    """组装 prompt 里的简历块：优先 LLM 结构（summary/skills/work/intent）。"""
+    """组装 prompt 里的简历块：优先 LLM 结构（summary/skills/work/intent）。
+
+    Args:
+        resume: 简历骨架。
+        llm_parse: LLM 解析结果。
+
+    Returns:
+        简历摘要文本。
+    """
     lines: list[str] = []
     data = (llm_parse or {}).get("data") if isinstance(llm_parse, dict) else None
     if isinstance(data, dict):
@@ -452,7 +565,6 @@ def _resume_brief(resume: Any, llm_parse: dict[str, Any] | None) -> str:
                 lines.append(f"  · {h}")
 
     if not lines:
-        # 兜底：规则切章节的摘要
         intent = (resume.sections.get("求职意向") or "").strip()
         if intent:
             lines.append(f"- 求职意向：{intent[:120]}")
@@ -471,15 +583,35 @@ def _resume_brief(resume: Any, llm_parse: dict[str, Any] | None) -> str:
 
 
 def _job_desc_block(job: Job) -> str:
+    """拼提示词里的 JD 块。
+
+    Args:
+        job: 职位。
+
+    Returns:
+        JD 正文；没抓到则用标签/技能兜底。
+    """
     desc = (job.job_desc or "").strip()
     if desc:
         return desc[:1500]
-    # 没抓到 JD 就用标签/技能兜底
     bits = [b for b in (job.job_labels + job.skills) if b]
     return "（未抓到 JD）标签/技能：" + ("、".join(bits[:12]) if bits else "无")
 
 
 def _match_one(llm: LLMClient, resume_brief: str, job: Job) -> dict[str, Any]:
+    """单条职位跑一次 LLM 匹配。
+
+    Args:
+        llm: LLM 客户端。
+        resume_brief: 简历摘要块。
+        job: 职位。
+
+    Returns:
+        模板形状的匹配结果。
+
+    Raises:
+        ValueError: LLM 没回合法 JSON。
+    """
     user = USER_TEMPLATE.format(
         resume_brief=resume_brief,
         job_name=job.job_name,
@@ -532,9 +664,22 @@ def regenerate_greeting(
     encrypt_job_id: str,
     llm: LLMClient | None = None,
 ) -> str:
-    """重打一条招呼语草稿，**只回文案、不落库**——用户可能反复生成再挑一条保存。
+    """重打一条招呼语草稿，只回文案、不落库。
 
-    找不到 analysis → ``FileNotFoundError``；分析里没有这条职位 → ``KeyError``。
+    Args:
+        analysis_id: 分析 id。
+        encrypt_job_id: 职位 id。
+        llm: 注入的客户端（测试用）。
+
+    Returns:
+        招呼语文案。
+
+    Raises:
+        FileNotFoundError: 找不到 analysis。
+        KeyError: 分析里没有这条职位。
+        ValidationWebError: LLM 未配置。
+        NotFoundError: 简历不存在。
+        UpstreamError: AI 没返回能用的招呼语。
     """
     resume_id, item, _payload = _match_context(analysis_id, encrypt_job_id)
 
@@ -567,7 +712,6 @@ def regenerate_greeting(
     ]
     greeting = _clean_greeting(client.chat(messages))
     if not greeting:
-        # 偶尔模型爱补一句解释 / 包 JSON，再逼一次
         greeting = _clean_greeting(
             client.chat([*messages[:1], {"role": "user", "content": user + "\n\n请严格只输出私信正文。"}])
         )
@@ -576,8 +720,6 @@ def regenerate_greeting(
     return greeting
 
 
-#: 重跑结果要回写的分析字段。职位快照（job_name / security_id / …）与
-#: 发送状态（deliver_*）不在此列——回写时原样复用库里已有的数据。
 RESULT_FIELDS: tuple[str, ...] = (
     "match_score",
     "matched_skills",
@@ -597,16 +739,21 @@ def rematch_job(
     encrypt_job_id: str,
     llm: LLMClient | None = None,
 ) -> dict[str, Any]:
-    """对一条 match 重跑人岗匹配，结果**原地回写**（只改不增：不新插 analysis 行）。
+    """对一条 match 重跑人岗匹配，结果原地回写（只改不增）。
 
-    职位数据复用库里已有的（``jobs`` 表；职位删了才拿 match 里的快照兜底），
-    回写只覆盖 :data:`RESULT_FIELDS`，职位快照与发送状态保持原样。
+    Args:
+        analysis_id: 分析 id。
+        encrypt_job_id: 职位 id。
+        llm: 注入的客户端（测试用）。
 
-    - 重跑成功 → 分析字段整体换成新结果，``error`` 清空；
-    - 重跑又失败 → **只换 ``error``**，其余（含用户手改的招呼语）不动。
+    Returns:
+        回改后的那条 match。
 
-    找不到 analysis → ``FileNotFoundError``；没有这条 match → ``KeyError``；
-    LLM 没配好 → ``ValidationWebError``。回改后的那条 match。
+    Raises:
+        FileNotFoundError: 找不到 analysis。
+        KeyError: 没有这条 match。
+        ValidationWebError: LLM 未配置。
+        NotFoundError: 简历不存在。
     """
     resume_id, item, payload = _match_context(analysis_id, encrypt_job_id)
 
@@ -646,7 +793,17 @@ def rematch_job(
 def _write_match(
     analysis_id: str, encrypt_job_id: str, fields: dict[str, Any], *, in_db: bool
 ) -> dict[str, Any]:
-    """回写那条 match：已落库的 UPDATE 那一行，没落库的改在跑任务的内存列表。"""
+    """回写那条 match：已落库的 UPDATE 那一行，没落库的改在跑任务的内存列表。
+
+    Args:
+        analysis_id: 分析 id。
+        encrypt_job_id: 职位 id。
+        fields: 要回写的字段。
+        in_db: 是否已落库。
+
+    Returns:
+        回改后的那条 match。
+    """
     if in_db:
         return update_match_result(analysis_id, encrypt_job_id, **fields)
     task = match_tasks.current()
@@ -663,10 +820,14 @@ def _write_match(
 def _match_context(
     analysis_id: str, encrypt_job_id: str
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
-    """取 ``(resume_id, 那条 match, 落库的 analysis payload)``。
+    """取 `(resume_id, 那条 match, 落库的 analysis payload)`。
 
-    payload 为 ``None`` = 这份分析还没落库（还在跑的匹配任务里），
-    回写要改 ``task.matches``；非 ``None`` 则 UPDATE 这一行。
+    Args:
+        analysis_id: 分析 id。
+        encrypt_job_id: 职位 id。
+
+    Returns:
+        resume_id、那条 match、payload（`None` = 还没落库）。
     """
     try:
         payload = load_analysis(analysis_id)
@@ -687,6 +848,14 @@ def _match_context(
 
 
 def _load_job(encrypt_job_id: str) -> Job | None:
+    """从库里读职位；没有则 `None`。
+
+    Args:
+        encrypt_job_id: 职位 id。
+
+    Returns:
+        职位或 `None`。
+    """
     from boss_jobs.store import JobStore
 
     with JobStore() as store:
@@ -694,7 +863,14 @@ def _load_job(encrypt_job_id: str) -> Job | None:
 
 
 def _job_from_snapshot(item: dict[str, Any]) -> Job:
-    """职位已从库里删了 → 用 match 自带的快照拼个 Job（复用已有数据，不重抓）。"""
+    """职位已从库里删了，用 match 自带的快照拼个 Job。
+
+    Args:
+        item: 一条 match。
+
+    Returns:
+        快照拼出的 Job。
+    """
     return Job(
         job_name=str(item.get("job_name") or ""),
         brand_name=str(item.get("brand_name") or ""),
@@ -711,7 +887,15 @@ def _job_from_snapshot(item: dict[str, Any]) -> Job:
 
 
 def _greet_fields(item: dict[str, Any], job: Job | None) -> dict[str, str]:
-    """招呼语 prompt 的职位块：库里有完整 Job 用它（含 JD），没有就退回 match 存的摘要。"""
+    """招呼语 prompt 的职位块。
+
+    Args:
+        item: 一条 match。
+        job: 库里读到的职位；没有则退回 match 摘要。
+
+    Returns:
+        模板占位字段。
+    """
     if job is not None:
         return {
             "job_name": job.job_name,
@@ -742,7 +926,14 @@ def _greet_fields(item: dict[str, Any], job: Job | None) -> dict[str, str]:
 
 
 def _clean_greeting(raw: str) -> str:
-    """把 LLM 回话收成一条正文：JSON 里的 greeting 优先，再退回纯文本并去围栏/引号。"""
+    """把 LLM 回话收成一条正文：JSON 里的 greeting 优先，再退回纯文本并去围栏/引号。
+
+    Args:
+        raw: LLM 原文。
+
+    Returns:
+        清理后的招呼语。
+    """
     text = str(raw or "").strip()
     if not text:
         return ""
@@ -751,7 +942,6 @@ def _clean_greeting(raw: str) -> str:
         text = str(data["greeting"]).strip()
     if text.startswith("```"):
         text = text.strip("`").strip()
-    # 成对引号（含「」『』这种开闭不同的）
     pairs = {'"': '"', "'": "'", "「": "」", "『": "』"}
     if len(text) >= 2 and text[0] in pairs and text[-1] == pairs[text[0]]:
         text = text[1:-1].strip()
@@ -759,6 +949,14 @@ def _clean_greeting(raw: str) -> str:
 
 
 def _finalize(task: MatchTask, resume: Any, cfg: Any, llm_parse: dict[str, Any] | None) -> None:
+    """聚合排序、写 analysis 行并把任务置为完成。
+
+    Args:
+        task: 匹配任务。
+        resume: 简历骨架。
+        cfg: LLM 配置。
+        llm_parse: LLM 解析结果。
+    """
     gaps: Counter[str] = Counter()
     for item in task.matches:
         for skill in item.get("missing_skills") or []:

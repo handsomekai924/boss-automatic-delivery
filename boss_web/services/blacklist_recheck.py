@@ -1,4 +1,11 @@
-"""Re-evaluate stored jobs against a fixed blacklist-rule snapshot."""
+"""对固定规则快照重算已入库职位的黑名单状态。
+
+Attributes:
+    ST_RUNNING: 重检进行中。
+    ST_DONE: 重检完成。
+    ST_ERROR: 重检失败。
+    ST_CANCELLED: 重检被取消。
+"""
 
 from __future__ import annotations
 
@@ -20,7 +27,15 @@ ST_CANCELLED = "cancelled"
 
 
 class RecheckTask:
+    """一次规则重检任务的状态与进度。
+
+    Args:
+        job_ids: 要重检的职位 id；空 = 全库。
+        limit: 最多处理多少条；`None` = 不限。
+    """
+
     def __init__(self, *, job_ids: Sequence[str], limit: int | None) -> None:
+        """初始化。"""
         self.task_id = "br_" + uuid.uuid4().hex[:10]
         self.job_ids = [str(value) for value in job_ids if str(value).strip()]
         self.limit = max(1, min(5000, int(limit))) if limit is not None else None
@@ -40,16 +55,16 @@ class RecheckTask:
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.cancel_flag = False
         self.lock = threading.Lock()
-        #: 本轮已写过审计的 (job_id, rule_id)：同一轮内不重复刷流水
         self.logged_pairs: set[tuple[str, str]] = set()
-        #: 本轮已处理过的职位：防止分页抖动 / job_ids 重复导致整条重算
         self.seen_jobs: set[str] = set()
 
     def push(self, payload: dict[str, Any]) -> None:
+        """追加一条进度事件。"""
         with self.lock:
             self.events.append({"at": time.time(), **payload})
 
     def snapshot(self) -> dict[str, Any]:
+        """当前任务快照（含最近若干条事件）。"""
         with self.lock:
             return {
                 "task_id": self.task_id,
@@ -70,19 +85,22 @@ class RecheckTask:
 class RecheckTaskManager:
     """Run one bounded current-state recheck at a time.
 
-    This intentionally only updates ``jobs`` and audit hits. It never loads or
+    This intentionally only updates `jobs` and audit hits. It never loads or
     writes analysis rows, and it never invokes the delivery client.
     """
 
     def __init__(self) -> None:
+        """初始化。"""
         self._lock = threading.Lock()
         self._task: RecheckTask | None = None
 
     def current(self) -> RecheckTask | None:
+        """当前任务；没有则 `None`。"""
         with self._lock:
             return self._task
 
     def snapshot(self, task_id: str | None = None) -> dict[str, Any]:
+        """取任务快照；`task_id` 不匹配时抛 `NotFoundError`。"""
         task = self.current()
         if task is None:
             if task_id:
@@ -93,11 +111,11 @@ class RecheckTaskManager:
         return task.snapshot()
 
     def start(self, *, job_ids: Sequence[str] = (), limit: int | None = None) -> RecheckTask:
+        """启动一次重检；已有任务在跑时抛 `ConflictError`。"""
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有规则重检任务在运行")
             task = RecheckTask(job_ids=job_ids, limit=limit)
-            # Freeze rules before the worker starts and before returning the task.
             task.rules_snapshot = tuple(list_enabled_rules())
             self._task = task
 
@@ -111,6 +129,7 @@ class RecheckTaskManager:
         return task
 
     def cancel(self) -> RecheckTask:
+        """请求取消当前任务。"""
         task = self.current()
         if task is None:
             raise NotFoundError("没有规则重检任务")
@@ -119,14 +138,13 @@ class RecheckTaskManager:
         return task
 
     def _run(self, task: RecheckTask) -> None:
+        """后台线程：按冻结规则逐条重算并回写安全状态。"""
         store: JobStore | None = None
         try:
-            # Freeze the exact enabled rule content before selecting jobs.
             rules = task.rules_snapshot
             has_jd_rules = any(rule.get("rule_type") == "jd_keyword" for rule in rules)
             store = JobStore()
             if task.job_ids:
-                # 去重但保序：重复 id 只算一条，进度 total 不虚高
                 seen_ids: set[str] = set()
                 jobs = []
                 for job_id in task.job_ids:
@@ -142,6 +160,7 @@ class RecheckTaskManager:
                 total = min(store.count_jobs(), task.limit) if task.limit is not None else store.count_jobs()
 
                 def iter_all_jobs():
+                    """分批遍历全库职位。"""
                     offset = 0
                     batch_size = 500
                     while offset < total:
@@ -166,7 +185,6 @@ class RecheckTaskManager:
                     task.push({"event": "cancelled"})
                     return
                 if job.encrypt_job_id in task.seen_jobs:
-                    # 同一轮里这条已经算过了（job_ids 重复 / 分页抖动），不再重算
                     continue
                 task.seen_jobs.add(job.encrypt_job_id)
                 try:

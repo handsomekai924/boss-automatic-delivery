@@ -21,4 +21,5 @@ api_router.include_router(system.router, prefix="/system", tags=["system"])
 
 @api_router.get("/health", tags=["system"])
 def health() -> dict[str, str]:
+    """健康检查探针。"""
     return {"ok": "true", "service": "boss_web"}

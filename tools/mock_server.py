@@ -1,45 +1,16 @@
-"""本地假服务端：在离线环境下完整演练登录流程。
+"""本地假服务端：离线演练登录 / 发码 / 滑块 / 筛选条件接口。
 
-它按真实接口的形状实现这些路由，行为规则也尽量贴近线上::
+验证码打在服务端日志；风控 13800138010、封禁 13800000000、滑块 13800138020。
 
-    POST /wapi/zppassport/send/smsCode     下发验证码（V1；**不认**滑块票据）
-    POST /wapi/zppassport/send/smsCodeV2   下发验证码（V2；认极验票据）
-    POST /wapi/zppassport/login/phone      登录（V1；**不认**滑块票据）
-    POST /wapi/zppassport/login/phoneV2    登录（V2；认极验票据）
-    POST /wapi/zppassport/validate/getLoginSuggest   登录前置检查（失败不阻断）
-    GET  /wapi/zpuser/wap/getUserInfo.json
-    POST /wapi/zppassport/user/logout
-    GET  /wapi/zppassport/captcha/getTypeV2        业务请求的滑块挑战（带真 randKey）
-    POST /wapi/zppassport/captcha/validate         **404** —— passport 族没这路由
-    GET  /wapi/zpsecureflow/captcha/gettype        verify.html 页的挑战（另一个 gt）
-    POST /wapi/zpsecureflow/captcha/validate       收下票据并**烧掉**（一次性）
-
-用法::
-
-    python tools/mock_server.py --port 8765
-    # 另开一个终端：
-    python -m boss_login login --phone 13800138000 \
-        --base-url http://127.0.0.1:8765
-
-验证码不会真的发短信，而是直接打印在服务端日志里。触发风控的手机号是 13800138010，
-被封禁的手机号是 13800000000。
-
-滑块挑战（400061）的放行条件照着登录页 chunk ``user-login.js`` 的 ``Ce`` 建模：
-**极验票据只有三个表单键** ``challenge`` / ``validate`` / ``seccode``，而且只有
-V2 那层（``smsCodeV2`` / ``phoneV2``）认。带着票据去打 V1 照样 400061——真机
-正是这样。请求头 ``Zp-Captcha-*`` 是 zpsecureflow validate 那条链的形状，
-**业务接口不认**。
-
-登录那步跟发码用的是**同一张**票：登录页的 ``verifyInfo`` 跨两步共用
-(``Ce(!0)`` 和 ``Ce()`` 挂的是同一个对象)，``clearVerify`` 只在登录结束时调。
-所以业务请求**不烧**票据，只有 ``zpsecureflow/captcha/validate`` 会烧。
-
-两族挑战故意下发不同的 gt（``mock-pass-gt-*`` vs ``mock-flow-gt-*``），方便测试
-认出客户端有没有取错族。线上实测过：拿 zpsecureflow 的票据去打 zppassport 的
-业务接口，服务端不认。
-
-票据是一次性凭证：``validate`` 收下就烧掉。所以「先 validate 再带同一张票重试」
-会被再次 400061——真机正是这样。假服务端跟着这个行为，免得把死路测成绿的。
+Attributes:
+    SLIDER_PAYLOAD: 滑块拒绝响应里的 `zpData` 样例。
+    PLAIN_REJECT_PHONE: 话术相近但属普通失败的对照号，不该判成风控。
+    SLIDER_PASS_COOKIE: 滑块通过后种下的 Cookie 名；业务接口不读它。
+    REQUIRED_CAPTCHA_HEADERS: 滑块票据请求头名。
+    JIYAN_TICKET_KEYS: 滑块票据的三个表单键。
+    STORE: 手机号 → 验证码记录（`code` / `sent_at` / `expire_at` / `attempts`）。
+    SMS_TOKENS: 手机号 → 发码响应的 smsToken，前置检查要对账。
+    FILTER_API_DOWN: 置真时筛选接口一律失败，用来验客户端兜底表。
 """
 
 from __future__ import annotations
@@ -53,13 +24,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-# `python tools/mock_server.py` 时 sys.path[0] 是 tools/，import 不到 boss_login。
-# 测试里是 `from tools.mock_server import …`，那时项目根已经在路上。两边都要能跑。
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from boss_login.crypto import decrypt_account  # noqa: E402  - 见上面的 path 处理
+from boss_login.crypto import decrypt_account  # noqa: E402
 
 CODE_TTL_SECONDS = 300
 RESEND_COOLDOWN_SECONDS = 60
@@ -68,53 +37,29 @@ MAX_ATTEMPTS = 5
 RISK_CONTROL_PHONES = {"13800138010"}
 BLOCKED_PHONES = {"13800000000"}
 
-#: 复刻真实站点实测到的形状：{"code": 400061, "message": "请完成滑块验证"}。
-#: zpData 这里故意放**无法识别的字段名**：真实响应带什么字段离线没核实过，
-#: 客户端必须原样回显出来，否则永远不知道该怎么适配。
 SLIDER_PHONES = {"13800138020"}
 SLIDER_CODE = 400061
 SLIDER_MESSAGE = "请完成滑块验证"
 SLIDER_PAYLOAD = {"challenge": "mock-challenge-id", "gt": "mock-gt"}
 
-#: 话术相近但属于普通业务失败的对照号码：不该被当成风控
 PLAIN_REJECT_PHONE = "13800139010"
 
-#: 通行 Cookie 名。validate 会种它，**但业务接口不认**——见 _send_sms_code 的注释。
 SLIDER_PASS_COOKIE = "mock_slider_pass"
-#: 票据请求头（与 captcha-sdk onSuccess 的 headers 对齐）。**业务接口不认**，
-#: 只有 zpsecureflow/captcha/validate 那条链用它。
 REQUIRED_CAPTCHA_HEADERS = (
     "Zp-Captcha-Type",
     "Zp-Captcha-Challenge",
     "Zp-Captcha-Validate",
     "Zp-Captcha-Seccode",
 )
-#: 极验通道的票据 —— user-login.js 的 ``1==verifyType`` 分支，就这三个表单键。
 JIYAN_TICKET_KEYS = ("challenge", "validate", "seccode")
 
-#: phone -> {"code": str, "sent_at": float, "expire_at": float, "attempts": int}
 STORE: dict[str, dict] = {}
-#: token -> user
 SESSIONS: dict[str, dict] = {}
-#: 已被 validate 收下（= 烧掉）的 geetest_validate。一次性凭证用过即废。
 BURNED_TICKETS: set[str] = set()
-#: 最近一次发码请求的路径/表单/请求头，供测试断言「票据有没有挂对地方」
 LAST_SMS_REQUEST: dict = {}
-#: 最近一次登录请求的路径/表单/请求头
 LAST_LOGIN_REQUEST: dict = {}
-#: 最近一次 getLoginSuggest 请求的表单
 LAST_SUGGEST_REQUEST: dict = {}
-#: 发码登记下来的 smsToken（响应 zpData.token），getLoginSuggest 要拿它对账
 SMS_TOKENS: dict[str, str] = {}
-
-# --------------------------------------------------------------------------- #
-# 筛选条件接口（boss_filter）
-# ---------------------------------------------------------------------------
-# 路径与真实站点一致（2026-09-30 实测），形状照抄 wapi 返回：
-#   GET /wapi/zpgeek/pc/all/filter/conditions.json → zpData 里一堆 XxxList
-#   GET /wapi/zpCommon/data/city.json              → cityList 省→市→区树 + hotCityList
-#   GET /wapi/zpgeek/search/job/hot/city.json      → hotCityList
-# FILTER_API_DOWN 置真时这几个接口一律回失败码，用来验证客户端的写死表兜底。
 
 FILTER_API_DOWN = False
 
@@ -128,7 +73,6 @@ FILTER_ROUTES: tuple[str, ...] = (
     "/wapi/zpCommon/data/industry.json",
 )
 
-#: 与线上同 code / 同文案（实测抄下来的），别手写凑数
 MOCK_CONDITIONS: dict = {
     "payTypeList": [
         {"code": 0, "name": "不限"},
@@ -203,7 +147,6 @@ MOCK_CONDITIONS: dict = {
     ],
 }
 
-#: 热点城市（线上 hot/city.json 的 15 项）
 MOCK_HOT_CITIES: list[dict] = [
     {"code": 100010000, "name": "全国"},
     {"code": 101010100, "name": "北京"},
@@ -212,7 +155,6 @@ MOCK_HOT_CITIES: list[dict] = [
     {"code": 101280600, "name": "深圳"},
 ]
 
-#: 行业树（线上 /wapi/zpCommon/data/industry.json 的精简版，code 为 1000xx）
 MOCK_INDUSTRIES: list[dict] = [
     {
         "code": 100000,
@@ -233,7 +175,6 @@ MOCK_INDUSTRIES: list[dict] = [
     },
 ]
 
-#: 城市树只要一小片够测递归解析即可（省→市→区三层，照线上字段名）
 MOCK_CITY_LIST: list[dict] = [
     {
         "code": 101010000,
@@ -274,6 +215,7 @@ MOCK_CITY_LIST: list[dict] = [
 
 
 def _json(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200, cookies=None) -> None:
+    """把 JSON 响应写回客户端，可附带 `Set-Cookie`。"""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json;charset=UTF-8")
@@ -285,12 +227,7 @@ def _json(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200, coo
 
 
 def _announce(message: str) -> None:
-    """打印提示。
-
-    Windows 控制台默认是 GBK，遇到 emoji 会抛 UnicodeEncodeError。日志失败不能
-    影响请求处理——否则客户端会看到一个 500 并重试，而这一次的冷却记录已经写进
-    STORE 了，重试就会莫名其妙地撞上限流。所以这里降级成 ASCII，绝不外抛。
-    """
+    """打印提示；GBK 控制台下 emoji 降级成 ASCII，绝不外抛。"""
     try:
         print(message, flush=True)
     except UnicodeEncodeError:
@@ -298,14 +235,16 @@ def _announce(message: str) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    """mock HTTP 处理器：按路径分发登录 / 发码 / 滑块 / 筛选接口。"""
+
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):  # noqa: A003 - 保持父类签名
+        """把访问日志打到 stdout。"""
         _announce(f"[mock] {self.address_string()} {fmt % args}")
 
-    # ------------------------------------------------------------------ #
-
     def do_GET(self):  # noqa: N802 - 父类命名
+        """分发 GET：用户信息、滑块挑战、筛选条件。"""
         path = urlparse(self.path).path
         if path == "/wapi/zpuser/wap/getUserInfo.json":
             token = self._auth_token()
@@ -313,32 +252,27 @@ class Handler(BaseHTTPRequestHandler):
                 return _json(self, {"code": 1, "message": "未登录", "zpData": {}})
             return _json(self, {"code": 0, "message": "success", "zpData": SESSIONS[token]})
         if path == "/wapi/zppassport/captcha/getTypeV2":
-            # 业务接口同族：gt 用 mock-pass-gt- 前缀，且带真 randKey
             return self._captcha_gettype(family="passport")
         if path == "/wapi/zpsecureflow/captcha/gettype":
-            # verify.html 页那族：另一个 gt，randKey 为 null（线上实测形状）
             return self._captcha_gettype(family="secureflow")
         if path == "/wapi/zppassport/captcha/validate":
-            # 线上实测 404 —— passport 族根本没有 validate 路由
             return _json(self, {"status": 404, "error": "Not Found", "path": path}, status=404)
         if path in FILTER_ROUTES:
             return self._filter_data(path)
         _json(self, {"code": 404, "message": "not found", "zpData": {}}, status=404)
 
     def do_POST(self):  # noqa: N802
+        """分发 POST：发码、登录、前置检查、登出、滑块校验。"""
         path = urlparse(self.path).path
         form = self._read_form()
 
         if path == "/wapi/zppassport/send/smsCode":
-            # V1：**不认**滑块票据。带着票据来照样 400061。
             return self._send_sms_code(form, version=1)
         if path == "/wapi/zppassport/send/smsCodeV2":
-            # V2：认极验三件套 challenge/validate/seccode（user-login.js 的 Ce）
             return self._send_sms_code(form, version=2)
         if path == "/wapi/zppassport/login/phone":
             return self._login(form, version=1)
         if path == "/wapi/zppassport/login/phoneV2":
-            # 极验通道 B[1].sms；票据规则跟 smsCodeV2 同一套
             return self._login(form, version=2)
         if path == "/wapi/zppassport/validate/getLoginSuggest":
             return self._login_suggest(form)
@@ -356,15 +290,8 @@ class Handler(BaseHTTPRequestHandler):
             return _json(self, {"status": 404, "error": "Not Found", "path": path}, status=404)
         _json(self, {"code": 404, "message": "not found", "zpData": {}}, status=404)
 
-    # ------------------------------------------------------------------ #
-    # 滑块验证
-    # ------------------------------------------------------------------ #
-
     def _captcha_gettype(self, *, family: str) -> None:
-        """照实测形状回一个极验挑战（startCaptcha 是字符串化的 JSON）。
-
-        两族下发**不同的 gt**：业务请求要用 passport 族的那张票据。
-        """
+        """按 family 回一个滑块挑战；passport 与 secureflow 下发不同 gt。"""
         if family == "passport":
             gt = f"mock-pass-gt-{random.randint(10**6, 10**7 - 1)}"
             rand_key: str | None = f"mock-randkey-{random.randint(10**6, 10**7 - 1)}"
@@ -390,12 +317,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _captcha_validate(self) -> None:
-        """收下票据并**烧掉**它。缺票据头就按线上话术拒掉。
-
-        为什么烧：极验的 geetest_validate 是一次性凭证。真机上「先 validate 再带
-        同一张票去重试业务请求」会再次 400061——票据在 validate 那步就用掉了。
-        假服务端跟着这个行为，免得把死路测成绿的。
-        """
+        """收下并作废一张滑块票据；缺票据头则拒绝。"""
         missing = [h for h in REQUIRED_CAPTCHA_HEADERS if not self.headers.get(h)]
         if missing:
             return _json(
@@ -416,29 +338,13 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _jiyan_ticket(self, form: dict) -> str:
-        """取出极验票据的 validate 值；三个键不齐就不算有票据。
-
-        键名照抄登录页 chunk ``user-login.js`` 的 ``1==verifyType`` 分支，就
-        ``challenge`` / ``validate`` / ``seccode`` 三个。``verifyToken`` /
-        ``captchaToken`` 是客户端早期猜的键名，真机不认——这里也不认，免得
-        测试把错的契约背书成绿的。``Zp-Captcha-*`` 请求头同理，那是
-        zpsecureflow validate 的形状，业务接口不看。
-        """
+        """取表单里的票据 `validate` 值；三键不齐则空串。"""
         if all(str(form.get(key) or "") for key in JIYAN_TICKET_KEYS):
             return str(form["validate"])
         return ""
 
     def _has_slider_ticket(self, form: dict) -> bool:
-        """这个请求自己有没有带一张**没被烧掉**的极验票据。
-
-        不能只看 validate 种的 Cookie —— 线上实测那样不够。也不能认已烧掉的票：
-        validate 那步已经把一次性凭证用掉了。
-
-        业务请求（smsCodeV2 / phoneV2）**不烧**票据：登录页的 ``verifyInfo`` 跨
-        发码与登录共用，``Ce(!0)`` 和 ``Ce()`` 把**同一张**票挂到两个请求上，
-        ``clearVerify`` 只在登录结束时调。所以假服务端也不在这里作废它——只有
-        ``zpsecureflow/captcha/validate`` 那条链会烧（真机实测过）。
-        """
+        """请求是否自带一张未被用掉的票据。"""
         value = self._jiyan_ticket(form)
         if not value:
             return False
@@ -448,11 +354,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _phone_of(self, form: dict) -> str:
-        """出发码请求的手机号。
-
-        V2 表单里没有 ``phone``——登录页的 ``je()`` 中间件把它换成了
-        ``encryptedAccount``。这里解回来才能记账；解不动就退回明文 ``phone``。
-        """
+        """从表单取手机号，支持 `encryptedAccount` 解密；取不到回空串。"""
         if form.get("phone"):
             return str(form["phone"])
         token = str(form.get("encryptedAccount") or "")
@@ -464,11 +366,8 @@ class Handler(BaseHTTPRequestHandler):
             _announce("[mock] ✗ encryptedAccount 解不出来，无法识别手机号")
             return ""
 
-    # ------------------------------------------------------------------ #
-    # 业务
-    # ------------------------------------------------------------------ #
-
     def _send_sms_code(self, form: dict, *, version: int) -> None:
+        """处理发码：登记验证码，并按路由规则校验滑块票据。"""
         phone = self._phone_of(form)
         LAST_SMS_REQUEST.clear()
         LAST_SMS_REQUEST.update(
@@ -486,15 +385,6 @@ class Handler(BaseHTTPRequestHandler):
         if phone in BLOCKED_PHONES:
             return _json(self, {"code": 31, "message": "当前 IP 已被封禁", "zpData": {}})
 
-        # 真实站点实测形状：码在 400xxx 网关空间，zpData 不含 seed/ts/name。
-        #
-        # 过掉滑块的条件照着登录页建模，三件事缺一不可：
-        #   1. 打的是 **V2** —— B[1].smsCode = send/smsCodeV2；V1 那层根本不读票据。
-        #   2. **这个请求自己**带极验三件套 challenge/validate/seccode。
-        #      请求头 Zp-Captcha-* 不算（那是 zpsecureflow 的形状）。
-        #      validate 顺手种的 Cookie 也不算（线上实测过）。
-        #   3. 票据没被烧掉 —— validate 收下就作废，「先 validate 再带同一张票
-        #      重试」也会 400061。真机正是这样。
         if phone in SLIDER_PHONES:
             if version != 2:
                 _announce("[mock] ✗ 滑块票据只有 smsCodeV2 认，V1 这条路走不通")
@@ -508,7 +398,6 @@ class Handler(BaseHTTPRequestHandler):
                     {"code": SLIDER_CODE, "message": SLIDER_MESSAGE, "zpData": SLIDER_PAYLOAD},
                 )
 
-        # 对照组：话术里带「验证码」但属于普通失败，不该被判成风控
         if phone == PLAIN_REJECT_PHONE:
             return _json(self, {"code": 1004, "message": "验证码发送失败，请稍后重试", "zpData": {}})
 
@@ -533,8 +422,6 @@ class Handler(BaseHTTPRequestHandler):
 
         code = f"{random.randint(0, 999999):06d}"
         STORE[phone] = {"code": code, "sent_at": now, "expire_at": now + CODE_TTL_SECONDS, "attempts": 0}
-        # 发码响应的 zpData.token 是 **smsToken**（短信会话票据），不是登录态。
-        # 登录页把它存进 smsToken，登录前置的 getLoginSuggest 要拿它对账。
         sms_token = f"mock-sms-{random.randint(10**6, 10**7 - 1)}"
         SMS_TOKENS[phone] = sms_token
         _announce(f"[mock] 📱 发给 {phone} 的验证码是 {code}")
@@ -548,11 +435,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _login_suggest(self, form: dict) -> None:
-        """登录前置检查。照登录页的 ``Re`` 建模：失败也不该阻断登录。
-
-        请求体 ``{token: smsToken, encryptedAccount, code, regionCode}``。
-        这里只做记录 + 轻校验（smsToken 对不对得上），不发登录态。
-        """
+        """登录前置检查：校验 smsToken，失败也不阻断登录。"""
         phone = self._phone_of(form)
         LAST_SUGGEST_REQUEST.clear()
         LAST_SUGGEST_REQUEST.update({"phone": phone, "form": dict(form)})
@@ -566,6 +449,7 @@ class Handler(BaseHTTPRequestHandler):
         _json(self, {"code": 0, "message": "success", "zpData": {}})
 
     def _login(self, form: dict, *, version: int) -> None:
+        """处理登录：校验验证码，成功则用 `Set-Cookie` 发会话。"""
         phone = self._phone_of(form)
         code = form.get("phoneCode", "")
         LAST_LOGIN_REQUEST.clear()
@@ -579,8 +463,6 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
-        # 滑块放行条件与发码同一套：V2 + 极验三件套 + 没被 validate 烧掉。
-        # 登录页 Ce() 会把 verifyInfo 原样挂到 login 上，所以两张请求共用一张票。
         if phone in SLIDER_PHONES:
             if version != 2:
                 _announce("[mock] ✗ 滑块票据只有 phoneV2 认，V1 这条路走不通")
@@ -610,7 +492,6 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return _json(self, {"code": 2001, "message": "验证码错误，请重新输入", "zpData": {}})
 
-        # 验证通过：验证码一次性失效，首次即注册
         STORE.pop(phone, None)
         token = f"mock-token-{random.randint(10**11, 10**12 - 1)}"
         user = {
@@ -619,11 +500,6 @@ class Handler(BaseHTTPRequestHandler):
             "isNewUser": True,
         }
         SESSIONS[token] = {**user, "phone": phone}
-        # 真实站点的登录响应体里**没有**会话 token——登录页的成功处理（m.F）只读
-        # 路由字段（identity / isCompletion / toUrl …），鉴权完全靠 Set-Cookie。
-        # 这里照办：body 只放路由与用户字段，凭证只在 Cookie 里。
-        # 早期假服务端把 token 塞进 zpData，等于把「响应体里有 token」这条死路
-        # 测成了绿的——真机上根本抠不出来，登录就卡在「没拿到凭证」。
         _json(
             self,
             {
@@ -639,10 +515,6 @@ class Handler(BaseHTTPRequestHandler):
             },
             cookies=[f"zp_at={token}; Path=/; HttpOnly", f"wt2={token[:8]}; Path=/"],
         )
-
-    # ------------------------------------------------------------------ #
-    # 筛选条件（boss_filter）
-    # ------------------------------------------------------------------ #
 
     def _filter_data(self, path: str) -> None:
         """按路径回筛选项，形状与真实 wapi 一致。"""
@@ -678,17 +550,16 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 },
             )
-        # conditions.json 三兄弟共用一份（recommend 没有 stageList，测试不依赖它）
         return _json(self, {"code": 0, "message": "Success", "zpData": dict(MOCK_CONDITIONS)})
 
-    # ------------------------------------------------------------------ #
-
     def _read_form(self) -> dict:
+        """读 URL 编码的请求体为单值字典。"""
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length).decode("utf-8") if length else ""
         return {k: v[0] for k, v in parse_qs(raw).items()}
 
     def _auth_token(self) -> str:
+        """从 Cookie 头取 `zp_at` 会话令牌；没有则空串。"""
         cookie_header = self.headers.get("Cookie") or ""
         for part in cookie_header.split(";"):
             name, _, value = part.strip().partition("=")
@@ -698,6 +569,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(port: int = 8765, host: str = "127.0.0.1") -> ThreadingHTTPServer:
+    """起一个 mock 服务端并打印试验号码。"""
     server = ThreadingHTTPServer((host, port), Handler)
     _announce(f"[mock] 假服务端已启动：http://{host}:{port}")
     _announce("[mock] 风控号码 13800138010 ｜ 封禁号码 13800000000")
@@ -706,6 +578,7 @@ def serve(port: int = 8765, host: str = "127.0.0.1") -> ThreadingHTTPServer:
 
 
 def main() -> None:
+    """命令行入口：起 mock 服务端并一直服务到 Ctrl+C。"""
     parser = argparse.ArgumentParser(description="BOSS直聘登录流程本地假服务端")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="127.0.0.1")

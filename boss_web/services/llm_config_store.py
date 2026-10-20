@@ -1,8 +1,10 @@
-"""LLM 配置存取：状态库 ``data/boss.db`` 的 ``doc('llm_config')``，API 回显时打码。
+"""LLM 配置存取：状态库 `data/boss.db` 的 `doc('llm_config')`，API 回显时打码。
 
-可配置的只有 **api_key / base_url / model** 三项。
-温度、max_tokens、超时是系统固定参数（见 :mod:`boss_web.config`），
+可配置的只有 api_key / base_url / model 三项；采样与超时参数是系统固定值，
 读写都会被强制成常量，界面和接口都改不动。
+
+Attributes:
+    _UPDATABLE: 用户可改的字段名；其余一律忽略。
 """
 
 from __future__ import annotations
@@ -23,16 +25,27 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LLMConfig:
+    """LLM 配置项。
+
+    Attributes:
+        api_key: API 密钥；空串 = 未配置。
+        base_url: 上游兼容 OpenAI 的接口地址。
+        model: 模型名。
+        temperature: 采样温度，构造时被 `normalize()` 拉齐到系统常量。
+        max_tokens: 单次回答上限，同上。
+        timeout: 请求超时（秒），同上。
+    """
+
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = ""
-    # 下面三项是系统固定值，构造时会被 normalize() 拉齐到常量
     temperature: float = C.LLM_TEMPERATURE
     max_tokens: int = C.LLM_MAX_TOKENS
     timeout: float = C.LLM_TIMEOUT
 
     @property
     def configured(self) -> bool:
+        """三项可配置字段是否都已填好。"""
         return bool(self.api_key and self.base_url and self.model)
 
     def normalize(self) -> "LLMConfig":
@@ -47,6 +60,7 @@ class LLMConfig:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """归一化后转字典。"""
         return asdict(self.normalize())
 
     def masked(self) -> dict[str, Any]:
@@ -66,6 +80,7 @@ class LLMConfig:
 
 
 def mask_key(key: str) -> str:
+    """密钥打码：只留前 3 与尾 4；短串整串打星。"""
     if not key:
         return ""
     if len(key) <= 8:
@@ -76,7 +91,8 @@ def mask_key(key: str) -> str:
 def load_config(path: Path | str | None = None) -> LLMConfig:
     """读状态库里的 LLM 配置；没有 / 坏了 → 空配置（不报错）。
 
-    :param path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    Args:
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
     """
     try:
         raw = boss_db.doc_get_raw(boss_db.DOC_LLM_CONFIG, path)
@@ -99,30 +115,27 @@ def load_config(path: Path | str | None = None) -> LLMConfig:
 def save_config(cfg: LLMConfig, path: Path | str | None = None) -> Path:
     """写回状态库；返回库路径。
 
-    :param path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    Args:
+        cfg: 要保存的配置。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
     """
     resolved = boss_db.doc_set(boss_db.DOC_LLM_CONFIG, cfg.normalize().to_dict(), path)
     logger.info("LLM 配置已保存到 %s", resolved)
     return resolved
 
 
-#: 用户可改的字段；其余一律忽略
 _UPDATABLE = ("api_key", "base_url", "model")
 
 
 def update_config(payload: dict[str, Any], path: Path | str | None = None) -> LLMConfig:
-    """合并更新可配置项：api_key 留空则保留旧值。
-
-    ``temperature`` / ``max_tokens`` / ``timeout`` 即使传进来也会被丢掉，
-    采样参数由系统常量说了算。
-    """
+    """合并更新可配置项：api_key 留空则保留旧值；系统固定字段一律忽略。"""
     current = load_config(path)
     data = current.to_dict()
     for key in _UPDATABLE:
         if key in payload and payload[key] is not None:
             value = str(payload[key]).strip()
             if key == "api_key" and not value:
-                continue  # 空 key = 不改
+                continue
             data[key] = value
     cfg = LLMConfig(**data).normalize()
     save_config(cfg, path)

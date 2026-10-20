@@ -1,22 +1,4 @@
-"""JobExpectFilter 的装配：四选一主参数 + 共享筛选维度。
-
-对齐站点 chunk ``job~0.0c757050.js`` 的 ``getFormData()`` 四分支：
-
-========  ==========================================================
-kind      期望主参数
-========  ==========================================================
-recommend ``city`` + ``encryptExpectId`` + ``mixExpectType``
-part_time ``jobType=1903`` + ``encryptExpectId``
-expect    ``encryptExpectId``
-temp      ``expectInfo``（JSON）
-========  ==========================================================
-
-验四件事：
-    1. 四种 kind 的主参数形状
-    2. 共享筛选维度（城市/薪资/经验/学历/行业/规模）照常进参数
-    3. **兼职态不传 salary**，只传 payType/partTime
-    4. ``query``/``scene`` 等 Y 类键**永远不出现**（前端点期望 tab 就删）
-"""
+"""`JobExpectFilter` 参数装配的单元测试。"""
 
 from __future__ import annotations
 
@@ -33,12 +15,8 @@ from boss_filter.expect import (
 from boss_filter.search import JobSearchFilter
 
 
-# --------------------------------------------------------------------------- #
-# 期望主参数：四选一
-# --------------------------------------------------------------------------- #
-
-
 def test_to_params_推荐带city加id加混合类型():
+    """验推荐态主参数含 city、id 与混合类型。"""
     params = JobExpectFilter(
         kind="recommend",
         encrypt_expect_id="MIX1",
@@ -53,6 +31,7 @@ def test_to_params_推荐带city加id加混合类型():
 
 
 def test_to_params_兼职写死jobType1903():
+    """验兼职态写死 jobType 且不带混合类型。"""
     params = JobExpectFilter(kind="part_time", encrypt_expect_id="PT1").to_params()
     assert params["jobType"] == PART_TIME_JOB_TYPE == "1903"
     assert params["encryptExpectId"] == "PT1"
@@ -60,11 +39,13 @@ def test_to_params_兼职写死jobType1903():
 
 
 def test_to_params_指定期望只带id():
+    """验指定期望只带 id 主参数。"""
     params = JobExpectFilter(kind="expect", encrypt_expect_id="E1").to_params()
     assert params == {"page": "1", "pageSize": "15", "encryptExpectId": "E1"}
 
 
 def test_to_params_临时期望发expectInfo不发id():
+    """验临时期望发 expectInfo 而不发 id。"""
     info = '{"expectType":"1","position":"python","location":"101280100","lowSalary":"10","highSalary":"20"}'
     params = JobExpectFilter(kind="temp_expect", expect_info=info).to_params()
     assert params["expectInfo"] == info
@@ -73,20 +54,18 @@ def test_to_params_临时期望发expectInfo不发id():
 
 
 def test_to_params_未知kind报错():
+    """验未知 kind 抛 `ValueError`。"""
     with pytest.raises(ValueError, match="未知期望类型"):
         JobExpectFilter(kind="nope").to_params()
 
 
 def test_四种kind都是合法取值():
+    """验合法 kind 集合恰为四种。"""
     assert set(EXPECT_KINDS) == {"recommend", "part_time", "expect", "temp_expect"}
 
 
-# --------------------------------------------------------------------------- #
-# 共享筛选维度
-# --------------------------------------------------------------------------- #
-
-
 def test_to_params_共享筛选照常进参数():
+    """验共享筛选维度照常进参数。"""
     params = JobExpectFilter(
         kind="expect",
         encrypt_expect_id="E1",
@@ -106,13 +85,14 @@ def test_to_params_共享筛选照常进参数():
 
 
 def test_to_params_空筛选不进参数():
+    """验空筛选维度不写入参数。"""
     params = JobExpectFilter(kind="expect", encrypt_expect_id="E1").to_params()
     for key in ("city", "salary", "experience", "degree", "industry", "scale", "payType", "partTime"):
         assert key not in params
 
 
 def test_to_params_兼职态不传salary只传payType_partTime():
-    """兼职 tab 的筛选面板是 payType/partTime 顶替 salary（getConfigFields()）。"""
+    """验兼职态不传 salary，只传 payType/partTime。"""
     params = JobExpectFilter(
         kind="part_time",
         encrypt_expect_id="PT1",
@@ -126,6 +106,7 @@ def test_to_params_兼职态不传salary只传payType_partTime():
 
 
 def test_to_params_非兼职态不传payType_partTime():
+    """验非兼职态不写入 payType/partTime。"""
     params = JobExpectFilter(
         kind="expect",
         encrypt_expect_id="E1",
@@ -137,7 +118,7 @@ def test_to_params_非兼职态不传payType_partTime():
 
 
 def test_to_params_永不出现Y类键():
-    """query/scene/stage 等是搜索态的键，期望态前端 getRemovedFields() 就剔了。"""
+    """验 Y 类键永不进参数。"""
     params = JobExpectFilter(
         kind="recommend",
         encrypt_expect_id="MIX1",
@@ -151,22 +132,17 @@ def test_to_params_永不出现Y类键():
 
 
 def test_to_params_防御性兜底会剔掉误塞的Y类键():
-    """万一上游 dict 把 query 塞进来，to_params 也要兜干净。"""
+    """验 `NEVER_PARAMS` 覆盖 query 等误塞键。"""
     f = JobExpectFilter(kind="expect", encrypt_expect_id="E1")
     params = f.to_params()
-    params["query"] = "python"  # 模拟调用方误塞
+    params["query"] = "python"
     for key in NEVER_PARAMS:
         params.pop(key, None)
-    # 断言 NEVER_PARAMS 确实覆盖 query，防有人把它从集合里删掉
     assert "query" in NEVER_PARAMS
 
 
-# --------------------------------------------------------------------------- #
-# for_page / 页码
-# --------------------------------------------------------------------------- #
-
-
 def test_for_page_只换页码():
+    """验 `for_page` 只换页码且不改动原实例。"""
     f = JobExpectFilter(kind="expect", encrypt_expect_id="E1", city="101280100", page=1)
     f2 = f.for_page(4)
     assert f2.page == 4
@@ -176,21 +152,19 @@ def test_for_page_只换页码():
 
 
 def test_页码从一开始():
+    """验页码从 1 起，0 抛 `ValueError`。"""
     with pytest.raises(ValueError, match="页码"):
         JobExpectFilter(kind="expect", encrypt_expect_id="E1", page=0)
 
 
 def test_每页条数至少一():
+    """验每页条数至少为 1。"""
     with pytest.raises(ValueError, match="每页条数"):
         JobExpectFilter(kind="expect", encrypt_expect_id="E1", page_size=0)
 
 
-# --------------------------------------------------------------------------- #
-# from_expects / from_temp_expect / from_search
-# --------------------------------------------------------------------------- #
-
-
 def _expects():
+    """构造一份三类期望齐全的 `ExpectList`。"""
     from boss_jobs.models import ExpectItem, ExpectList
 
     return ExpectList(
@@ -212,15 +186,16 @@ def _expects():
 
 
 def test_from_expects_推荐取mix并带上混合类型和城市code():
+    """验推荐态取 mix 并带混合类型与城市 code。"""
     f = JobExpectFilter.from_expects(_expects(), "recommend")
     assert f.kind == "recommend"
     assert f.encrypt_expect_id == "MIX1"
     assert f.mix_expect_type == "2"
-    # 前端 getFormData().city = mixLocation（city code，不是显示名）
     assert f.city == "101280800"
 
 
 def test_from_expects_兼职取首条():
+    """验兼职态取首条兼职期望。"""
     f = JobExpectFilter.from_expects(_expects(), "part_time")
     assert f.kind == "part_time"
     assert f.encrypt_expect_id == "PT1"
@@ -228,12 +203,14 @@ def test_from_expects_兼职取首条():
 
 
 def test_from_expects_我的期望取首条():
+    """验指定期望取首条。"""
     f = JobExpectFilter.from_expects(_expects(), "expect")
     assert f.kind == "expect"
     assert f.encrypt_expect_id == "E1"
 
 
 def test_from_expects_没有可取的报错():
+    """验无可取期望时抛 `ValueError`。"""
     from boss_jobs.models import ExpectList
 
     empty = ExpectList()
@@ -243,11 +220,13 @@ def test_from_expects_没有可取的报错():
 
 
 def test_from_expects_临时期望拒收():
+    """验 `from_expects` 拒收临时期望。"""
     with pytest.raises(ValueError, match="from_temp_expect"):
         JobExpectFilter.from_expects(_expects(), "temp_expect")
 
 
 def test_from_temp_expect_序列化成expectInfo():
+    """验临时期望序列化成 expectInfo。"""
     f = JobExpectFilter.from_temp_expect(
         {"expectType": "1", "position": "python", "location": "101280100", "lowSalary": "10", "highSalary": "20"}
     )
@@ -266,11 +245,13 @@ def test_from_temp_expect_序列化成expectInfo():
 
 
 def test_from_temp_expect_已经是串就原样透传():
+    """验已是 JSON 串时原样透传。"""
     f = JobExpectFilter.from_temp_expect('{"expectType":"1"}')
     assert f.expect_info == '{"expectType":"1"}'
 
 
 def test_from_search_只搬筛选不搬query():
+    """验从搜索条件只搬筛选维度，不搬 query 等键。"""
     base = JobSearchFilter(
         query="python",
         city="101280100",
@@ -288,7 +269,6 @@ def test_from_search_只搬筛选不搬query():
     assert f.salary == "405"
     assert f.experience == ("104",)
     params = f.to_params()
-    # query/scene/stage/jobType 都不该跟过来
     assert "query" not in params
     assert "scene" not in params
     assert "stage" not in params
@@ -298,6 +278,7 @@ def test_from_search_只搬筛选不搬query():
 
 
 def test_from_search_透传期望主参数():
+    """验 `from_search` 透传期望主参数。"""
     base = JobSearchFilter(city="101280100")
     f = JobExpectFilter.from_search(
         base,

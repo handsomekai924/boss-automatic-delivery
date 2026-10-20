@@ -1,10 +1,4 @@
-"""命令行层测试。
-
-单独成一个模块是有原因的：cli.py 曾经把一个不存在于 config 的名字导入进来
-（``from .config import DEFAULT_SESSION_PATH``，当时还没有这个名字），整套测试却
-全绿——因为没有任何一个测试 import 过 cli。库是对的，入口是坏的，而入口没人跑。
-这里把每个子命令都真的执行一遍，并核对退出码。
-"""
+"""命令行层测试：每个子命令都真跑一遍并核对退出码。"""
 
 from __future__ import annotations
 
@@ -27,15 +21,20 @@ def run(argv: list[str]) -> int:
 
 
 def base(server: str, session: Path, *rest: str) -> list[str]:
+    """拼一套 CLI 公共参数。"""
     return ["--base-url", server, "--db", str(session), *rest]
 
 
 def seed_code(server: str, phone: str, **kwargs) -> str:
-    """用库接口发一次码，取回假服务端生成的验证码。
+    """用独立客户端发一次码，取回假服务端生成的验证码。
 
-    CLI 只保留 login/whoami/logout/probe，没有独立的发码命令了；而 login 的
-    ``--code`` 非交互路径要求事先就知道验证码，所以这一步从库里发。
-    换成单独的客户端实例是有意的：不会把票据/冷却状态带进随后的 CLI 登录。
+    Args:
+        server: 假服务端地址。
+        phone: 手机号。
+        **kwargs: 透传给发码接口的附加参数。
+
+    Returns:
+        假服务端记录的验证码。
     """
     ZhipinLoginClient(base_url=server, retries=0, timeout=5.0, sleeper=lambda _s: None).send_sms_code(
         phone, force=True, **kwargs
@@ -44,9 +43,10 @@ def seed_code(server: str, phone: str, **kwargs) -> str:
 
 
 def code_from_store(phone: str):
-    """``input()`` 替身：发码已完成，提示输码时从 STORE 现取验证码。"""
+    """造一个 `input()` 替身，提示输码时从 STORE 现取验证码。"""
 
     def _input(_prompt: str = "") -> str:
+        """返回 STORE 里记下的验证码。"""
         return STORE[phone]["code"]
 
     return _input
@@ -54,17 +54,15 @@ def code_from_store(phone: str):
 
 @pytest.fixture
 def session(tmp_path: Path) -> Path:
-    # 指到临时状态库，避免碰到真实的 data/boss.db
+    """指到临时状态库。"""
     return tmp_path / "boss.db"
 
 
-# --------------------------------------------------------------------------- #
-# 入口本身
-# --------------------------------------------------------------------------- #
-
-
 class TestEntrypoint:
+    """CLI 入口与全局参数解析。"""
+
     def test_all_subcommands_are_registered(self):
+        """子命令都已注册。"""
         parser = cli.build_parser()
         for name in ("login", "whoami", "logout", "probe"):
             assert parser.parse_args([name, *(["--phone", PHONE] if name == "login" else [])])
@@ -79,36 +77,28 @@ class TestEntrypoint:
         ],
     )
     def test_verbose_flag_works_before_or_after_subcommand(self, argv):
-        """`login --phone X -v` 是人的自然写法，不能因为 argparse 的位置规则报错。
-
-        子解析器默认会用自己那份默认值盖掉顶层同名选项，所以子命令侧那份
-        必须用 SUPPRESS 当默认值。
-        """
+        """`-v` 在子命令前后都能解析。"""
         args = cli.build_parser().parse_args(argv)
         assert args.verbose is True
 
     def test_global_options_given_late_win_over_defaults(self):
+        """后给的全局选项覆盖默认值，未给的保持 `None`。"""
         args = cli.build_parser().parse_args(
             ["login", "--phone", PHONE, "--timeout", "5", "--base-url", "http://127.0.0.1:9"]
         )
         assert args.timeout == 5.0
         assert args.base_url == "http://127.0.0.1:9"
-        # 没给的仍然是「不覆盖」——让 BOSS_DB / 默认库说了算
         assert args.db is None
 
     def test_default_db_path_is_importable(self):
-        """这个常量曾在家门口导错模块，直接钉住它。"""
+        """`DEFAULT_DB_PATH` 可从 CLI 模块导入且与 session 一致。"""
         from boss_login.cli import DEFAULT_DB_PATH
         from boss_login.session import DEFAULT_DB_PATH as real
 
         assert DEFAULT_DB_PATH == real
 
     def test_default_db_lives_in_project_data_dir(self):
-        """状态库落在项目根的 data/ 下，按包位置定位，不看 cwd。
-
-        曾经在 ``~/.boss_login/`` 下，换个目录跑 ``python -m boss_login`` 就会
-        读写错文件——whoami 报「本地没有登录态」，而登录明明刚成功。
-        """
+        """状态库落在项目根 `data/` 下，按包位置定位，不看 cwd。"""
         import boss_login
         import boss_db
         from boss_login.session import DEFAULT_DB_PATH, PROJECT_ROOT
@@ -119,19 +109,15 @@ class TestEntrypoint:
         assert DEFAULT_DB_PATH == boss_db.DEFAULT_DB_PATH
         assert DEFAULT_DB_PATH == PROJECT_ROOT / "data" / "boss.db"
         assert DEFAULT_DB_PATH.is_absolute()
-        # 不再藏在 home 下
         assert not str(DEFAULT_DB_PATH).startswith(str(Path.home()))
-        # 跟 cwd 无关：路径是由 __file__ 推出来的常量
         assert str(DEFAULT_DB_PATH).startswith(str(package_dir.parent))
 
 
-# --------------------------------------------------------------------------- #
-# login
-# --------------------------------------------------------------------------- #
-
-
 class TestLoginCommand:
+    """login 子命令的登录与落盘。"""
+
     def test_full_login_writes_session(self, server, session, capsys):
+        """完整登录成功并写出可读回的会话。"""
         code = seed_code(server, PHONE)
 
         assert run(base(server, session, "login", "--phone", PHONE, "--code", code)) == cli.EXIT_OK
@@ -140,8 +126,6 @@ class TestLoginCommand:
         assert "求职者8000" in out
         assert "首次验证" in out
 
-        # 落盘内容可被库读回来。真实站点鉴权靠 Cookie（响应体里没有 token），
-        # 假服务端照办，所以凭证在 cookies 里。
         from boss_login.session import load_session
 
         stored = load_session(session)
@@ -150,6 +134,7 @@ class TestLoginCommand:
         assert stored.cookies["zp_at"].startswith("mock-token-")
 
     def test_no_save_skips_writing_session(self, server, session):
+        """`--no-save` 不写会话。"""
         code = seed_code(server, PHONE)
         argv = base(server, session, "login", "--phone", PHONE, "--code", code, "--no-save")
         assert run(argv) == cli.EXIT_OK
@@ -161,14 +146,15 @@ class TestLoginCommand:
         """交互式输入被中断时应干净退出，不是抛栈。"""
 
         def raise_eof(_prompt=""):
+            """模拟输入被中断。"""
             raise EOFError
 
         monkeypatch.setattr(builtins, "input", raise_eof)
-        # 不给 --code，走交互路径
         assert run(base(server, session, "login", "--phone", PHONE)) == cli.EXIT_ERROR
         assert "已取消登录" in capsys.readouterr().err
 
     def test_wrong_then_right_code_via_prompt(self, server, session, monkeypatch):
+        """先错码再对码仍可登录成功。"""
         correct = seed_code(server, PHONE)
         answers = iter(["000000", correct])
         monkeypatch.setattr(builtins, "input", lambda _p="": next(answers))
@@ -185,45 +171,32 @@ class TestLoginCommand:
         assert "138****8000" in out
 
 
-# --------------------------------------------------------------------------- #
-# 退出码（参数 / 风控 / 封禁，走 login 的发码环节）
-# --------------------------------------------------------------------------- #
-
-
 class TestExitCodes:
+    """参数 / 风控 / 封禁场景的退出码。"""
+
     def test_invalid_phone_exits_with_validation_code(self, server, session, capsys):
+        """非法手机号走校验退出码。"""
         assert run(base(server, session, "login", "--phone", "12345")) == cli.EXIT_VALIDATION
         assert "手机号格式不正确" in capsys.readouterr().err
 
     def test_risk_control_exits_with_risk_code(self, server, session, capsys):
+        """风控场景走风控退出码并给出验证入口。"""
         code = run(base(server, session, "login", "--phone", "13800138010"))
         assert code == cli.EXIT_RISK_CONTROL
         err = capsys.readouterr().err
         assert "风控" in err
         assert "seed=mock-seed" in err
         assert "verify.html" in err
-        # SECURITY_CHECK(37) 走的是另一套协议，票据才是 --verify-token 传回来的
         assert "--verify-token" in err
 
     def test_verify_token_unblocks_risk_control(self, server, session, monkeypatch):
+        """`--verify-token` 可解开 SECURITY_CHECK 类风控。"""
         monkeypatch.setattr(builtins, "input", code_from_store("13800138010"))
         argv = base(server, session, "login", "--phone", "13800138010", "--verify-token", "human")
         assert run(argv) == cli.EXIT_OK
 
     def test_slider_challenge_reports_risk_not_generic_error(self, server, session, capsys):
-        """真实站点实测形状：code=400061 / "请完成滑块验证"。
-
-        修之前这里会退化成「接口返回失败（code=400061）」，用户完全不知道
-        下一步该干什么。
-
-        处理方式那段曾经错写成「用 --verify-token 传回来」——那是
-        SECURITY_CHECK(37) 的路，滑块的票据是 challenge/validate/seccode
-        三件套、由帮助页自动回传，压根不走 --verify-token。照着那句去做
-        只会白跑一趟，所以这里钉住它**不**再出现。
-
-        ``--no-helper`` 是关键：不给的话 CLI 会拉起本地帮助页等人拖滑块，
-        测试就挂在那里等 300 秒超时了。
-        """
+        """滑块挑战报风控话术，且不再误导走 `--verify-token`。"""
         argv = base(server, session, "login", "--phone", "13800138020", "--no-helper")
         assert run(argv) == cli.EXIT_RISK_CONTROL
         err = capsys.readouterr().err
@@ -234,32 +207,22 @@ class TestExitCodes:
         assert "--verify-token" not in err
 
     def test_unknown_challenge_payload_is_echoed_back(self, server, session, capsys):
-        """认不出滑块参数时，必须把原始 zpData 原样打出来。
-
-        真实响应里那个字段叫什么名字离线没核实过；不打出来就永远没法适配。
-        """
+        """认不出的挑战参数原样回显，便于适配。"""
         run(base(server, session, "login", "--phone", "13800138020", "--no-helper"))
         err = capsys.readouterr().err
         assert "原始返回" in err
-        assert "mock-challenge-id" in err   # 字段名不认识，但值要能看到
+        assert "mock-challenge-id" in err
         assert "mock-gt" in err
 
     def test_plain_failure_message_stays_a_generic_error(self, server, session, capsys):
-        """对照组：话术带「验证码」的普通失败不能报成风控。"""
+        """对照组：普通验证码失败不报成风控。"""
         assert run(base(server, session, "login", "--phone", "13800139010")) == cli.EXIT_ERROR
         err = capsys.readouterr().err
         assert "风控" not in err
         assert "code=1004" in err
 
     def test_verify_token_does_not_unblock_the_slider(self, server, session):
-        """``--verify-token`` 是 SECURITY_CHECK(37) 那条路的，不是滑块的。
-
-        滑块票据只有表单三键 ``challenge`` / ``validate`` / ``seccode``，而且必须
-        挂在 ``smsCodeV2`` 上。拿 ``verifyToken`` 去，真机照样 400061。
-
-        早期假服务端把 ``verifyToken`` 当滑块票据，这条死路就被测成了绿的；
-        契约以登录页 chunk 为准。``--no-helper`` 顺带保证不会挂 300 秒等人拖滑块。
-        """
+        """`--verify-token` 解不开滑块挑战。"""
         argv = base(
             server, session, "login", "--phone", "13800138020",
             "--verify-token", "solved", "--no-helper",
@@ -267,25 +230,24 @@ class TestExitCodes:
         assert run(argv) == cli.EXIT_RISK_CONTROL
 
     def test_blocked_phone_exits_with_blocked_code(self, server, session, capsys):
+        """被封手机号走封禁退出码。"""
         assert run(base(server, session, "login", "--phone", "13800000000")) == cli.EXIT_BLOCKED
         assert "已被限制" in capsys.readouterr().err
-
-
-# --------------------------------------------------------------------------- #
-# 滑块（login 命中 400061 时的自动衔接）
-# --------------------------------------------------------------------------- #
 
 
 SLIDER_PHONE = "13800138020"
 
 
 class TestSliderCommand:
+    """login 命中滑块时的自动衔接。"""
+
     def test_login_auto_solves_slider_on_the_send_step(self, server, session, monkeypatch):
-        """默认就该人机协作过掉滑块并自动重试，而不是把用户丢给 --verify-token。"""
+        """默认人机协作过掉滑块并自动重试发码。"""
         from boss_login.verify import SliderSolution
         from tools.mock_server import LAST_SMS_REQUEST, STORE
 
         def fake_solve(challenge, **_kwargs):
+            """返回固定滑块票据。"""
             return SliderSolution(
                 challenge=challenge.challenge, validate="v", seccode="s"
             )
@@ -294,6 +256,7 @@ class TestSliderCommand:
         seen_codes: list[str] = []
 
         def fake_input(_prompt: str = "") -> str:
+            """返回 STORE 里的验证码并记下调用。"""
             code = STORE[SLIDER_PHONE]["code"]
             seen_codes.append(code)
             return code
@@ -301,29 +264,22 @@ class TestSliderCommand:
         monkeypatch.setattr(builtins, "input", fake_input)
         assert run(base(server, session, "login", "--phone", SLIDER_PHONE)) == cli.EXIT_OK
         assert seen_codes, "发码之后才轮到输码；STORE 里应当已有验证码"
-        # 登录成功后验证码一次性失效，STORE 会把这条记录清掉——所以看的是发码请求
-        # 重试那次必须打 smsCodeV2 并带着极验三件套 —— 只调 validate 过不去
         assert LAST_SMS_REQUEST["path"] == "smsCodeV2"
         assert LAST_SMS_REQUEST["form"].get("validate")
         assert LAST_SMS_REQUEST["form"].get("challenge")
         assert LAST_SMS_REQUEST["form"].get("seccode")
 
     def test_login_auto_solves_slider_and_retries_phone_v2(self, server, session, monkeypatch):
-        """登录那步跟发码一样要过滑块：重试打 phoneV2，票据在表单里。
-
-        真机跑出来的形状是「发码过了、登录仍 400061」——登录页 Ce() 把
-        verifyInfo 原样挂到 login 上，所以那一步也必须自带票据。
-        """
+        """登录步同样过滑块，重试打 phoneV2 并带票据。"""
         from boss_login.verify import SliderSolution
         from tools.mock_server import LAST_LOGIN_REQUEST
 
         def fake_solve(challenge, **_kwargs):
+            """返回固定滑块票据。"""
             return SliderSolution(
                 challenge=challenge.challenge, validate="v", seccode="s"
             )
 
-        # 先用库发码（换个客户端实例，不共享票据状态），CLI 登录进来时服务端
-        # 已在冷却期：发码会再撞一次滑块并解题，然后靠 1001 复用票据进输码环节。
         code = seed_code(server, SLIDER_PHONE, slider_solver=fake_solve)
 
         monkeypatch.setattr(cli, "solve_via_helper", fake_solve)
@@ -335,16 +291,16 @@ class TestSliderCommand:
         form = LAST_LOGIN_REQUEST["form"]
         assert form.get("validate") and form.get("challenge") and form.get("seccode")
         assert form.get("phoneCode") == code
-        assert "phone" not in form          # je() 换成了 encryptedAccount
-        assert "version" not in form        # Ce() 不传 t
+        assert "phone" not in form
+        assert "version" not in form
 
     def test_no_helper_keeps_the_old_hand_off(self, server, session, capsys):
-        """--no-helper 时把决定权交回人：报风控，不自作主张解题。"""
+        """`--no-helper` 时把决定权交回人：报风控，不自作主张解题。"""
         argv = base(server, session, "login", "--phone", SLIDER_PHONE, "--no-helper")
         assert run(argv) == cli.EXIT_RISK_CONTROL
 
     def test_helper_port_zero_means_system_assigned(self):
-        """--helper-port 0 是「交给系统分配」，不能被 `or 默认值` 吃掉。"""
+        """`--helper-port 0` 是「交给系统分配」，不能被默认值吃掉。"""
         from boss_login.config import SLIDER_HELPER_PORT
 
         args = cli.build_parser().parse_args(["login", "--phone", PHONE, "--helper-port", "0"])
@@ -355,27 +311,26 @@ class TestSliderCommand:
         assert SLIDER_HELPER_PORT not in closed
 
     def test_helper_timeout_takes_the_flag(self):
+        """`--helper-timeout` 覆盖默认超时。"""
         args = cli.build_parser().parse_args(["login", "--phone", PHONE, "--helper-timeout", "12"])
         solver = cli._make_solver(args)
         closed = [cell.cell_contents for cell in (solver.__closure__ or ())]
         assert 12 in closed
 
 
-# --------------------------------------------------------------------------- #
-# whoami / logout / probe
-# --------------------------------------------------------------------------- #
-
-
 class TestSessionCommands:
+    """whoami / logout / probe 子命令。"""
+
     def test_whoami_without_session_fails(self, server, session, capsys):
+        """无本地会话时 whoami 报「没有登录态」并说明查了哪儿。"""
         assert run(base(server, session, "whoami")) == cli.EXIT_ERROR
         out = capsys.readouterr().out
         assert "本地没有登录态" in out
-        # 一句话「没有登录态」没法排查：得说清查了哪儿、为什么不算登录
         assert str(session) in out
         assert "库里没有登录态" in out
 
     def test_whoami_on_empty_session_row(self, server, session, capsys):
+        """库有空会话行时 whoami 说清「有登录态」但不可用。"""
         from boss_login.session import StoredSession, save_session
 
         save_session(StoredSession(), session)
@@ -384,7 +339,7 @@ class TestSessionCommands:
         assert "库里有登录态" in out
 
     def test_whoami_when_server_rejects_stale_session(self, server, session, capsys):
-        """本地认、服务端不认——得说清是「需要重新登录」，不是「没有登录态」。"""
+        """本地认、服务端不认——说清是「需要重新登录」。"""
         from boss_login.session import save_session, StoredSession
 
         save_session(StoredSession(cookies={"__zp_stoken__": "stale"}), session)
@@ -393,6 +348,7 @@ class TestSessionCommands:
         assert "服务端已不认" in out
 
     def test_whoami_after_login(self, server, session, capsys):
+        """登录后 whoami 显示昵称与掩码手机号。"""
         code = seed_code(server, PHONE)
         run(base(server, session, "login", "--phone", PHONE, "--code", code))
         capsys.readouterr()
@@ -403,6 +359,7 @@ class TestSessionCommands:
         assert "138****8000" in out
 
     def test_logout_clears_session_and_server_state(self, server, session):
+        """logout 清掉本地会话且 whoami 随之失败。"""
         from boss_login.session import has_session_row, load_session
 
         code = seed_code(server, PHONE)
@@ -415,55 +372,46 @@ class TestSessionCommands:
         assert run(base(server, session, "whoami")) == cli.EXIT_ERROR
 
     def test_logout_when_nothing_saved(self, server, session, capsys):
+        """无会话时 logout 也成功并提示。"""
         assert run(base(server, session, "logout")) == cli.EXIT_OK
         assert "本就没有登录态" in capsys.readouterr().out
 
     def test_probe_reports_live_and_dead_routes(self, server, session, capsys):
+        """probe 汇报通断路由。"""
         assert run(base(server, session, "probe")) == cli.EXIT_OK
         out = capsys.readouterr().out
         assert "/wapi/zppassport/send/smsCode" in out
         assert "✓" in out and "✗" in out
 
     def test_probe_json_is_parseable(self, server, session, capsys):
-        """--json 的 stdout 必须是干净 JSON，可以直接管道给 jq。
-
-        假服务端跑在同一进程里，它的访问日志会混进 stdout，所以这里从第一个
-        ``[`` 开始解码，而不是要求整段输出都是 JSON；进度提示则必须走去 stderr。
-        """
+        """`--json` 的 stdout 能从首个 `[` 起解码出报告。"""
         assert run(base(server, session, "probe", "--json")) == cli.EXIT_OK
         captured = capsys.readouterr()
 
         assert "正在探测" not in captured.out, "进度提示不该出现在 --json 的 stdout 里"
         assert "正在探测" in captured.err
 
-        # 日志行本身以 "[mock]" 开头，所以按 indent=2 的开头 "[\n" 定位
         start = captured.out.index("[\n")
         report, _end = json.JSONDecoder().raw_decode(captured.out[start:])
         assert any(item["path"].endswith("send/smsCode") and item["alive"] for item in report)
 
 
-# --------------------------------------------------------------------------- #
-# 输出健壮性
-# --------------------------------------------------------------------------- #
-
-
 class TestConsoleEncoding:
-    def test_announce_survives_gbk_console(self, monkeypatch):
-        """Windows 控制台是 GBK，emoji 会抛 UnicodeEncodeError。
+    """输出在非 UTF-8 控制台下的健壮性。"""
 
-        假服务端曾在写完冷却记录之后打印验证码，编码失败直接把请求打成 500，
-        客户端一重试就撞上刚写进去的限流——一个纯日志问题伪装成业务故障。
-        """
+    def test_announce_survives_gbk_console(self, monkeypatch):
+        """GBK 控制台编码失败时 `announce` 降级打印，不抛栈。"""
         from tools.mock_server import _announce
 
         printed: list[str] = []
 
         def fake_print(message, **_kwargs):
+            """GBK 控制台下的 `print` 替身。"""
             if any(ord(ch) > 127 for ch in message):
                 raise UnicodeEncodeError("gbk", message, 0, 1, "illegal multibyte sequence")
             printed.append(message)
 
         monkeypatch.setattr(builtins, "print", fake_print)
-        _announce("[mock] 📱 发给 13800138000 的验证码是 123456")  # 不应抛出
+        _announce("[mock] 📱 发给 13800138000 的验证码是 123456")
 
         assert printed and "123456" in printed[0]

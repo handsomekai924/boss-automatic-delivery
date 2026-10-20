@@ -1,7 +1,6 @@
-"""网页控制台的命令行入口：``python -m boss_web``。
+"""网页控制台的命令行入口：`python -m boss_web`。
 
-打包成 exe 后这个入口由 ``run_boss.py`` 调用，两者的差别只在 uvicorn 的启动
-方式（见 :func:`main` 里的 ``frozen`` 分支）。
+打包成 exe 后这个入口由 `run_boss.py` 调用，差别在 uvicorn 启动方式（见 `main` 的 `frozen` 分支）。
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from .runtime import bootstrap, is_frozen, log_dir
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构造命令行参数解析器。"""
     parser = argparse.ArgumentParser(
         prog="boss_web",
         description="BOSS 直聘可视化控制台（登录 / 抓取 / LLM / 简历分析）",
@@ -50,14 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# --------------------------------------------------------------------------- #
-# 端口
-# --------------------------------------------------------------------------- #
-
-
 def _port_free(host: str, port: int) -> bool:
-    """试绑一下看看端口空不空。绑定后立刻释放——存在极小的竞争窗口，
-    但比「先启动再报 address already in use」对用户友好得多。"""
+    """试绑一下看端口空不空；绑定后立刻释放。"""
     with socket.socket() as sock:
         try:
             sock.bind((host, port))
@@ -67,11 +61,7 @@ def _port_free(host: str, port: int) -> bool:
 
 
 def pick_port(host: str, preferred: int, tries: int = 15) -> int:
-    """从 ``preferred`` 起顺延找空闲端口；连试 ``tries`` 个都被占就让系统派一个。
-
-    用户双击 exe 时经常会开两份（或者上一个没关干净），写死端口会直接启动失败，
-    而失败信息对非技术用户毫无意义。
-    """
+    """从 `preferred` 起顺延找空闲端口；连试 `tries` 个都被占就让系统派一个。"""
     for offset in range(tries):
         candidate = preferred + offset
         if _port_free(host, candidate):
@@ -81,13 +71,8 @@ def pick_port(host: str, preferred: int, tries: int = 15) -> int:
         return int(sock.getsockname()[1])
 
 
-# --------------------------------------------------------------------------- #
-# 日志 / 横幅
-# --------------------------------------------------------------------------- #
-
-
 def _restore_app_settings() -> None:
-    """把存过的 Chrome 窗口档位写回环境变量。读不出来不算致命，按默认走。"""
+    """把存过的 Chrome 窗口档位写回环境变量；读失败按默认继续。"""
     try:
         from .services.app_settings_store import restore_on_startup
 
@@ -97,7 +82,7 @@ def _restore_app_settings() -> None:
 
 
 def _setup_logging(level: str) -> None:
-    """控制台 + ``data/logs/boss.log``。日志文件写不了不该拦住服务。"""
+    """配置控制台 + `data/logs/boss.log` 日志。"""
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     try:
         from logging.handlers import RotatingFileHandler
@@ -117,6 +102,7 @@ def _setup_logging(level: str) -> None:
 
 
 def _banner(url: str, info: dict[str, str]) -> None:
+    """打印启动横幅。"""
     from . import __version__
 
     print("=" * 60)
@@ -134,7 +120,7 @@ def _banner(url: str, info: dict[str, str]) -> None:
 
 
 def _print_session_status(result: dict) -> None:
-    """把登录态自检结果打到控制台。文案在 session_check.format_console_lines。"""
+    """把登录态自检结果打到控制台。"""
     from .services.session_check import format_console_lines
 
     for line in format_console_lines(result):
@@ -143,10 +129,7 @@ def _print_session_status(result: dict) -> None:
 
 
 def _print_version_status(status: dict) -> None:
-    """把版本信息**按行**打到控制台（当前版本 / 发行版本 / 是否需要更新）。
-
-    走 update_check.format_console_lines，改文案去那边改，别在这拼字符串。
-    """
+    """把版本信息按行打到控制台（当前 / 发行 / 是否需要更新）。"""
     from .services.update_check import format_console_lines
 
     for line in format_console_lines(status):
@@ -155,9 +138,13 @@ def _print_version_status(status: dict) -> None:
 
 
 def _self_check(info: dict[str, str]) -> int:
-    """把打包后「开发态验不了」的东西打出来：资源根、前端目录、库路径、Chrome。
+    """打印路径 / 环境自检结果；前端资源缺失时返回 1。
 
-    在 cmd 里跑 ``BossAutoDelivery.exe --self-check`` 就能核对，不用真开浏览器。
+    Args:
+        info: `bootstrap` 返回的路径摘要。
+
+    Returns:
+        0 表示前端资源在位，1 表示缺失。
     """
     import boss_db
 
@@ -179,7 +166,6 @@ def _self_check(info: dict[str, str]) -> int:
     except Exception as exc:  # noqa: BLE001 - 自检就是要如实报告任何失败
         print(f"Chrome       没找到 —— {exc}")
 
-    # 自检也把版本对比打出来：用户核对打包完整性时顺手看一眼有没有新版
     try:
         from .services.update_check import build_status
 
@@ -195,26 +181,19 @@ def _self_check(info: dict[str, str]) -> int:
     return 0 if ok else 1
 
 
-# --------------------------------------------------------------------------- #
-# 启动
-# --------------------------------------------------------------------------- #
-
-
 def _open_browser_when_ready(
     server,
     url: str,
     ready: "threading.Event | None" = None,
     timeout: float = 30.0,
 ) -> None:
-    """等 uvicorn 真的起来、登录态自检出结果，再开浏览器。
+    """等服务起来、登录态自检出结果后再打开浏览器。
 
-    原来是在 ``uvicorn.run`` **之前**开，用户会先看到一个连接被拒的页面，
-    得手动刷新——对不懂的人是「这软件坏了」。
-
-    ``ready`` 是登录态自检的完成信号（:func:`session_check.schedule_startup_check`
-    返回的那个）。默认**等它出结果再开**：否则首屏会话卡片会先渲染一份没验过的
-    状态，用户看到「离线」，刷新一次才正确。自检卡住（断网、接口慢）也不会
-    把浏览器无限期扣住——到点照样开。
+    Args:
+        server: uvicorn Server 实例。
+        url: 控制台地址。
+        ready: 登录态自检完成信号；出结果或超时后再开浏览器。
+        timeout: 最长等待秒数。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -224,7 +203,7 @@ def _open_browser_when_ready(
             break
         time.sleep(0.15)
     else:
-        return  # 超时还没起来：多半是启动就失败了，横幅里有日志
+        return
     try:
         webbrowser.open(url)
     except Exception:  # noqa: BLE001 - 拉不起浏览器不影响服务
@@ -232,10 +211,16 @@ def _open_browser_when_ready(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """启动网页控制台；`--self-check` 时只做自检。
+
+    Args:
+        argv: 命令行参数；`None` 时读 `sys.argv`。
+
+    Returns:
+        进程退出码。
+    """
     args = build_parser().parse_args(argv)
     info = bootstrap()
-    # 存过的 Chrome 窗口档位要写回环境变量。必须早于任何取令牌的调用——
-    # boss_jobs 是在调用时才读的，晚一步就白设。
     _restore_app_settings()
     _setup_logging(args.log_level)
 
@@ -252,8 +237,6 @@ def main(argv: list[str] | None = None) -> int:
     url = f"http://{args.host}:{port}"
 
     if is_frozen():
-        # 冻结环境里不能用 Uvicorn 的字符串导入 + reload：那会 re-exec
-        # sys.executable 起子进程，而 exe 并不是一个有意义的 Python 解释器。
         from .app import create_app
 
         config = uvicorn.Config(
@@ -270,23 +253,18 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     server = uvicorn.Server(config)
-    # 自更新要能「从里往外」把 uvicorn 停掉：挂上这个引用，bat 那边触发
-    # request_exit 时才不会只能硬 os._exit（端口都来不及干净释放）。
     try:
         from .services.updater import bind_server
 
         bind_server(server)
     except Exception:  # noqa: BLE001 - 挂不上不该拦住启动
         logging.getLogger(__name__).warning("挂载自更新退出钩子失败", exc_info=True)
-    # 版本检测后台预热：开页面时就有结果，不用先卡 8 秒等 Gitee；
-    # 测完把「当前 / 发行 / 要不要更新」补打在横幅下面。
     try:
         from .services.update_check import schedule_startup_check
 
         schedule_startup_check(on_done=_print_version_status)
     except Exception:  # noqa: BLE001 - 预热失败绝不拦住启动
         logging.getLogger(__name__).warning("版本检测预热失败", exc_info=True)
-    # 之后每 5 分钟再测一次：挂机也能发现新版（前端只做轻提示，不弹窗）。
     try:
         from .services.update_check import schedule_periodic_check
 
@@ -294,9 +272,6 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:  # noqa: BLE001 - 周期检测起不来也不该拦住启动
         logging.getLogger(__name__).warning("版本周期检测启动失败", exc_info=True)
 
-    # 登录态自检：启动时拿库里的凭证打一次用户信息接口，过期就把库里的清掉。
-    # 开浏览器之前等它出结果——否则首屏会话状态没验过，用户看到「离线」，
-    # 得刷新一次才对（见 _open_browser_when_ready 的 ready 参数）。
     session_ready = threading.Event()
     try:
         from .services.session_check import schedule_startup_check as schedule_session_check

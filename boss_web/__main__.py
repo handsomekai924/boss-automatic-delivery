@@ -1,4 +1,4 @@
-"""``python -m boss_web`` 入口。"""
+"""`python -m boss_web` 入口。"""
 
 from __future__ import annotations
 

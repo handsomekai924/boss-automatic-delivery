@@ -1,4 +1,10 @@
-"""简历上传 / LLM 解析 / 历史分析查看。"""
+"""简历上传 / LLM 解析 / 历史分析查看。
+
+Attributes:
+    MAX_BYTES: 纯文本简历大小上限（字节）。
+    MAX_BINARY_BYTES: Word / PDF 大小上限（字节），比纯文本宽以免挡正常简历。
+    _EXT_HINT: 扩展名不支持时的报错文案。
+"""
 
 from __future__ import annotations
 
@@ -32,13 +38,15 @@ from ..services.resume_store import (
 router = APIRouter()
 
 MAX_BYTES = 2 * 1024 * 1024
-#: Word / PDF 本来就比纯文本大（带照片、带排版），限得太死会把正常简历挡在门外
+
 MAX_BINARY_BYTES = 8 * 1024 * 1024
 
 _EXT_HINT = "只支持 Word（.docx）、PDF（.pdf）、Markdown（.md）或纯文本（.txt）"
 
 
 class AnalyzeBody(BaseModel):
+    """启动批量人岗分析。"""
+
     resume_id: str
     job_ids: list[str] = Field(default_factory=list)
     top_k: int = Field(20, ge=1, le=50)
@@ -46,11 +54,13 @@ class AnalyzeBody(BaseModel):
 
 @router.get("/list")
 def resumes() -> dict[str, Any]:
+    """简历列表。"""
     return {"items": list_resumes()}
 
 
 @router.post("/upload")
 async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
+    """上传简历原文；只存文本，解析由 `/item/{id}/parse` 完成。"""
     name = file.filename or "resume.md"
     if ext_of(name) not in ALLOWED_EXT:
         raise ValidationWebError(_EXT_HINT)
@@ -59,8 +69,6 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
     if len(raw) > limit:
         raise ValidationWebError(f"文件超过 {limit // 1024 // 1024}MB，请精简后再传")
 
-    # Word / PDF 先抽正文；抽不出来要告诉用户怎么绕（大多是扫描件或 .doc 老格式），
-    # 不能只回一句「解析失败」。纯文本走下面的解码分支。
     try:
         extracted = extract_text(raw, name)
     except DocumentTextError as exc:
@@ -77,13 +85,13 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
             except UnicodeDecodeError:
                 text = raw.decode("utf-8", errors="replace")
 
-    # 只存原文；解析由 POST /item/{id}/parse 完成（上传成功后前端自动调）
     draft = save_resume(text, filename=name)
     return draft.to_dict(include_raw=True)
 
 
 @router.get("/item/{resume_id}")
 def get_resume(resume_id: str) -> dict[str, Any]:
+    """取简历原文与已有 LLM 解析。"""
     try:
         draft = load_resume(resume_id)
         llm = load_llm_parse(resume_id)
@@ -96,7 +104,7 @@ def get_resume(resume_id: str) -> dict[str, Any]:
 
 @router.post("/item/{resume_id}/parse")
 def parse_resume_item(resume_id: str) -> dict[str, Any]:
-    """LLM 固定模板解析（同步，超时按 ``LLM_TIMEOUT``）。重跑会覆盖 ``meta.llm``。"""
+    """LLM 固定模板解析（同步，超时按 `LLM_TIMEOUT`）；重跑会覆盖 `meta.llm`。"""
     try:
         draft = load_resume(resume_id)
     except FileNotFoundError as exc:
@@ -118,6 +126,7 @@ def parse_resume_item(resume_id: str) -> dict[str, Any]:
 
 @router.get("/item/{resume_id}/parse")
 def get_parse(resume_id: str) -> dict[str, Any]:
+    """读已保存的 LLM 解析结果。"""
     try:
         llm = load_llm_parse(resume_id)
     except FileNotFoundError as exc:
@@ -127,6 +136,7 @@ def get_parse(resume_id: str) -> dict[str, Any]:
 
 @router.delete("/item/{resume_id}")
 def remove_resume(resume_id: str) -> dict[str, Any]:
+    """删除简历。"""
     if not delete_resume(resume_id):
         raise NotFoundError(f"简历不存在：{resume_id}")
     return {"deleted": True}
@@ -134,6 +144,7 @@ def remove_resume(resume_id: str) -> dict[str, Any]:
 
 @router.post("/analyze")
 def start_analyze(body: AnalyzeBody) -> dict[str, Any]:
+    """启动批量人岗分析任务。"""
     task = analyze_tasks.start(
         resume_id=body.resume_id,
         job_ids=body.job_ids,
@@ -144,27 +155,32 @@ def start_analyze(body: AnalyzeBody) -> dict[str, Any]:
 
 @router.get("/analyze/status")
 def analyze_status() -> dict[str, Any]:
+    """当前分析任务快照。"""
     return analyze_tasks.snapshot()
 
 
 @router.get("/analyze/{task_id}")
 def analyze_task(task_id: str) -> dict[str, Any]:
+    """按 id 取分析任务快照。"""
     return analyze_tasks.snapshot(task_id)
 
 
 @router.post("/analyze/{task_id}/cancel")
 def cancel_analyze(task_id: str) -> dict[str, Any]:
+    """取消分析任务。"""
     task = analyze_tasks.cancel(task_id)
     return task.snapshot()
 
 
 @router.get("/analyses")
 def analyses() -> dict[str, Any]:
+    """历史分析列表。"""
     return {"items": list_analyses()}
 
 
 @router.get("/analyses/{analysis_id}")
 def get_analysis(analysis_id: str) -> dict[str, Any]:
+    """按 id 取历史分析。"""
     try:
         return load_analysis(analysis_id)
     except FileNotFoundError as exc:
@@ -173,6 +189,7 @@ def get_analysis(analysis_id: str) -> dict[str, Any]:
 
 @router.delete("/analyses/{analysis_id}")
 def remove_analysis(analysis_id: str) -> dict[str, Any]:
+    """删除一条历史分析。"""
     if not delete_analysis(analysis_id):
         raise NotFoundError(f"分析结果不存在：{analysis_id}")
     return {"deleted": True}

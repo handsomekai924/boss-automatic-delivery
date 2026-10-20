@@ -1,8 +1,7 @@
 """抓取任务：启动 / 进度 / 取消 + 历史任务档案。
 
-历史档案路由（``/tasks…``）**必须注册在 ``/{task_id}`` 之前**——
-动态段会把 ``tasks`` 当成 task_id 吃掉（与 ``jobs.py`` 里 ``fetch-descriptions``
-同款坑）。
+历史档案路由（`/tasks…`）必须注册在 `/{task_id}` 之前——动态段会把 `tasks`
+当成 task_id 吃掉（与 `jobs.py` 里 `fetch-descriptions` 同款坑）。
 """
 
 from __future__ import annotations
@@ -22,10 +21,15 @@ router = APIRouter()
 
 
 class CrawlBody(BaseModel):
+    """启动抓取任务。
+
+    Attributes:
+        use_search: 兼容字段。旧 false = 已移除的「推荐页」；现在一律走搜索流。
+    """
+
     max_pages: int | None = Field(None, ge=1, le=200)
     interval: float | None = Field(None, ge=0.0, le=30.0)
     start_page: int | None = Field(None, ge=1)
-    #: 兼容字段。旧 false = 已移除的「推荐页」；现在一律走搜索流。
     use_search: bool | None = None
     fetch_details: bool | None = None
     detail_interval: float | None = Field(None, ge=0.0, le=30.0)
@@ -33,11 +37,13 @@ class CrawlBody(BaseModel):
 
 
 class CrawlMatchBody(BaseModel):
-    #: 确认弹窗里选的简历；必填
+    """对本批抓取职位做匹配。
+
+    Attributes:
+        resume_id: 确认弹窗里选的简历；必填。
+    """
+
     resume_id: str
-
-
-# ---- 历史抓取任务：必须排在 /{task_id} 之前 ----
 
 
 @router.get("/tasks")
@@ -57,7 +63,6 @@ def list_tasks(
     live = crawl_tasks.current()
     live_id = live.task_id if live is not None else ""
     if live_id:
-        # 进行中任务：库里那行可能还在 running，用内存快照覆盖（进度更实时）
         snap = live.snapshot()
         for item in items:
             if str(item.get("task_id")) == live_id:
@@ -67,7 +72,6 @@ def list_tasks(
                 item["live"] = True
                 break
         else:
-            # 刚启动、档案还没落库（或落库失败）也要看得见
             items.insert(0, {
                 "task_id": live_id,
                 "source": "expect" if _is_expect(snap) else "search",
@@ -95,10 +99,10 @@ def list_tasks(
 
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str) -> dict[str, Any]:
+    """按 id 取历史抓取任务；进行中可从内存快照兜底。"""
     with JobStore() as store:
         item = store.get_crawl_task(task_id)
         if item is None:
-            # 落库失败的进行中任务仍可从内存看
             live = crawl_tasks.current()
             if live is not None and live.task_id == task_id:
                 snap = live.snapshot()
@@ -140,7 +144,7 @@ def list_task_jobs(
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
-    """本批职位分页。``missing=true`` 的行是已从库里删掉的归属记录。"""
+    """本批职位分页。`missing=true` 的行是已从库里删掉的归属记录。"""
     with JobStore() as store:
         if store.get_crawl_task(task_id) is None:
             live = crawl_tasks.current()
@@ -160,7 +164,7 @@ def list_task_jobs(
 
 @router.post("/tasks/{task_id}/match")
 def match_task_batch(task_id: str, body: CrawlMatchBody) -> dict[str, Any]:
-    """糖：等价于 ``analyze`` + ``crawl_task_id``（前端可少拼一层）。
+    """糖：等价于 `analyze` + `crawl_task_id`（前端可少拼一层）。
 
     本批职位与库中仍存在的取交集；交集为空 → 400「本批职位已不在库中」。
     """
@@ -178,16 +182,15 @@ def match_task_batch(task_id: str, body: CrawlMatchBody) -> dict[str, Any]:
     return task.snapshot()
 
 
-# ---- 当前任务（进行中）：路径与历史档案分开 ----
-
-
 @router.get("/status")
 def status() -> dict[str, Any]:
+    """当前进行中抓取任务快照。"""
     return crawl_tasks.snapshot()
 
 
 @router.post("/start")
 def start(body: CrawlBody) -> dict[str, Any]:
+    """启动抓取任务。"""
     task = crawl_tasks.start(
         max_pages=body.max_pages,
         interval=body.interval,
@@ -202,11 +205,13 @@ def start(body: CrawlBody) -> dict[str, Any]:
 
 @router.get("/{task_id}")
 def task_status(task_id: str) -> dict[str, Any]:
+    """按 id 取抓取任务快照。"""
     return crawl_tasks.snapshot(task_id)
 
 
 @router.post("/{task_id}/cancel")
 def cancel(task_id: str) -> dict[str, Any]:
+    """取消抓取任务。"""
     task = crawl_tasks.cancel(task_id)
     return task.snapshot()
 

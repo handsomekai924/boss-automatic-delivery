@@ -1,4 +1,4 @@
-"""Collection configuration and blacklist rule APIs."""
+"""采集配置与黑名单规则 API。"""
 
 from __future__ import annotations
 
@@ -23,6 +23,14 @@ router = APIRouter()
 
 
 class CollectionBody(BaseModel):
+    """采集配置（搜索条件 + 抓取参数 + 期望流）。
+
+    Attributes:
+        use_search: 兼容字段，恒为 `True`。
+        expect_kind: 期望流形态；空 = 不启用，走搜索流。
+        expect_name: 仅展示（jobs 页摘要用），不进请求参数。
+    """
+
     query: str = ""
     city: str = ""
     jobType: str = ""
@@ -38,21 +46,20 @@ class CollectionBody(BaseModel):
     max_pages: int = Field(5, ge=1, le=200)
     start_page: int = Field(1, ge=1)
     page_interval: float = Field(1.0, ge=0, le=30)
-    #: 兼容字段，恒为 True。旧 false = 已移除的「推荐页」special/zone。
     use_search: bool = True
     fetch_details: bool = True
     detail_interval: float = Field(1.0, ge=0, le=30)
     store_blacklisted: bool = True
-    # 期望流（空 = 不启用，走搜索流）
     expect_kind: str = ""
     encrypt_expect_id: str = ""
     mix_expect_type: str = ""
     expect_info: str = ""
-    #: 仅展示（jobs 页摘要用），不进请求参数
     expect_name: str = ""
 
 
 class RuleBody(BaseModel):
+    """一条黑名单规则。"""
+
     rule_type: str
     pattern: str
     match_mode: str
@@ -62,22 +69,29 @@ class RuleBody(BaseModel):
 
 
 class RuleTestBody(RuleBody):
+    """规则试跑：额外带上待命中的岗位样例。"""
+
     job_name: str = ""
     job_desc: str = ""
     brand_name: str = ""
 
 
 class ToggleBody(BaseModel):
+    """规则启停请求体。"""
+
     enabled: bool
 
 
 class RecheckBody(BaseModel):
+    """黑名单重扫请求体。"""
+
     job_ids: list[str] = Field(default_factory=list)
     limit: int | None = Field(None, ge=1, le=5000)
 
 
 @router.get("/collection/config")
 def get_collection_config() -> dict[str, Any]:
+    """读库里的搜索条件与采集配置。"""
     from boss_filter import load_search_filter
 
     return {"search": _filter_payload(load_search_filter()), "collection": load_config().to_dict()}
@@ -85,29 +99,20 @@ def get_collection_config() -> dict[str, Any]:
 
 @router.get("/collection/expects")
 def get_collection_expects() -> dict[str, Any]:
-    """在线拉当前账号的求职期望列表，给前端下拉用。
-
-    期望 id 是**账号维度**的，不能写死在配置里，必须在线拉
-    （``GET /wapi/zpgeek/pc/recommend/expect/list.json``）。响应分三组，
-    与站点三个 tab 对应：``mix``（推荐）、``partTime``（兼职）、``expects``（我的期望）。
-    """
+    """在线拉当前账号的求职期望列表（`mix` / `expects` / `partTime`）；失败抛 `UpstreamError`。"""
     from boss_jobs import create_client
     from boss_jobs.errors import JobError
 
     from ..services.troubleshoot import humanize
 
     try:
-        # ``create_client()`` 也在这儿炸：本地没登录态是它先抛 ``JobApiError``
-        # （``http_from_session`` 里那句），不是 ``fetch_expect_list``。早先只包了
-        # 后者，没登录的用户一开「系统配置 → 采集配置」就 500。
         client = create_client()
         expects = client.fetch_expect_list()
     except JobError as exc:
-        # 只给「为什么」：前端自己会加「期望列表拉取失败：」那截前缀，
-        # 这边再加一句就是「…失败：拉…失败：…」的复读。
         raise UpstreamError(humanize(exc)) from exc
 
     def _row(item: Any) -> dict[str, Any]:
+        """把单条期望转成前端字段名的字典。"""
         return {
             "kind": item.kind,
             "encryptExpectId": item.encrypt_expect_id,
@@ -127,6 +132,7 @@ def get_collection_expects() -> dict[str, Any]:
 
 @router.put("/collection/config")
 def put_collection_config(body: CollectionBody) -> dict[str, Any]:
+    """写库里的搜索条件与采集配置；`encrypt_expect_id` 搜索流与期望流共用同一份。"""
     from boss_filter import save_search_filter
 
     data = body.model_dump()
@@ -136,9 +142,6 @@ def put_collection_config(body: CollectionBody) -> dict[str, Any]:
         degree=tuple(data.pop("degree")), industry=tuple(data.pop("industry")),
         scale=tuple(data.pop("scale")), pay_type=tuple(data.pop("payType")),
         part_time=tuple(data.pop("partTime")), stage=tuple(data.pop("stage")),
-        # 期望 + 关键词：前端 onSearch 就把 lastExpectId 塞进搜索请求，
-        # 所以 encrypt_expect_id 期望流与搜索流**共用同一份**（不 pop，下面
-        # CollectionConfig 还要同值的那一份）
         encrypt_expect_id=str(data.get("encrypt_expect_id") or "").strip(),
         page_size=int(data.pop("pageSize", 15) or 15),
     )
@@ -149,6 +152,7 @@ def put_collection_config(body: CollectionBody) -> dict[str, Any]:
 
 @router.post("/collection/config/reset")
 def reset_collection_config() -> dict[str, Any]:
+    """把搜索条件与采集配置重置为默认。"""
     from boss_filter import save_search_filter
 
     f = JobSearchFilter()
@@ -158,6 +162,7 @@ def reset_collection_config() -> dict[str, Any]:
 
 @router.post("/blacklist/recheck")
 def start_recheck(body: RecheckBody) -> dict[str, Any]:
+    """启动黑名单重扫任务；已有任务在跑时抛 `ConflictError`。"""
     try:
         task = recheck_tasks.start(job_ids=body.job_ids, limit=body.limit)
     except ConflictError:
@@ -167,11 +172,13 @@ def start_recheck(body: RecheckBody) -> dict[str, Any]:
 
 @router.get("/blacklist/recheck/status")
 def recheck_status() -> dict[str, Any]:
+    """当前黑名单重扫任务快照。"""
     return recheck_tasks.snapshot()
 
 
 @router.post("/blacklist/recheck/cancel")
 def cancel_recheck() -> dict[str, Any]:
+    """取消黑名单重扫；没有任务时抛 `NotFoundError`。"""
     try:
         return recheck_tasks.cancel().snapshot()
     except NotFoundError:
@@ -180,6 +187,7 @@ def cancel_recheck() -> dict[str, Any]:
 
 @router.get("/blacklist/rules")
 def get_rules(rule_type: str | None = Query(None, alias="type")) -> dict[str, Any]:
+    """列黑名单规则；`type` 只认 `company` / `jd_keyword`。"""
     if rule_type and rule_type not in {blacklist.COMPANY, blacklist.JD_KEYWORD}:
         raise ValidationWebError("type 必须是 company 或 jd_keyword")
     return {"items": blacklist.list_rules(rule_type=rule_type)}
@@ -187,6 +195,7 @@ def get_rules(rule_type: str | None = Query(None, alias="type")) -> dict[str, An
 
 @router.post("/blacklist/rules")
 def post_rule(body: RuleBody) -> dict[str, Any]:
+    """新建黑名单规则；payload 不合法时抛 `ValidationWebError`。"""
     try:
         return {"item": blacklist.create_rule(body.model_dump())}
     except ValueError as exc:
@@ -195,6 +204,7 @@ def post_rule(body: RuleBody) -> dict[str, Any]:
 
 @router.put("/blacklist/rules/{rule_id}")
 def put_rule(rule_id: str, body: RuleBody) -> dict[str, Any]:
+    """改一条黑名单规则；不存在抛 `NotFoundError`，不合法抛 `ValidationWebError`。"""
     try:
         return {"item": blacklist.update_rule(rule_id, body.model_dump())}
     except KeyError as exc:
@@ -205,6 +215,7 @@ def put_rule(rule_id: str, body: RuleBody) -> dict[str, Any]:
 
 @router.post("/blacklist/rules/{rule_id}/toggle")
 def toggle_rule(rule_id: str, body: ToggleBody) -> dict[str, Any]:
+    """启停一条黑名单规则；不存在抛 `NotFoundError`。"""
     try:
         return {"item": blacklist.set_rule_enabled(rule_id, body.enabled)}
     except KeyError as exc:
@@ -215,6 +226,7 @@ def toggle_rule(rule_id: str, body: ToggleBody) -> dict[str, Any]:
 
 @router.delete("/blacklist/rules/{rule_id}")
 def remove_rule(rule_id: str) -> dict[str, Any]:
+    """删一条黑名单规则；不存在抛 `NotFoundError`。"""
     if not blacklist.delete_rule(rule_id):
         raise NotFoundError(f"规则不存在：{rule_id}")
     return {"deleted": True}
@@ -222,6 +234,7 @@ def remove_rule(rule_id: str) -> dict[str, Any]:
 
 @router.post("/blacklist/test")
 def test_rule(body: RuleTestBody) -> dict[str, Any]:
+    """拿样例岗位试跑一条规则，看会不会命中。"""
     try:
         blacklist.validate_rule_payload(body.rule_type, body.pattern, body.match_mode, body.scope)
         rule = {**body.model_dump(), "rule_id": "test", "enabled": True}
@@ -236,6 +249,7 @@ def test_rule(body: RuleTestBody) -> dict[str, Any]:
 
 @router.get("/blacklist/rules/{rule_id}/hits")
 def get_rule_hits(rule_id: str, limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
+    """某条规则的命中记录；规则不存在抛 `NotFoundError`。"""
     if blacklist.get_rule(rule_id) is None:
         raise NotFoundError(f"规则不存在：{rule_id}")
     return {"items": blacklist.list_hits(rule_id, limit=limit)}
@@ -243,4 +257,5 @@ def get_rule_hits(rule_id: str, limit: int = Query(100, ge=1, le=500)) -> dict[s
 
 @router.get("/blacklist/hits")
 def get_hits(limit: int = Query(100, ge=1, le=500)) -> dict[str, Any]:
+    """全部命中记录（按规则不限）。"""
     return {"items": blacklist.list_hits(limit=limit)}

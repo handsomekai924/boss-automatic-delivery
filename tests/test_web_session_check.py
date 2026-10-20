@@ -1,12 +1,4 @@
-"""启动时的登录态自检：验真伪、失效清库、断网不动库。
-
-这里的规矩只有三条，逐条钉死：
-
-1. **服务端说失效才清库**——``getUserInfo`` 回个「系统繁忙」不算，那会被
-   ``fetch_user_info`` 包成 ``SessionExpired``，清了就把好凭证抹了。
-2. **网络/意外错误不动库**——断网不是登录失效。
-3. **自检完成的 Event 无条件置位**——哪怕线程炸了，浏览器也不能被扣住不开。
-"""
+"""启动时的登录态自检：验真伪、失效清库、断网不动库。"""
 
 from __future__ import annotations
 
@@ -22,25 +14,30 @@ from boss_web.services import session_check
 
 
 class FakeClient:
-    """只实现 ``fetch_user_info`` 的假客户端。"""
+    """只实现 `fetch_user_info` 的假客户端。"""
 
     def __init__(self, result):
+        """初始化。"""
         self._result = result
 
     def fetch_user_info(self):
+        """返回预设结果；预设为异常时原样抛出。"""
         if isinstance(self._result, BaseException):
             raise self._result
         return self._result
 
 
 def _factory(result):
+    """造出返回固定结果的 client_factory。"""
     def make(**_kwargs):
+        """构造固定结果的假客户端。"""
         return FakeClient(result)
 
     return make
 
 
 def _seed_session(path, *, name="张三") -> None:
+    """往库里塞一份假登录态。"""
     save_session(
         StoredSession(
             token="tok-1",
@@ -55,14 +52,12 @@ def _seed_session(path, *, name="张三") -> None:
 
 @pytest.fixture(autouse=True)
 def _clean_cache():
+    """每条用例前后清掉自检缓存。"""
     session_check.reset_cache()
     yield
     session_check.reset_cache()
 
 
-# --------------------------------------------------------------------------- #
-# 判据
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -78,15 +73,14 @@ def _clean_cache():
     ],
 )
 def test_looks_like_session_expired(message, want):
+    """验失效话术的识别边界。"""
     assert session_check.looks_like_session_expired(message) is want
 
 
-# --------------------------------------------------------------------------- #
-# 四种结论
-# --------------------------------------------------------------------------- #
 
 
 def test_absent_when_db_has_nothing(tmp_path):
+    """验空库报未登录且不清库。"""
     result = session_check.check_now(session_path=tmp_path / "boss.db")
 
     assert result["state"] == session_check.ST_ABSENT
@@ -95,6 +89,7 @@ def test_absent_when_db_has_nothing(tmp_path):
 
 
 def test_valid_refreshes_stored_user(tmp_path):
+    """验有效会话刷新用户信息但不动登录时刻。"""
     path = tmp_path / "boss.db"
     _seed_session(path, name="旧名字")
     user = UserInfo(user_id="u1", name="新名字", phone_masked="138****8000", identity="geek")
@@ -106,7 +101,6 @@ def test_valid_refreshes_stored_user(tmp_path):
     assert result["user"]["name"] == "新名字"
     stored = load_session(path)
     assert stored.user["name"] == "新名字"
-    # 登录时刻不该被自检改写
     assert stored.saved_at == 1_700_000_000.0
     assert stored.cookies == {"__zp_stoken__": "stale"}
 
@@ -144,6 +138,7 @@ def test_busy_error_keeps_db(tmp_path):
 
 
 def test_network_error_keeps_db(tmp_path):
+    """验网络错误不动库。"""
     path = tmp_path / "boss.db"
     _seed_session(path)
 
@@ -158,6 +153,7 @@ def test_network_error_keeps_db(tmp_path):
 
 
 def test_unexpected_error_keeps_db(tmp_path):
+    """验意外错误不动库。"""
     path = tmp_path / "boss.db"
     _seed_session(path)
 
@@ -185,12 +181,10 @@ def test_generic_login_error_message_still_counts(tmp_path):
     assert load_session(path).is_empty
 
 
-# --------------------------------------------------------------------------- #
-# 缓存 / 启动调度
-# --------------------------------------------------------------------------- #
 
 
 def test_snapshot_carries_last_result(tmp_path):
+    """验快照带上最近一次自检结论。"""
     session_check.check_now(session_path=tmp_path / "boss.db")
     snap = session_check.snapshot()
 
@@ -199,6 +193,7 @@ def test_snapshot_carries_last_result(tmp_path):
 
 
 def test_schedule_startup_check_sets_event_and_calls_back(tmp_path):
+    """验调度完成置位事件并回调。"""
     seen: list[dict] = []
     done = session_check.schedule_startup_check(
         session_path=tmp_path / "boss.db",
@@ -207,12 +202,13 @@ def test_schedule_startup_check_sets_event_and_calls_back(tmp_path):
     )
 
     assert done.wait(5.0) is True
-    # 回调在线程里跑完才置位，这里必然已经拿到结果
     assert seen and seen[0]["state"] == session_check.ST_ABSENT
 
 
 def test_schedule_startup_check_sets_event_even_on_callback_crash(tmp_path):
+    """验回调炸了也照样置位。"""
     def boom(_result):
+        """抛预设异常。"""
         raise RuntimeError("打印挂了")
 
     done = session_check.schedule_startup_check(
@@ -228,6 +224,7 @@ def test_schedule_startup_check_sets_event_when_checker_crashes(tmp_path, monkey
     """自检本身炸了也要放行开浏览器，否则用户对着一个永远打不开的页面。"""
 
     def boom(**_kwargs):
+        """抛预设异常。"""
         raise RuntimeError("自检炸了")
 
     monkeypatch.setattr(session_check, "check_now", boom)
@@ -236,12 +233,10 @@ def test_schedule_startup_check_sets_event_when_checker_crashes(tmp_path, monkey
     assert done.wait(5.0) is True
 
 
-# --------------------------------------------------------------------------- #
-# 控制台文案
-# --------------------------------------------------------------------------- #
 
 
 def test_format_console_lines_covers_states():
+    """验各状态的控制台单行文案。"""
     cases = {
         "valid": "已登录",
         "expired": "已失效",
@@ -256,6 +251,7 @@ def test_format_console_lines_covers_states():
 
 
 def test_format_console_lines_unknown_keeps_the_error():
+    """验未知态把错误原文留下。"""
     lines = session_check.format_console_lines(
         {"state": "unknown", "error": "网络请求失败：timed out"}
     )
@@ -263,9 +259,6 @@ def test_format_console_lines_unknown_keeps_the_error():
     assert "原样保留" in lines[0]
 
 
-# --------------------------------------------------------------------------- #
-# 接口契约：/api/auth/status 带自检结论；接口不进浏览器缓存
-# --------------------------------------------------------------------------- #
 
 
 def test_auth_status_carries_check_result():
@@ -297,7 +290,6 @@ def test_auth_status_logged_in_false_when_check_says_expired(tmp_path):
 
     try:
         payload = login_tasks.status_payload()
-        # 用默认库路径会读到测试夹具那份；这里只关心「expired 压成 False」这条规则
         assert payload["logged_in"] is False
         assert payload["check"]["state"] == session_check.ST_EXPIRED
     finally:

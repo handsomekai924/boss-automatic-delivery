@@ -1,14 +1,9 @@
-"""``boss_jobs.cdp_capture`` 的测试。
+"""`boss_jobs.cdp_capture` 的测试。
 
-运行：``python -m pytest tests/test_jobs_cdp_capture.py -q``
+运行：`python -m pytest tests/test_jobs_cdp_capture.py -q`
 
-这里**不起真的 CDP 服务端**（全仓库都没有这个先例）。做法是把传输层和事件管线
-拆开测：:class:`CaptureSession` 的 ``call`` 参数就是「发命令拿回包」的函数，测试
-塞个按方法名回罐头的 :class:`FakeCall`，再用**合成的 CDP 事件**喂
-``handle_event()``，最后读回磁盘上的产物断言。
-
-传输层（:class:`boss_jobs.cdp_capture.CdpConnection`）另外用一个普通对象
-:class:`FakeWs` 顶替 socket —— 它只是「按脚本吐字符串的对象」，不是网络服务端。
+不起真的 CDP 服务端：事件管线用合成 CDP 事件喂 `handle_event()`，命令回包由
+按方法名回罐头的 `FakeCall` 提供；传输层用 `FakeWs` 顶替 socket，按脚本吐帧。
 """
 
 from __future__ import annotations
@@ -25,19 +20,16 @@ import websocket
 from boss_jobs import cdp_capture as CC
 
 
-# --------------------------------------------------------------------------- #
-# 夹具与工具
-# --------------------------------------------------------------------------- #
-
-
 class FakeCall:
-    """冒充 ``conn.send_call``：按方法名回罐头，并记录被问过什么。"""
+    """冒充 `conn.send_call`：按方法名回罐头，并记录被问过什么。"""
 
     def __init__(self, responses: dict[str, object] | None = None) -> None:
+        """初始化。"""
         self.responses = dict(responses or {})
         self.calls: list[tuple[str, dict, str | None]] = []
 
     def __call__(self, method, params=None, *, session_id=None, timeout=30.0):
+        """记一次调用并按方法名返回预置结果；异常直接抛，可调用则代为执行。"""
         self.calls.append((method, dict(params or {}), session_id))
         canned = self.responses.get(method)
         if canned is None:
@@ -49,22 +41,25 @@ class FakeCall:
         return canned
 
     def methods(self) -> list[str]:
+        """按调用顺序返回被问过的方法名。"""
         return [call[0] for call in self.calls]
 
 
 class StubConn:
-    """只记 ``send_call`` 的连接替身，给 ``setup_session`` 用。"""
+    """只记 `send_call` 的连接替身，给 `setup_session` 用。"""
 
     def __init__(self) -> None:
+        """初始化。"""
         self.calls: list[tuple[str, dict, str | None]] = []
 
     def send_call(self, method, params=None, *, session_id=None, timeout=30.0):
+        """记下一次 `send_call`，并回假的 sessionId。"""
         self.calls.append((method, dict(params or {}), session_id))
         return {"sessionId": "auto-1"}
 
 
 def make_session(tmp_path: Path, *, responses=None, filters=None, **options):
-    """建一条可喂事件的管线，返回 ``(session, fake_call, out_dir)``。"""
+    """建一条可喂事件的管线，返回 `(session, fake_call, out_dir)`。"""
     out_dir = tmp_path / "cap"
     opts = CC.CaptureOptions(
         out_dir=out_dir,
@@ -87,6 +82,7 @@ def request_event(
     post_data: str | None = None,
     has_post_data: bool = False,
 ) -> dict:
+    """构造一条 `Network.requestWillBeSent` 的参数字典。"""
     request: dict = {"url": url, "method": method, "headers": headers or {}}
     if post_data is not None:
         request["postData"] = post_data
@@ -105,6 +101,7 @@ def request_event(
 
 
 def response_event(request_id: str, *, status: int = 200, mime: str = "application/json") -> dict:
+    """构造一条 `Network.responseReceived` 的参数字典。"""
     return {
         "requestId": request_id,
         "timestamp": 101.0,
@@ -122,10 +119,12 @@ def response_event(request_id: str, *, status: int = 200, mime: str = "applicati
 
 
 def finished_event(request_id: str, *, length: int = 10) -> dict:
+    """构造一条 `Network.loadingFinished` 的参数字典。"""
     return {"requestId": request_id, "timestamp": 102.0, "encodedDataLength": length}
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """按行读 JSONL；文件不存在或空行时返回空/跳过。"""
     if not path.exists():
         return []
     return [
@@ -136,16 +135,13 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def index_rows(out_dir: Path) -> list[dict]:
+    """读 `index.jsonl` 的全部行。"""
     return read_jsonl(out_dir / "index.jsonl")
 
 
 def ws_rows(out_dir: Path) -> list[dict]:
+    """读 `websocket.jsonl` 的全部行。"""
     return read_jsonl(out_dir / "websocket.jsonl")
-
-
-# --------------------------------------------------------------------------- #
-# 纯函数
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -167,6 +163,7 @@ def ws_rows(out_dir: Path) -> list[dict]:
     ],
 )
 def test_ext_for_content_type(content_type, expected):
+    """验 Content-Type 到文件扩展名的映射。"""
     assert CC.ext_for_content_type(content_type) == expected
 
 
@@ -180,10 +177,12 @@ def test_ext_for_content_type(content_type, expected):
     ],
 )
 def test_slugify_known_cases(url, expected):
+    """验 slugify 对典型 URL 的输出。"""
     assert CC.slugify(url) == expected
 
 
 def test_slugify_strips_unsafe_characters():
+    """验 slugify 去掉不安全字符。"""
     slug = CC.slugify("https://a.b/wapi/%E4%B8%AD%E6%96%87/file%20name.exe")
     assert slug
     assert "/" not in slug and "\\" not in slug and ".." not in slug
@@ -191,19 +190,23 @@ def test_slugify_strips_unsafe_characters():
 
 
 def test_slugify_truncates_long_names():
+    """验 slugify 截断过长名字。"""
     assert len(CC.slugify("https://a.b/" + "x" * 500)) <= 60
 
 
 def test_parse_query_collects_repeated_keys():
+    """验重复 query 键收成列表，空值收成空串。"""
     assert CC.parse_query("https://a.b/x?a=1&a=2&b=") == {"a": ["1", "2"], "b": ""}
 
 
 def test_get_header_is_case_insensitive():
+    """验取头大小写不敏感，缺失返回空串。"""
     assert CC.get_header({"content-type": "application/json"}, "Content-Type") == "application/json"
     assert CC.get_header({}, "Content-Type") == ""
 
 
 def test_default_filters_drop_html_css_js_only():
+    """验默认过滤只丢掉 HTML/CSS/JS 三类。"""
     filters = CC.filters_for_preset("all")
     assert not filters.keep(rtype="Document", url="u")
     assert not filters.keep(rtype="Stylesheet", url="u")
@@ -213,6 +216,7 @@ def test_default_filters_drop_html_css_js_only():
 
 
 def test_media_and_api_presets():
+    """验 media / api 两档预设的留取范围。"""
     media = CC.filters_for_preset("media")
     assert not media.keep(rtype="Image", url="u")
     assert media.keep(rtype="XHR", url="u")
@@ -225,12 +229,14 @@ def test_media_and_api_presets():
 
 
 def test_exclude_types_empty_string_means_keep_everything():
+    """验排除列表为空串时全部保留。"""
     filters = CC.filters_for_preset("all", exclude_types="")
     assert filters.keep(rtype="Document", url="u")
     assert filters.keep(rtype="Script", url="u")
 
 
 def test_url_filters():
+    """验 URL 包含 / 排除 / 正则三种过滤。"""
     filters = CC.filters_for_preset("all", url_substr="/wapi/")
     assert filters.keep(rtype="XHR", url="https://a.b/wapi/x")
     assert not filters.keep(rtype="XHR", url="https://a.b/other")
@@ -243,12 +249,8 @@ def test_url_filters():
     assert not regexed.keep(rtype="XHR", url="https://a.b/other.json")
 
 
-# --------------------------------------------------------------------------- #
-# 过滤在管线里的效果
-# --------------------------------------------------------------------------- #
-
-
 def test_pipeline_only_keeps_non_js_css_html(tmp_path):
+    """验管线只留非 HTML/CSS/JS 的请求。"""
     session, _, out = make_session(tmp_path)
     for i, rtype in enumerate(("Document", "Stylesheet", "Script", "XHR", "Image")):
         rid = f"R{i}"
@@ -263,6 +265,7 @@ def test_pipeline_only_keeps_non_js_css_html(tmp_path):
 
 
 def test_filtered_request_leaves_no_record(tmp_path):
+    """验被过滤的请求不留任何记录。"""
     session, _, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/", rtype="Document"))
     session.finalize(reason="t")
@@ -270,12 +273,8 @@ def test_filtered_request_leaves_no_record(tmp_path):
     assert session._records == {}
 
 
-# --------------------------------------------------------------------------- #
-# ExtraInfo 合并（含乱序）
-# --------------------------------------------------------------------------- #
-
-
 def test_request_extra_merges_cookie_when_arriving_late(tmp_path):
+    """验 ExtraInfo 后到时 Cookie 也能并进请求头。"""
     session, _, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/api"))
     session.handle_event(
@@ -309,6 +308,7 @@ def test_request_extra_merges_when_arriving_first(tmp_path):
 
 
 def test_response_extra_supplies_set_cookie(tmp_path):
+    """验响应 ExtraInfo 提供 Set-Cookie 并盖过普通响应头。"""
     session, _, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/api"))
     session.handle_event("S1", "Network.responseReceived", response_event("R1"))
@@ -327,6 +327,7 @@ def test_response_extra_supplies_set_cookie(tmp_path):
 
 
 def test_response_received_does_not_clobber_extra_headers(tmp_path):
+    """验 responseReceived 不会把 ExtraInfo 头盖回去。"""
     session, _, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/api"))
     session.handle_event(
@@ -341,12 +342,8 @@ def test_response_received_does_not_clobber_extra_headers(tmp_path):
     assert index_rows(out)[0]["response"]["headers"]["Set-Cookie"] == "sid=1"
 
 
-# --------------------------------------------------------------------------- #
-# 正文落盘
-# --------------------------------------------------------------------------- #
-
-
 def test_base64_body_is_written_as_raw_bytes(tmp_path):
+    """验 base64 正文落盘为原始字节。"""
     raw = b"\x89PNG\r\n\x1a\n binary"
     encoded = base64.b64encode(raw).decode()
     session, fake, out = make_session(
@@ -363,11 +360,12 @@ def test_base64_body_is_written_as_raw_bytes(tmp_path):
     assert body["base64"] is True
     assert body["bytes"] == len(raw)
     assert body["path"].startswith("bodies/") and body["path"].endswith(".png")
-    assert (out / body["path"]).read_bytes() == raw  # 是原始字节，不是 base64 文本
+    assert (out / body["path"]).read_bytes() == raw
     assert fake.methods() == ["Network.getResponseBody"]
 
 
 def test_text_body_written_as_utf8(tmp_path):
+    """验文本正文按 UTF-8 落盘。"""
     session, _, out = make_session(
         tmp_path, responses={"Network.getResponseBody": {"body": '{"code":0}', "base64Encoded": False}}
     )
@@ -384,6 +382,7 @@ def test_text_body_written_as_utf8(tmp_path):
 
 
 def test_get_response_body_failure_is_recorded_not_raised(tmp_path):
+    """验取正文失败只记 note，不打断后续请求。"""
     session, _, out = make_session(
         tmp_path,
         responses={"Network.getResponseBody": CC.CdpError("No resource with given identifier")},
@@ -391,7 +390,6 @@ def test_get_response_body_failure_is_recorded_not_raised(tmp_path):
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/stream"))
     session.handle_event("S1", "Network.responseReceived", response_event("R1"))
     session.handle_event("S1", "Network.loadingFinished", finished_event("R1"))
-    # 后面这条还得照常处理，说明失败没把管线打挂
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R2", "https://a.b/two"))
     session.handle_event("S1", "Network.loadingFinished", finished_event("R2"))
     session.finalize(reason="t")
@@ -403,12 +401,8 @@ def test_get_response_body_failure_is_recorded_not_raised(tmp_path):
     assert rows[0]["status"] == "complete"
 
 
-# --------------------------------------------------------------------------- #
-# POST 正文
-# --------------------------------------------------------------------------- #
-
-
 def test_inline_post_data_is_written_to_disk(tmp_path):
+    """验事件自带的 POST 正文直接落盘，不再回头取。"""
     session, fake, out = make_session(tmp_path)
     session.handle_event(
         "S1",
@@ -433,6 +427,7 @@ def test_inline_post_data_is_written_to_disk(tmp_path):
 
 
 def test_post_data_fetched_when_missing_from_event(tmp_path):
+    """验事件缺 POST 正文时回头调 getRequestPostData 补。"""
     session, fake, out = make_session(
         tmp_path, responses={"Network.getRequestPostData": {"postData": "a=1&b=2"}}
     )
@@ -449,6 +444,7 @@ def test_post_data_fetched_when_missing_from_event(tmp_path):
 
 
 def test_post_data_lookup_failure_is_noted(tmp_path):
+    """验取 POST 失败只记 note。"""
     session, _, out = make_session(
         tmp_path, responses={"Network.getRequestPostData": CC.CdpError("body evicted")}
     )
@@ -465,12 +461,8 @@ def test_post_data_lookup_failure_is_noted(tmp_path):
     assert "getRequestPostData 失败" in post["note"]
 
 
-# --------------------------------------------------------------------------- #
-# 失败 / 重定向 / 未完成
-# --------------------------------------------------------------------------- #
-
-
 def test_loading_failed_marks_error_and_skips_body(tmp_path):
+    """验加载失败标错误且不取正文。"""
     session, fake, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/x"))
     session.handle_event(
@@ -490,6 +482,7 @@ def test_loading_failed_marks_error_and_skips_body(tmp_path):
 
 
 def test_redirect_hop_becomes_its_own_row(tmp_path):
+    """验每一跳重定向各占一行，只有最后一跳取正文。"""
     session, fake, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/one"))
     second = request_event("R1", "https://a.b/two")
@@ -511,13 +504,13 @@ def test_redirect_hop_becomes_its_own_row(tmp_path):
     assert rows[1]["url"] == "https://a.b/two"
     assert rows[1]["redirect"]["hop"] == 2
     assert rows[1]["redirect"]["redirected_from_request_id"] == "R1"
-    # 中转那跳没有可取的正文；最后一跳是完整请求，照常取
     assert rows[0]["body"] is None
     assert rows[1]["body"] is not None
     assert fake.methods().count("Network.getResponseBody") == 1
 
 
 def test_unfinished_request_is_marked_pending_on_finalize(tmp_path):
+    """验未完成请求在收尾时标成 pending。"""
     session, _, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/slow"))
     session.finalize(reason="Ctrl+C")
@@ -544,6 +537,7 @@ def test_same_request_id_in_two_sessions_does_not_collide(tmp_path):
 
 
 def test_timings_compute_duration(tmp_path):
+    """验耗时字段由时间戳算出。"""
     session, _, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/x"))
     session.handle_event("S1", "Network.responseReceived", response_event("R1"))
@@ -557,12 +551,8 @@ def test_timings_compute_duration(tmp_path):
     assert timings["duration_ms"] == 1000.0
 
 
-# --------------------------------------------------------------------------- #
-# WebSocket
-# --------------------------------------------------------------------------- #
-
-
 def test_websocket_handshake_and_frames(tmp_path):
+    """验 WebSocket 握手与全部帧落盘。"""
     session, _, out = make_session(tmp_path)
     url = "wss://gw.example.com:8080/chatws"
     session.handle_event("S1", "Network.webSocketCreated", {"requestId": "W1", "url": url, "timestamp": 1.0})
@@ -604,7 +594,7 @@ def test_websocket_handshake_and_frames(tmp_path):
     ]
     sent, recv = rows[3], rows[4]
     assert sent["dir"] == "sent" and sent["binary"] is True and sent["payload_base64"] is True
-    assert sent["payload"] == "EAEABQ=="  # 原样存 base64，不做二次编码
+    assert sent["payload"] == "EAEABQ=="
     assert sent["payload_bytes"] == 4
     assert recv["dir"] == "recv" and recv["binary"] is False and recv["payload"] == "hi"
 
@@ -619,6 +609,7 @@ def test_websocket_handshake_and_frames(tmp_path):
 
 
 def test_websocket_frames_dropped_when_filtered_out(tmp_path):
+    """验被过滤的 WebSocket 连帧都不落盘。"""
     filters = CC.filters_for_preset("api", include_types="XHR")
     session, _, out = make_session(tmp_path, filters=filters)
     session.handle_event("S1", "Network.webSocketCreated", {"requestId": "W1", "url": "wss://a.b/chatws"})
@@ -646,12 +637,8 @@ def test_websocket_request_will_be_sent_merges_into_existing_record(tmp_path):
     assert len(index_rows(out)) == 1
 
 
-# --------------------------------------------------------------------------- #
-# session 装配
-# --------------------------------------------------------------------------- #
-
-
 def test_setup_session_enables_network_and_nested_autoattach(tmp_path):
+    """验装配 session 时开 Network 并在子 session 再设 autoAttach。"""
     session, _, _ = make_session(tmp_path)
     conn = StubConn()
     CC.setup_session(conn, session, "S1", {"targetId": "T1", "type": "page", "url": "https://a.b/"})
@@ -659,16 +646,15 @@ def test_setup_session_enables_network_and_nested_autoattach(tmp_path):
     methods = [call[0] for call in conn.calls]
     assert methods == ["Network.enable", "Target.setAutoAttach"]
     enable_params = conn.calls[0][1]
-    # 设了 maxPostDataSize 会把 POST body 截断——绝不能出现
     assert "maxPostDataSize" not in enable_params
     assert enable_params == {}
-    # 子 session 上得再设一次 autoAttach，否则 OOPIF/worker 收不到
     assert conn.calls[1][2] == "S1"
     assert conn.calls[1][1]["autoAttach"] is True
     assert session._targets["S1"]["target_id"] == "T1"
 
 
 def test_setup_session_is_idempotent(tmp_path):
+    """验装配 session 是幂等的。"""
     session, _, _ = make_session(tmp_path)
     conn = StubConn()
     CC.setup_session(conn, session, "S1", {"targetId": "T1", "type": "page"})
@@ -677,6 +663,7 @@ def test_setup_session_is_idempotent(tmp_path):
 
 
 def test_setup_session_releases_paused_target_after_enable(tmp_path):
+    """验 enable 之后放行暂停中的 target。"""
     session, _, _ = make_session(tmp_path)
     conn = StubConn()
     CC.setup_session(
@@ -688,6 +675,7 @@ def test_setup_session_releases_paused_target_after_enable(tmp_path):
 
 
 def test_on_attach_callback_fires_for_attached_to_target(tmp_path):
+    """验 attachedToTarget 触发回调并登记 target。"""
     session, _, _ = make_session(tmp_path)
     seen: list[tuple] = []
     session._on_attach_cb = lambda sid, info, waiting: seen.append((sid, info.get("type"), waiting))
@@ -700,12 +688,8 @@ def test_on_attach_callback_fires_for_attached_to_target(tmp_path):
     assert session._targets["S9"]["type"] == "worker"
 
 
-# --------------------------------------------------------------------------- #
-# meta / 汇总
-# --------------------------------------------------------------------------- #
-
-
 def test_meta_and_summary_counts_match_disk(tmp_path):
+    """验汇总计数与落盘产物一致。"""
     session, _, out = make_session(
         tmp_path, responses={"Network.getResponseBody": {"body": "hello", "base64Encoded": False}}
     )
@@ -730,36 +714,35 @@ def test_meta_and_summary_counts_match_disk(tmp_path):
 
 
 def test_finalize_is_idempotent_and_files_are_closed(tmp_path):
+    """验收尾幂等且文件只写一遍。"""
     session, _, out = make_session(tmp_path)
     session.handle_event("S1", "Network.requestWillBeSent", request_event("R1", "https://a.b/x"))
     first = session.finalize(reason="a")
     second = session.finalize(reason="b")
     assert first.requests_written == second.requests_written == 1
-    assert len(index_rows(out)) == 1  # 没被写第二遍
-
-
-# --------------------------------------------------------------------------- #
-# 传输层
-# --------------------------------------------------------------------------- #
+    assert len(index_rows(out)) == 1
 
 
 class FakeWs:
     """按脚本吐帧的 socket 替身。脚本元素可以是字符串，也可以是要抛的异常。
 
-    走 ``responder`` 时是「收到什么才回什么」——真实链路上回包只会跟在请求后面，
-    预先把回包排在 ``script`` 里会让读线程抢在 ``send_call`` 登记前就把连接读没了。
+    走 `responder` 时是「收到什么才回什么」——真实链路上回包只会跟在请求后面，
+    预先把回包排在 `script` 里会让读线程抢在 `send_call` 登记前就把连接读没了。
     """
 
     def __init__(self, script: list | None = None, responder=None) -> None:
+        """初始化。"""
         self.script: list = list(script or [])
         self.responder = responder
         self.sent: list[dict] = []
         self.closed = False
 
     def feed(self, item) -> None:
+        """往脚本尾部追加一帧。"""
         self.script.append(item)
 
     def send(self, payload: str) -> None:
+        """记下发出的帧，并可按 `responder` 生成回包脚本。"""
         message = json.loads(payload)
         self.sent.append(message)
         if self.responder is not None:
@@ -767,8 +750,9 @@ class FakeWs:
                 self.script.append(item)
 
     def recv(self):
+        """弹出下一帧；脚本空时抛空闲超时，帧是异常则原样抛出。"""
         if not self.script:
-            time.sleep(0.01)  # 空转别把 CPU 烧了
+            time.sleep(0.01)
             raise websocket.WebSocketTimeoutException("idle")
         item = self.script.pop(0)
         if isinstance(item, Exception):
@@ -776,12 +760,16 @@ class FakeWs:
         return item
 
     def close(self) -> None:
+        """标记已关闭。"""
         self.closed = True
 
 
 @pytest.fixture
 def patch_ws(monkeypatch):
+    """把 `websocket.create_connection` 换成给定的 `FakeWs`。"""
+
     def _patch(fake: FakeWs) -> FakeWs:
+        """安装假 socket 并原样返回。"""
         monkeypatch.setattr(websocket, "create_connection", lambda *a, **k: fake)
         return fake
 
@@ -789,6 +777,7 @@ def patch_ws(monkeypatch):
 
 
 def test_events_are_yielded_then_close_ends_iteration(patch_ws):
+    """验事件按序吐出，断线结束迭代。"""
     fake = patch_ws(
         FakeWs(
             [
@@ -810,6 +799,7 @@ def test_events_are_yielded_then_close_ends_iteration(patch_ws):
 
 
 def test_send_call_matches_response_by_id(patch_ws):
+    """验 send_call 按 id 对上回包。"""
     patch_ws(
         FakeWs(
             responder=lambda msg: [
@@ -833,6 +823,7 @@ def test_pending_call_is_woken_when_connection_drops(patch_ws):
     outcome: dict = {}
 
     def worker() -> None:
+        """在独立线程里发起一条会一直挂着的命令。"""
         try:
             conn.send_call("Network.enable", timeout=20.0)
         except Exception as exc:  # noqa: BLE001 - 就是要抓这个
@@ -855,6 +846,7 @@ def test_pending_call_is_woken_when_connection_drops(patch_ws):
 
 
 def test_send_call_raises_on_error_response(patch_ws):
+    """验回包带 error 时抛 `CdpError`。"""
     patch_ws(
         FakeWs(
             responder=lambda msg: [
@@ -872,6 +864,7 @@ def test_send_call_raises_on_error_response(patch_ws):
 
 
 def test_send_call_after_close_raises(patch_ws):
+    """验连接关闭后再发命令抛错。"""
     patch_ws(FakeWs([websocket.WebSocketConnectionClosedException("bye")]))
     conn = CC.CdpConnection("ws://x")
     conn.start()
@@ -886,30 +879,28 @@ def test_send_call_after_close_raises(patch_ws):
         conn.close()
 
 
-# --------------------------------------------------------------------------- #
-# 端到端装配（还是假 Chrome，但把 bootstrap 到收尾整条路走通）
-# --------------------------------------------------------------------------- #
-
-
 def _fake_chrome() -> FakeWs:
     """冒充一台只有一个页面 target 的 Chrome，喂完一轮请求自己断线。"""
 
     def respond(msg):
+        """按命令名回包，并在订阅齐后吐一轮合成流量。"""
         method = msg["method"]
         sid = msg.get("sessionId")
         out: list = []
 
         def reply(result=None):
+            """把一条成功回包排进输出。"""
             out.append(json.dumps({"id": msg["id"], "result": result or {}}))
 
         def event(session_id, name, params):
+            """把一条 CDP 事件排进输出。"""
             out.append(json.dumps({"method": name, "sessionId": session_id, "params": params}))
 
         if method == "Target.setDiscoverTargets":
             reply()
         elif method == "Target.setAutoAttach":
             reply()
-            if sid:  # 页面 session 上那次 = 订阅齐了，开始吐流量
+            if sid:
                 event(sid, "Network.requestWillBeSent", request_event(
                     "R1", "https://a.b/wapi/x.json",
                     rtype="XHR", method="POST", post_data="a=1", has_post_data=True,
@@ -933,15 +924,15 @@ def _fake_chrome() -> FakeWs:
 
 
 def test_run_capture_end_to_end_against_fake_chrome(patch_ws, tmp_path):
+    """验从 bootstrap 到收尾整条抓包路走通。"""
     fake = patch_ws(_fake_chrome())
     out = tmp_path / "cap"
     summary = CC.run_capture(
         ws_url="ws://fake/devtools/browser/abc",
         options=CC.CaptureOptions(out_dir=out),
-        duration=10.0,  # 兜底：装配若卡住，别把测试吊死
+        duration=10.0,
     )
 
-    # bootstrap 该发的命令一条不少
     sent = [msg["method"] for msg in fake.sent]
     assert sent[:4] == [
         "Target.setDiscoverTargets",
@@ -951,7 +942,6 @@ def test_run_capture_end_to_end_against_fake_chrome(patch_ws, tmp_path):
     ]
     assert "Network.enable" in sent
 
-    # 请求走了完整一圈并落了盘
     rows = index_rows(out)
     assert len(rows) == 1
     row = rows[0]
@@ -965,7 +955,6 @@ def test_run_capture_end_to_end_against_fake_chrome(patch_ws, tmp_path):
     assert summary.bodies_written == 1
     assert "连接关闭" in summary.stop_reason
 
-    # 收尾那版 meta 是并入的——开抓时写的 ws_url/started_at 不能丢
     meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
     assert meta["ws_url"] == "ws://fake/devtools/browser/abc"
     assert meta["started_at"] and meta["ended_at"]

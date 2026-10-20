@@ -1,22 +1,20 @@
 """应用内自更新：下载 zip → 校验 → 交给 bat 停服/换文件/重启，全程推 WS 进度。
 
-为什么要 bat：Windows 上运行中的 exe 和 ``_internal\\`` 里的 DLL 都被锁着，
-**自己换不掉自己**。所以 Python 只负责「下载 + 校验 + 生成脚本 + 转发进度 +
-退出」，替换动作交给独立的 cmd 进程。
+Python 只负责下载、校验、生成脚本、转发进度与退出；替换动作交给独立的
+cmd 进程（Windows 上运行中的 exe 换不掉自己）。与 bat 的文件约定见
+`notes/boss_web/services/updater.md`。
 
-与 bat 的约定（都放在 ``%TEMP%\\BossAutoDelivery-update\\``）：
-
-===============  ==========  ==========================================
-文件             写入方      格式
-===============  ==========  ==========================================
-``*.zip``        Python      更新包本体
-``extract\\``    bat         解压暂存（确认有 exe 才动安装目录）
-``progress.log`` bat         行式 ``stage|percent|text``（ASCII）
-``update.log``   bat         人话诊断，失败时用户看这个
-``done.json``    bat         成功回执 ``{"ok":true,"version":...}``，新进程读一次
-===============  ==========  ==========================================
-
-bat **先验证后破坏**：zip 不在/解压不出 exe 就直接退出，安装目录一个文件都不碰。
+Attributes:
+    UPDATE_TEMP_DIR_NAME: 更新工作目录名（挂在 %TEMP% 下）。
+    MAX_ZIP_BYTES: 更新包大小上限。
+    DOWNLOAD_TIMEOUT: `(连接超时, 读超时)`。
+    DONE_MARKER_MAX_AGE: `done.json` 的有效期（秒）。
+    STAGE_ZH: bat 的 stage → 界面中文。
+    LOG_TAIL_BYTES: 诊断页默认读的尾部字节数。
+    LOG_FILE_NAMES: 要展示的过程日志文件名。
+    _subscribers: `(loop, queue)` 订阅表。
+    _last_event: 最近一次进度。
+    _done_cache: 新进程的「更新完成」回执缓存。
 """
 
 from __future__ import annotations
@@ -41,13 +39,9 @@ from .. import __version__ as APP_VERSION
 
 logger = logging.getLogger(__name__)
 
-#: 更新工作目录名（挂在 %TEMP% 下，不在安装目录里——安装目录待会儿要被清）
 UPDATE_TEMP_DIR_NAME = "BossAutoDelivery-update"
-#: 更新包大小上限。发行包 ~30MB，给 100 倍冗余防意外
 MAX_ZIP_BYTES = 500 * 1024 * 1024
-#: (连接超时, 读超时)
 DOWNLOAD_TIMEOUT = (10.0, 300.0)
-#: done.json 的有效期：太久远的回执不当真（免得旧标记误触发「更新完成」）
 DONE_MARKER_MAX_AGE = 600.0
 
 EXE_NAME = "BossAutoDelivery.exe"
@@ -57,20 +51,25 @@ class UpdateApplyError(Exception):
     """更新流程里可读的失败原因（界面直接摆这句话）。"""
 
 
-# --------------------------------------------------------------------------- #
-# 进度事件 + 广播
-# --------------------------------------------------------------------------- #
-
-
 @dataclass(frozen=True)
 class ProgressEvent:
-    #: download / validate / extract / ready / stopping / swapping / done / error
+    """一条更新进度事件。
+
+    Attributes:
+        stage: `download` / `validate` / `extract` / `ready` / `stopping` /
+            `swapping` / `done` / `error`。
+        percent: 0-100 进度。
+        text: 给界面看的中文说明。
+        update_done: 自更新完成后的一次性回执；没有则 `None`。
+    """
+
     stage: str
     percent: int
     text: str
     update_done: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
+        """转成给 WS / 接口用的字典。"""
         return {
             "stage": self.stage,
             "percent": self.percent,
@@ -79,7 +78,6 @@ class ProgressEvent:
         }
 
 
-#: bat 的 stage → 界面中文。bat 本体保持纯 ASCII（路径/中文塞进 bat 极易出事）
 STAGE_ZH: dict[str, str] = {
     "download": "正在下载更新包",
     "validate": "正在校验更新包",
@@ -92,16 +90,21 @@ STAGE_ZH: dict[str, str] = {
 }
 
 _lock = threading.RLock()
-#: (loop, queue) 订阅表。WS 连上就挂一条，断开就摘
 _subscribers: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
-#: 最近一次进度（WS 连上先给一帧快照，免得页面错过开场）
 _last_event: ProgressEvent = ProgressEvent(stage="idle", percent=0, text="")
-#: 新进程的「更新完成」回执（读一次 done.json 后缓存在这，进程内谁问谁拿）
 _done_cache: dict[str, Any] | None = None
 _done_loaded = False
 
 
 def subscribe(loop: asyncio.AbstractEventLoop) -> asyncio.Queue:
+    """订阅进度事件。
+
+    Args:
+        loop: 订阅方所在的事件循环。
+
+    Returns:
+        新建的进度队列，断开时用 `unsubscribe` 摘掉。
+    """
     queue: asyncio.Queue = asyncio.Queue(maxsize=64)
     with _lock:
         _subscribers.append((loop, queue))
@@ -109,18 +112,28 @@ def subscribe(loop: asyncio.AbstractEventLoop) -> asyncio.Queue:
 
 
 def unsubscribe(queue: asyncio.Queue) -> None:
+    """摘掉订阅。
+
+    Args:
+        queue: `subscribe` 返回的队列。
+    """
     with _lock:
         _subscribers[:] = [(lp, q) for lp, q in _subscribers if q is not queue]
 
 
 def publish(event: ProgressEvent) -> None:
-    """线程安全：更新工作线程里调，WS 在事件循环里收。"""
+    """线程安全广播一帧进度；更新工作线程里调，WS 在事件循环里收。
+
+    Args:
+        event: 要广播的进度事件。
+    """
     global _last_event
     with _lock:
         _last_event = event
         targets = list(_subscribers)
     for loop, queue in targets:
         def _put(q: asyncio.Queue = queue, ev: ProgressEvent = event) -> None:
+            """把一帧塞进订阅队列；满了直接丢。"""
             try:
                 q.put_nowait(ev)
             except asyncio.QueueFull:  # pragma: no cover - 64 帧够宽
@@ -133,6 +146,7 @@ def publish(event: ProgressEvent) -> None:
 
 
 def snapshot_progress() -> dict[str, Any]:
+    """最近一次进度 + 一次性消费 `done.json` 回执。"""
     with _lock:
         payload = _last_event.to_payload()
     payload["update_done"] = consume_done_marker()
@@ -140,11 +154,9 @@ def snapshot_progress() -> dict[str, Any]:
 
 
 def peek_progress() -> dict[str, Any]:
-    """只看最近一次进度事件，**不动** ``done.json``。
+    """只看最近一次进度事件，不动 `done.json`。
 
-    给「系统设置 → 版本更新」的诊断面板用：看一眼日志不该把更新完成的回执
-    吃掉（那是 :func:`snapshot_progress` 的活，一次性）。回执字段一律置空——
-    这里是「偷看」，不是消费。
+    给诊断面板用：看一眼日志不该吃掉更新完成的回执；回执字段一律置空。
     """
     with _lock:
         payload = _last_event.to_payload()
@@ -153,7 +165,11 @@ def peek_progress() -> dict[str, Any]:
 
 
 def parse_progress_line(line: str) -> ProgressEvent | None:
-    """``stage|percent|text`` → 事件；认不出回 ``None``。"""
+    """`stage|percent|text` → 事件；认不出回 `None`。
+
+    Args:
+        line: `progress.log` 里的一行。
+    """
     text = (line or "").strip()
     if not text or text.count("|") < 2:
         return None
@@ -173,37 +189,33 @@ def parse_progress_line(line: str) -> ProgressEvent | None:
     return ProgressEvent(stage=stage, percent=percent, text=shown)
 
 
-# --------------------------------------------------------------------------- #
-# 目录与完成回执
-# --------------------------------------------------------------------------- #
-
-
 def work_dir() -> Path:
+    """更新工作目录（挂在 %TEMP% 下）。"""
     base = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
     return Path(base) / UPDATE_TEMP_DIR_NAME
 
 
 def done_marker_path() -> Path:
+    """`done.json` 的路径。"""
     return work_dir() / "done.json"
 
 
-#: 诊断页默认读的尾部字节数；用户可在接口上再要大一点
 LOG_TAIL_BYTES = 64 * 1024
 LOG_TAIL_MAX = 256 * 1024
-#: 要展示的过程日志（bat 用 ``>>`` 追加写，永不截断）
 LOG_FILE_NAMES = ("update.log", "progress.log")
 
 
 def read_update_logs(*, tail_bytes: int = LOG_TAIL_BYTES) -> tuple[list[dict[str, Any]], str | None]:
-    """读 ``%TEMP%\\BossAutoDelivery-update\\`` 下的过程日志**尾部**，给网页直接看。
+    """读更新过程日志尾部，给网页直接看。
 
-    用户不会开这个目录，所以日志要能就地看、出错也要能截图。约定：
+    文件不存在 / 读不出来都不是 500：前者回 `exists: False`，后者塞进
+    `read_error`；超长只取尾部并丢掉残行。
 
-    * **文件不存在不是错误**——源码跑 / 从没更新过就是没有，回 ``exists: False``
-    * **读不出来也不报 500**——bat 正在写时文件可能被锁，塞进 ``read_error``
-    * 超长只取尾部并丢掉残行（bat 是 ``>>`` 追加，越积越长）
+    Args:
+        tail_bytes: 每个文件最多读多少字节尾部。
 
-    :return: ``(files, hint)``；``hint`` 是给空态的一句话，没有就 ``None``。
+    Returns:
+        `(files, hint)`；`hint` 是给空态的一句话，没有就 `None`。
     """
     limit = max(1, int(tail_bytes or LOG_TAIL_BYTES))
     root = work_dir()
@@ -249,7 +261,6 @@ def read_update_logs(*, tail_bytes: int = LOG_TAIL_BYTES) -> tuple[list[dict[str
         if len(raw) > limit:
             raw = raw[-limit:]
             item["truncated"] = True
-            # 砍掉开头的半行，免得日志第一行是半截乱码
             nl = raw.find(b"\n")
             if 0 <= nl < len(raw) - 1:
                 raw = raw[nl + 1 :]
@@ -263,10 +274,9 @@ def read_update_logs(*, tail_bytes: int = LOG_TAIL_BYTES) -> tuple[list[dict[str
 
 
 def consume_done_marker() -> dict[str, Any] | None:
-    """读一次 ``done.json`` 并清掉文件；进程内缓存，多端问都能拿到同一份。
+    """读一次 `done.json` 并清掉文件；进程内缓存，多端问都能拿到同一份。
 
-    超过 :data:`DONE_MARKER_MAX_AGE` 的旧回执当垃圾丢掉——否则几个月后打开
-    页面可能撞上「更新完成」的幽灵弹窗。
+    超过 `DONE_MARKER_MAX_AGE` 的旧回执当垃圾丢掉，避免幽灵「更新完成」弹窗。
     """
     global _done_cache, _done_loaded
     with _lock:
@@ -297,16 +307,11 @@ def consume_done_marker() -> dict[str, Any] | None:
 
 
 def reset_done_marker_cache() -> None:
-    """给测试用。"""
+    """清掉完成回执缓存。给测试用。"""
     global _done_cache, _done_loaded
     with _lock:
         _done_cache = None
         _done_loaded = False
-
-
-# --------------------------------------------------------------------------- #
-# 下载 + 校验
-# --------------------------------------------------------------------------- #
 
 
 def download_zip(
@@ -316,7 +321,16 @@ def download_zip(
     expected_name: str = "",
     on_progress: Callable[[int], None] | None = None,
 ) -> Path:
-    """流式下载更新包。先写 ``.part`` 再改名，半截文件不会被当成完整包。"""
+    """流式下载更新包；失败抛 `UpdateApplyError`。
+
+    先写 `.part` 再改名，半截文件不会被当成完整包。
+
+    Args:
+        url: 下载直链。
+        dest_dir: 目标目录。
+        expected_name: 期望文件名；空则从 URL 取。
+        on_progress: 下载进度回调（0-100）。
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     name = expected_name.strip() or url.rstrip("/").rsplit("/", 1)[-1].split("?")[0] or "update.zip"
     if not name.lower().endswith(".zip"):
@@ -365,7 +379,11 @@ def download_zip(
 
 
 def validate_zip(path: Path) -> None:
-    """更新包必须是真 zip、没有 zip-slip 路径、并且解得出 ``BossAutoDelivery.exe``。"""
+    """校验更新包：真 zip、无 zip-slip 路径、且解得出 `BossAutoDelivery.exe`。
+
+    Args:
+        path: 待校验的 zip 路径。
+    """
     if not path.is_file():
         raise UpdateApplyError("更新包不存在")
     if path.stat().st_size <= 0:
@@ -379,7 +397,6 @@ def validate_zip(path: Path) -> None:
         parts = n.split("/")
         if ".." in parts or n.startswith("/") or (len(n) > 1 and n[1] == ":"):
             raise UpdateApplyError("更新包里有可疑路径，已拒绝安装")
-    # 扁平布局（根上 exe）或外面再套一层目录都认
     has_exe = (EXE_NAME in names) or any(
         n.count("/") == 1 and n.endswith("/" + EXE_NAME) for n in names
     )
@@ -387,11 +404,6 @@ def validate_zip(path: Path) -> None:
         raise UpdateApplyError(f"更新包里找不到 {EXE_NAME}，已取消更新")
 
 
-# --------------------------------------------------------------------------- #
-# bat：先验证后破坏
-# --------------------------------------------------------------------------- #
-
-#: 正文纯 ASCII。路径/端口/版本一律走环境变量——中文与空格路径写进 bat 是事故高发区。
 _BAT_TEMPLATE = r"""@echo off
 chcp 65001 >nul
 setlocal EnableExtensions
@@ -562,17 +574,18 @@ exit /b 1
 
 
 def render_bat(**_kwargs: Any) -> str:
-    """渲染 bat 正文（**已带 CRLF**）。参数全走环境变量，这里不接路径。
+    """渲染 bat 正文（已带 CRLF）；参数全走环境变量，这里不接路径。
 
-    cmd 对 LF-only 的 bat 里 ``goto``/标签兼容性很差，行尾必须是 ``\\r\\n``。
+    cmd 对 LF-only 的 bat 里 `goto` / 标签兼容性很差，行尾必须是 `\\r\\n`。
     """
     return _BAT_TEMPLATE.replace("\r\n", "\n").replace("\n", "\r\n")
 
 
 def write_bat(dest_dir: Path | None = None) -> Path:
-    """把 bat 落到 %TEMP%（必须在安装目录**外**，否则待会儿被清掉）。
+    """把 bat 落到 %TEMP%（必须在安装目录外，否则待会儿被清掉）。
 
-    用 ``write_bytes`` 原样落盘——任何换行翻译都可能把 CRLF 再叠一层。
+    Args:
+        dest_dir: 目标目录；省略用更新工作目录。
     """
     directory = dest_dir or work_dir()
     directory.mkdir(parents=True, exist_ok=True)
@@ -582,13 +595,14 @@ def write_bat(dest_dir: Path | None = None) -> Path:
 
 
 def spawn_bat(bat_path: Path, *, env_extra: dict[str, str]) -> None:
-    """分离启动 bat。**必须给它一个真实存在（但没窗口）的控制台**。
+    """分离启动 bat；非 Windows 抛 `UpdateApplyError`。
 
-    不能用 ``DETACHED_PROCESS``：那样 cmd 完全没有控制台，bat 里**任何管道都会
-    永久挂死**——``tasklist ... | findstr ...`` 正好是停止等待循环的第一句，更新
-    会一声不响地停在 85%；同一环境里 ``tasklist`` 重定向到文件也是空输出、
-    ``pause`` 也会挂住。``CREATE_NO_WINDOW`` 给的是真控制台、只是没窗口，
-    管道 / ``tasklist`` / ``pause`` 全部正常；失败原因看 ``update.log``（页面能看）。
+    必须给它真实存在但没窗口的控制台（`CREATE_NO_WINDOW`）：`DETACHED_PROCESS`
+    会让 bat 里管道永久挂死。
+
+    Args:
+        bat_path: bat 路径。
+        env_extra: 额外环境变量（安装目录 / zip 路径 / 端口等）。
     """
     if sys.platform != "win32":
         raise UpdateApplyError("自动更新目前仅支持 Windows")
@@ -611,17 +625,16 @@ def spawn_bat(bat_path: Path, *, env_extra: dict[str, str]) -> None:
         raise UpdateApplyError(f"启动更新脚本失败：{exc}") from exc
 
 
-# --------------------------------------------------------------------------- #
-# 退出 + 进度转发
-# --------------------------------------------------------------------------- #
-
 _server: Any = None
-#: 服务监听的端口。bat 重启时要按**原端口**拉起来，浏览器标签页才能重连上
 _bound_port: int | None = None
 
 
 def bind_server(server: Any) -> None:
-    """挂上 uvicorn.Server，供 :func:`request_exit` 安全停下；顺带记下端口。"""
+    """挂上 uvicorn.Server，供退出时安全停下；顺带记下监听端口。
+
+    Args:
+        server: 服务实例；端口从 `server.config.port` 读。
+    """
     global _server, _bound_port
     _server = server
     try:
@@ -634,14 +647,15 @@ def bind_server(server: Any) -> None:
 
 
 def request_exit(*, delay: float = 1.2, hard_exit_after: float = 8.0) -> None:
-    """让服务自己退出：先放完 WS 的 stopping 帧，再关 uvicorn，最后硬退兜底。
+    """让服务自己退出：放完 WS 的 stopping 帧，再关 uvicorn，最后硬退兜底。
 
-    用 ``should_exit``（uvicorn 官方停止位）让监听端口干净释放，新进程才能绑回
-    **同一端口**——浏览器标签页就是靠这个重连上来的。``os._exit`` 保证即使有
-    请求挂着也一定会死，文件锁才能放开给 bat 换文件。
+    Args:
+        delay: 退出前的等待（秒）。
+        hard_exit_after: 硬退兜底超时（秒）。
     """
 
     def _run() -> None:
+        """后台线程体：设 `should_exit`，到点后 `os._exit(0)`。"""
         if delay > 0:
             time.sleep(delay)
         server = _server
@@ -662,7 +676,12 @@ def request_exit(*, delay: float = 1.2, hard_exit_after: float = 8.0) -> None:
 
 
 def _tail_progress(path: Path, *, interval: float = 0.2) -> None:
-    """把 bat 写的 ``progress.log`` 逐行转成 WS 事件；顺带在 stopping 时触发退出。"""
+    """把 bat 写的 `progress.log` 逐行转成 WS 事件；stopping 时触发退出。
+
+    Args:
+        path: `progress.log` 路径。
+        interval: 轮询间隔（秒）。
+    """
     offset = 0
     while True:
         try:
@@ -686,11 +705,6 @@ def _tail_progress(path: Path, *, interval: float = 0.2) -> None:
         time.sleep(interval)
 
 
-# --------------------------------------------------------------------------- #
-# 主流程
-# --------------------------------------------------------------------------- #
-
-
 def start_update_job(
     *,
     version: str,
@@ -701,7 +715,12 @@ def start_update_job(
 ) -> None:
     """后台跑完整更新：下载 → 校验 → 写 bat → 启动 → 转发进度。
 
-    HTTP 侧立即返回，进度全走 WS；失败以 ``error`` 事件推给前端。
+    Args:
+        version: 目标版本号。
+        zip_url: 更新包直链。
+        zip_name: 更新包文件名；空则从 URL 取。
+        install_dir: 安装目录；省略用当前可执行文件目录。
+        port: 重启监听端口；省略用启动时记下的端口。
     """
     thread = threading.Thread(
         target=_run_update_job,
@@ -726,6 +745,7 @@ def _run_update_job(
     install_dir: Path | None = None,
     port: int | None = None,
 ) -> None:
+    """更新工作线程体；失败以 `error` 事件推给前端。"""
     try:
         from .. import runtime
 
@@ -736,6 +756,7 @@ def _run_update_job(
         progress_log.unlink(missing_ok=True)
 
         def _on_progress(pct: int) -> None:
+            """把下载进度转成一帧 WS 事件。"""
             publish(ProgressEvent(stage="download", percent=pct, text=f"正在下载更新包… {pct}%"))
 
         publish(ProgressEvent(stage="download", percent=0, text="正在下载更新包…"))
@@ -748,8 +769,6 @@ def _run_update_job(
 
         bat_path = write_bat(root)
         target_dir = Path(install_dir or runtime.executable_dir())
-        # 端口优先用调用方给的，其次启动时记下的——一定要传给 bat，
-        # 否则新进程会另挑一个端口，浏览器那个标签页就再也连不回来了。
         listen_port = port if port else _bound_port
         spawn_bat(
             bat_path,
@@ -764,7 +783,6 @@ def _run_update_job(
             },
         )
 
-        # bat 解压阶段旧服务还活着，进度从 progress.log 转发到 WS
         threading.Thread(
             target=_tail_progress, args=(progress_log,), name="update-progress", daemon=True
         ).start()

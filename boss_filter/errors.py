@@ -1,10 +1,7 @@
 """筛选条件模块的异常。
 
-分两层：
-    FilterError        基类
-      ├── FilterTransportError  网络层失败（超时、连接错误、响应不是 JSON）
-      ├── FilterApiError        服务端返回了失败业务码（含登录态失效）
-      └── FilterDataError       响应是成功码但结构对不上，解析不出来
+FilterError 是基类，派生出 FilterTransportError（网络层失败）、
+FilterApiError（服务端返回失败业务码）和 FilterDataError（结构对不上）。
 """
 
 from __future__ import annotations
@@ -13,14 +10,21 @@ from typing import Any
 
 
 class FilterError(Exception):
-    """筛选条件获取失败的基类。"""
+    """筛选条件获取失败的基类。
+
+    Args:
+        message: 错误文案。
+        raw: 原始响应（排障用）。
+    """
 
     def __init__(self, message: str, *, raw: Any = None) -> None:
+        """初始化。"""
         super().__init__(message)
         self.message = message
         self.raw = raw
 
     def __str__(self) -> str:  # pragma: no cover - 直接复用 message
+        """返回 message。"""
         return self.message
 
 
@@ -29,19 +33,25 @@ class FilterTransportError(FilterError):
 
 
 class FilterApiError(FilterError):
-    """服务端返回了非成功业务码。``code`` 为业务码，非 HTTP 状态码。"""
+    """服务端返回了非成功业务码；`code` 为业务码，非 HTTP 状态码。
+
+    Args:
+        code: 业务码。
+        message: 错误文案。
+        raw: 原始响应（排障用）。
+    """
 
     def __init__(self, code: int, message: str, *, raw: Any = None) -> None:
+        """初始化。"""
         super().__init__(message or f"接口返回异常码 {code}", raw=raw)
         self.code = code
 
     @property
     def is_session_expired(self) -> bool:
-        """True 表示登录态失效（接口回了「当前登录状态已失效」这类话术/码）。
+        """是否登录态失效。
 
-        **code 1 不算**——它是业务失败的通用码，只有 code 7（实测的
-        「当前登录状态已失效」）或话术里明说了登录问题才算。跟
-        :attr:`boss_jobs.errors.JobApiError.is_session_expired` 同判据。
+        code 7（实测的「当前登录状态已失效」）或话术里明说登录问题才算；
+        code 1 是业务失败的通用码，不算。与 `boss_jobs.errors.JobApiError.is_session_expired` 同判据。
         """
         return self.code in (7,) or "登录" in self.message
 

@@ -1,9 +1,10 @@
-"""登录态持久化。
+"""登录态持久化，落进状态库 `data/boss.db` 的 `doc('session')` 行。
 
-把 token / Cookie 落进状态库 ``data/boss.db`` 的 ``doc('session')`` 行，下次启动
-可直接复用，避免频繁触发短信。按 ``__file__`` 定位项目根，跟当前工作目录无关
-——从别处 ``python -m boss_login`` 也读写同一份。库文件建好后权限收紧到 600
-（Windows 上忽略），见 :mod:`boss_db`。
+按 `__file__` 定位项目根，与当前工作目录无关。
+
+Attributes:
+    PROJECT_ROOT: 项目根目录，即 `boss_login/` 的上一级。
+    DEFAULT_DB_PATH: 状态库路径，环境变量 `BOSS_DB` 可覆盖。
 """
 
 from __future__ import annotations
@@ -19,16 +20,22 @@ import boss_db
 
 logger = logging.getLogger(__name__)
 
-#: 项目根目录 = boss_login/ 的上一级。按模块位置算，不看 cwd。
 PROJECT_ROOT = boss_db.PROJECT_ROOT
 
-#: 状态库路径（登录态是里面的一行 ``doc('session')``）。环境变量 ``BOSS_DB`` 可覆盖。
 DEFAULT_DB_PATH = boss_db.DEFAULT_DB_PATH
 
 
 @dataclass
 class StoredSession:
-    """落盘的登录态。"""
+    """落盘的登录态。
+
+    Attributes:
+        token: 会话 token。
+        cookies: Cookie 名到值的映射。
+        phone_masked: 脱敏手机号。
+        user: 用户信息摘要。
+        saved_at: 保存时刻（epoch 秒）。
+    """
 
     token: str = ""
     cookies: dict[str, str] = field(default_factory=dict)
@@ -38,10 +45,12 @@ class StoredSession:
 
     @property
     def is_empty(self) -> bool:
+        """是否没有任何可用凭证。"""
         return not self.token and not self.cookies
 
     @property
     def age_seconds(self) -> float:
+        """距离保存过去了多少秒；未保存过则为 0。"""
         return max(0.0, time.time() - self.saved_at) if self.saved_at else 0.0
 
 
@@ -93,10 +102,9 @@ def clear_session(path: Path | str | None = None) -> bool:
 
 
 def has_session_row(path: Path | str | None = None) -> bool:
-    """库里有没有 ``doc('session')`` 这一行。
+    """库里有没有 `doc('session')` 这一行。
 
-    跟 :func:`load_session` 的「内容是不是空」是两回事——whoami 报错时要分清
-    「压根没落盘」和「落了但里面没有凭证」。打不开的库按「没有」处理。
+    与 `load_session` 的「内容是不是空」是两回事；打不开的库按「没有」处理。
     """
     try:
         return boss_db.doc_get_raw(boss_db.DOC_SESSION, path) is not None

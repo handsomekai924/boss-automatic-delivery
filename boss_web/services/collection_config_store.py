@@ -1,4 +1,8 @@
-"""Collection configuration persisted in the shared SQLite document store."""
+"""采集配置存取：状态库 `doc('collection_config')`，搜索维度仍在 `search_filter`。
+
+来源二选一：`expect_kind` 非空 → 期望流，空 → 搜索流。整包存 JSON、读时
+归一化、坏值不报错只回默认；同时兼容扁平与嵌套 `crawl` 两种旧文档形状。
+"""
 
 from __future__ import annotations
 
@@ -19,30 +23,38 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CollectionConfig:
-    """Saved crawl settings; search dimensions remain in ``search_filter``.
+    """一次采集的爬取设置；城市/薪资等筛选维度仍走 `search_filter`。
 
-    来源现在是二选一：``expect_kind`` 非空 → 期望流，空 → 搜索流。
-    ``use_search`` 是兼容字段（旧「推荐页」已移除），读到 ``False`` 会归一成
-    ``True`` 并留警告——库里不用迁移。
+    Attributes:
+        max_pages: 最多翻几页。
+        start_page: 起始页码（从 1 起）。
+        page_interval: 页间隔（秒）。
+        use_search: 兼容字段，恒为 `True`；旧 `False` = 已移除的「推荐页」。
+        fetch_details: 是否继续抓职位详情。
+        detail_interval: 详情条间隔（秒）。
+        store_blacklisted: 是否落库命中黑名单的职位。
+        expect_kind: 期望流类型；空 = 走搜索流。
+        encrypt_expect_id: 期望流主参数；搜索流时也回填。
+        mix_expect_type: 混合期望类型。
+        expect_info: 仅 `temp_expect` 用的 `expectInfo` JSON 串。
+        expect_name: 仅展示（jobs 页摘要），不进请求参数。
     """
 
     max_pages: int = 5
     start_page: int = 1
     page_interval: float = 1.0
-    #: 兼容字段，恒为 True。旧 false = 已移除的「推荐页」special/zone。
     use_search: bool = True
     fetch_details: bool = True
     detail_interval: float = 1.0
     store_blacklisted: bool = True
-    # 期望流（空 = 不启用，走搜索流）
-    expect_kind: str = ""            # "" | "recommend" | "part_time" | "expect" | "temp_expect"
-    encrypt_expect_id: str = ""      # 期望流主参数；搜索流时也回填（期望+关键词）
+    expect_kind: str = ""
+    encrypt_expect_id: str = ""
     mix_expect_type: str = ""
-    expect_info: str = ""            # 仅 temp_expect：expectInfo JSON 串
-    expect_name: str = ""            # 仅展示（jobs 页摘要），不进请求参数
-    # 城市/薪资/经验/学历/行业/规模等筛选维度**复用现有 search payload**，不另开字段
+    expect_info: str = ""
+    expect_name: str = ""
 
     def normalize(self) -> "CollectionConfig":
+        """夹紧数值区间、收干净字符串，并把旧「推荐页」配置改回搜索流。"""
         try:
             max_pages = int(self.max_pages)
         except (TypeError, ValueError):
@@ -59,7 +71,6 @@ class CollectionConfig:
             detail_interval = float(self.detail_interval)
         except (TypeError, ValueError):
             detail_interval = 1.0
-        # 旧「推荐页」配置（use_search=false）已移除：归一成搜索流并留警告
         use_search = bool(self.use_search)
         if not use_search:
             logger.warning("旧「推荐页」配置已移除，改用关键词搜索")
@@ -80,12 +91,21 @@ class CollectionConfig:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """归一化后转普通字典。"""
         return asdict(self.normalize())
 
 
 @dataclass(frozen=True)
 class CollectionSnapshot:
-    """One immutable task-start view of search, crawl settings, and rules."""
+    """任务启动时对搜索、采集设置与黑名单规则的一次不可变快照。
+
+    Attributes:
+        snapshot_id: 快照 id。
+        created_at: 生成时间（Unix 秒）。
+        search: 搜索条件 payload（camelCase）。
+        collection: 采集设置。
+        rules: 启用中的黑名单规则。
+    """
 
     snapshot_id: str
     created_at: float
@@ -94,6 +114,7 @@ class CollectionSnapshot:
     rules: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
+        """转普通字典，`rules` 摊成 list。"""
         return {
             "snapshot_id": self.snapshot_id,
             "created_at": self.created_at,
@@ -104,6 +125,11 @@ class CollectionSnapshot:
 
 
 def load_config(path: Path | str | None = None) -> CollectionConfig:
+    """读状态库里的采集配置；没有 / 坏了 → 默认配置（不报错）。
+
+    Args:
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+    """
     try:
         raw = boss_db.doc_get_raw(boss_db.DOC_COLLECTION_CONFIG, path)
     except (OSError, sqlite3.Error) as exc:
@@ -117,7 +143,6 @@ def load_config(path: Path | str | None = None) -> CollectionConfig:
         return CollectionConfig()
     if not isinstance(data, dict):
         return CollectionConfig()
-    # Accept both the flat document and the nested form used by newer clients.
     crawl = data.get("crawl") if isinstance(data.get("crawl"), dict) else data
     return CollectionConfig(
         max_pages=crawl.get("max_pages", 5),
@@ -127,7 +152,6 @@ def load_config(path: Path | str | None = None) -> CollectionConfig:
         fetch_details=crawl.get("fetch_details", True),
         detail_interval=crawl.get("detail_interval", 1.0),
         store_blacklisted=crawl.get("store_blacklisted", True),
-        # 向后兼容：旧库没这几把 key → 默认空串 → 不启用期望流，行为不变
         expect_kind=crawl.get("expect_kind", ""),
         encrypt_expect_id=crawl.get("encrypt_expect_id", ""),
         mix_expect_type=crawl.get("mix_expect_type", ""),
@@ -137,12 +161,27 @@ def load_config(path: Path | str | None = None) -> CollectionConfig:
 
 
 def save_config(cfg: CollectionConfig, path: Path | str | None = None) -> CollectionConfig:
+    """归一化后写回状态库。
+
+    Args:
+        cfg: 待保存的配置。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+
+    Returns:
+        归一化后的配置。
+    """
     normalized = cfg.normalize()
     boss_db.doc_set(boss_db.DOC_COLLECTION_CONFIG, normalized.to_dict(), path)
     return normalized
 
 
 def update_config(payload: dict[str, Any], path: Path | str | None = None) -> CollectionConfig:
+    """合并更新；`crawl` 子字典与顶层字段都接受。
+
+    Args:
+        payload: 要改的字段，可嵌在 `crawl` 下。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+    """
     current = load_config(path)
     data = current.to_dict()
     if isinstance(payload.get("crawl"), dict):
@@ -152,16 +191,26 @@ def update_config(payload: dict[str, Any], path: Path | str | None = None) -> Co
 
 
 def reset_config(path: Path | str | None = None) -> CollectionConfig:
+    """恢复默认采集配置。
+
+    Args:
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+    """
     return save_config(CollectionConfig(), path)
 
 
 def search_payload(f: JobSearchFilter) -> dict[str, Any]:
     """搜索条件的快照形状（与站点查询串对齐，camelCase）。
 
-    ``encryptExpectId`` 一并写出：「期望 + 关键词」组合下前端就是这么发的
-    （``onSearch`` 的 ``s.encryptExpectId = lastExpectId``）。期望流走
-    ``JobExpectFilter.from_search`` 时也从这份 payload 搬筛选维度——
-    **期望 id 在这里，不是单独一份**。
+    `encryptExpectId` 一并写出：期望 + 关键词组合下前端就是这么发的；
+    期望流走 `JobExpectFilter.from_search` 时也从这份 payload 搬筛选维度，
+    期望 id 不单独存一份。
+
+    Args:
+        f: 当前搜索筛选条件。
+
+    Returns:
+        camelCase 的搜索条件字典。
     """
     return {
         "query": f.query,
@@ -181,7 +230,14 @@ def search_payload(f: JobSearchFilter) -> dict[str, Any]:
 
 
 def load_snapshot(path: Path | str | None = None) -> CollectionSnapshot:
-    """Read current collection/search/rule state once for a worker."""
+    """给 worker 一次性读齐当前搜索、采集设置与启用中的黑名单规则。
+
+    Args:
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+
+    Returns:
+        不可变的任务启动快照。
+    """
     from .blacklist import list_enabled_rules
 
     f = load_search_filter(path)

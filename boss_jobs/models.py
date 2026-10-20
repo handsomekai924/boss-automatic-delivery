@@ -1,23 +1,8 @@
-"""职位的数据传输对象与**即时清洗**规则。
+"""职位的数据传输对象与即时清洗规则。
 
 对外只暴露 dataclass，屏蔽服务端返回结构的差异。清洗发生在
-:meth:`Job.from_api` / :func:`clean_page` 里——**每拿到一页就洗一页**，
-洗完的干净职位才入库，原始 item 原样挂在 ``raw_json`` 上便于追溯。
-
-todo.md 第四节要留的 8 个字段，与接口字段的对应：
-
-===========  ==================  =========================================
-todo.md      接口字段            说明
-===========  ==================  =========================================
-岗位名称     jobName             去多余空白
-公司名称     brandName           去多余空白
-工作地点     cityName + …        三段拼成「广州·天河区·棠下」，分量另存
-薪资待遇     salaryDesc          明文；顺带清掉防爬字体残留
-工作经验     jobExperience       缺了再从 jobLabels 里认
-学历要求     jobDegree           同上
-公司行业     brandIndustry
-公司规模     brandScaleName
-===========  ==================  =========================================
+`Job.from_api` / `clean_page` 里，每拿到一页就洗一页；原始 item 挂在
+`raw_json` 上便于追溯。字段对应与实测细节见 `notes/boss_jobs/models.md`。
 """
 
 from __future__ import annotations
@@ -29,16 +14,11 @@ from typing import Any, Iterable
 
 from . import config as C
 
-
-# --------------------------------------------------------------------------- #
-# 文本清洗小工具
-# --------------------------------------------------------------------------- #
-
 _WS_RE = re.compile(r"\s+")
 
 
 def clean_text(value: Any) -> str:
-    """去掉首尾空白、把连续空白压成一个空格。``None`` → 空串。"""
+    """去掉首尾空白、把连续空白压成一个空格。`None` → 空串。"""
     if value is None:
         return ""
     if not isinstance(value, str):
@@ -49,9 +29,7 @@ def clean_text(value: Any) -> str:
 def decode_salary_font(value: Any) -> str:
     """把防爬字体的私有区数字还原成 0-9。
 
-    映射来自 chunk 的 ``S=["&#xe031;",…,"&#xe03a;"]``（下标即数字）。
-    JSON 接口回的 ``salaryDesc`` 已经是明文，这里只处理 HTML 兜底解析
-    和历史脏数据里可能出现的两种写法：``&#xe031;`` 与 ``\\ue031``。
+    JSON 接口回的 `salaryDesc` 已是明文，这里只处理 HTML 兜底与历史脏数据。
     """
     text = clean_text(value)
     if not text:
@@ -90,10 +68,7 @@ _BLANK_RUN_RE = re.compile(r"\n{3,}")
 def clean_desc(value: Any) -> str:
     """职位描述正文：HTML 转纯文本 + 压多余空行。
 
-    ``postDescription`` 在网页上是富文本，接口回的可能是 HTML 也可能是纯文本，
-    这里先按 HTML 剥标签（``<br>`` / 块级收尾当换行），再把连续空行压成一行。
-    **不**用 :func:`clean_text` 那种「全压成单空格」——JD 的换行是有结构的
-    （职责/要求分段），压平了后面匹配页没法读。
+    保留换行结构（职责/要求分段），不像 `clean_text` 全压成单空格。
     """
     if value is None:
         return ""
@@ -115,35 +90,45 @@ def clean_desc(value: Any) -> str:
     return text.strip()
 
 
-# --------------------------------------------------------------------------- #
-# 职位
-# --------------------------------------------------------------------------- #
-
-
 @dataclass(frozen=True)
 class Job:
-    """一条清洗后的职位。字段顺序对应 todo.md 第四节的 8 项。"""
+    """一条清洗后的职位。字段分三截：todo.md 那 8 项、主键追溯、接口顺带回的杂项。
 
-    # ---- todo.md 列出的 8 项 ----
-    job_name: str                 # 岗位名称
-    brand_name: str               # 公司名称
-    location: str                 # 工作地点（三段拼好的）
-    salary_desc: str              # 薪资待遇
-    job_experience: str           # 工作经验要求
-    job_degree: str               # 学历要求
-    brand_industry: str           # 公司行业
-    brand_scale_name: str         # 公司规模
+    地点分量在拼好的 `location` 之外另存，方便按区筛。
 
-    # ---- 主键与追溯 ----
-    encrypt_job_id: str           # 职位加密 id，全站唯一，入库主键
-    raw_json: str = ""            # 原始 item，清洗前后可对照
+    Attributes:
+        location: 工作地点（`cityName` + `areaDistrict` + `businessDistrict` 三段拼好）。
+        salary_desc: 薪资待遇；顺带清掉防爬字体残留。
+        job_experience: 工作经验要求；接口偶发为空时从 `jobLabels` 前两位认。
+        job_degree: 学历要求；同上。
+        encrypt_job_id: 职位加密 id，全站唯一，入库主键。
+        raw_json: 原始 item，清洗前后可对照。
+        lid: 列表页 lid。
+        security_id: 详情接口用的 securityId。
+        page: 这条是从第几页捞的（入库后才有意义）。
+        job_desc: 职位描述（JD 正文）；列表接口不回，靠 `JobClient.fetch_job_detail` 逐条补。
+        detail_fetched_at: 详情抓取时间（`%Y-%m-%d %H:%M:%S`）；空串 = 还没抓过。
+        jd_status: 详情处理状态：pending / collecting / completed / empty / failed / unchecked。
+        is_blacklisted: 当前规则评估结果；历史分析另存自己的不可变快照。
+        last_greeted_at: 最近一次「发招呼语」成功时间；30 天冷却的唯一岗位级依据，抓取 UPSERT 不覆盖。
+    """
 
-    # ---- 地点分量（拼好之外另存，方便按区筛）----
+    job_name: str
+    brand_name: str
+    location: str
+    salary_desc: str
+    job_experience: str
+    job_degree: str
+    brand_industry: str
+    brand_scale_name: str
+
+    encrypt_job_id: str
+    raw_json: str = ""
+
     city_name: str = ""
     area_district: str = ""
     business_district: str = ""
 
-    # ---- 接口顺带回的，todo.md 没列但先收下 ----
     brand_stage_name: str = ""
     job_labels: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
@@ -156,20 +141,14 @@ class Job:
     security_id: str = ""
     lid: str = ""
 
-    #: 这条是从第几页捞的（入库后才有意义）
     page: int = 0
 
-    #: 职位描述（JD 正文）。列表接口不回，靠 :meth:`JobClient.fetch_job_detail`
-    #: 逐条补；没抓过就是空串。
     job_desc: str = ""
-    #: 详情抓取时间（ISO 风格 ``%Y-%m-%d %H:%M:%S``）；空串 = 还没抓过。
     detail_fetched_at: str = ""
-    #: 详情处理状态：pending / collecting / completed / empty / failed / unchecked。
     jd_status: str = "pending"
     jd_error: str = ""
     jd_rule_checked: bool = False
     jd_rule_checked_at: str = ""
-    #: 当前规则评估结果；历史分析另存自己的不可变快照。
     is_blacklisted: bool = False
     company_blacklisted: bool = False
     jd_blacklisted: bool = False
@@ -178,13 +157,19 @@ class Job:
     matched_rule_snapshot: tuple[dict[str, Any], ...] = ()
     blacklist_checked_at: str = ""
     auto_delivery_blocked: bool = True
-    #: 最近一次「发招呼语」成功时间（``%Y-%m-%d %H:%M:%S``）；空串 = 从未发送。
-    #: 30 天发送冷却的唯一岗位级依据；抓取 UPSERT 不覆盖这一列。
     last_greeted_at: str = ""
 
     @classmethod
     def from_api(cls, item: dict[str, Any], *, page: int = 0) -> "Job":
-        """从接口的 jobList 元素构造。**不负责校验**，校验在 :func:`clean_page`。"""
+        """从接口的 jobList 元素构造。不负责校验，校验在 `clean_page`。
+
+        Args:
+            item: 接口返回的单条职位。
+            page: 来源页码。
+
+        Returns:
+            构造好的职位。
+        """
         if not isinstance(item, dict):
             raise TypeError(f"职位不是对象: {type(item).__name__}")
 
@@ -195,8 +180,6 @@ class Job:
         experience = clean_text(item.get("jobExperience"))
         degree = clean_text(item.get("jobDegree"))
         labels = as_str_list(item.get("jobLabels"))
-        # jobExperience/jobDegree 偶发为空，退而从 jobLabels 的前两位认
-        # （推荐页的 tag-list 顺序就是「经验 · 学历 · 技能…」）。
         if not experience and labels:
             experience = labels[0]
         if not degree and len(labels) > 1:
@@ -237,11 +220,7 @@ class Job:
 
     @property
     def encrypt_boss_id(self) -> str:
-        """打招呼要用的 ``encryptBossId``（招聘方加密 id）。
-
-        列表接口回的字段里就有，但 todo.md 那张表没列它，所以**不单开列**——
-        需要时从 :attr:`raw_json` 现读（见 todo.md 3.1 A1）。
-        """
+        """打招呼要用的 `encryptBossId`；不单开列，需要时从 `raw_json` 现读。"""
         if not self.raw_json:
             return ""
         try:
@@ -271,7 +250,16 @@ class Job:
 
 @dataclass(frozen=True)
 class PageResult:
-    """一页的清洗结果。``dropped`` 是被丢掉的原始条数与原因。"""
+    """一页的清洗结果。
+
+    Attributes:
+        page: 页码。
+        jobs: 洗后的职位。
+        has_more: 接口是否还有下一页。
+        raw_count: 原始条数。
+        dropped: 被丢掉的原因列表。
+        lid: 列表页 lid。
+    """
 
     page: int
     jobs: tuple[Job, ...] = ()
@@ -282,27 +270,27 @@ class PageResult:
 
     @property
     def dropped_count(self) -> int:
+        """被丢掉的条数。"""
         return self.raw_count - len(self.jobs)
 
     @property
     def is_empty(self) -> bool:
+        """本页是否洗后为空。"""
         return not self.jobs
 
 
-# --------------------------------------------------------------------------- #
-# 页级清洗
-# --------------------------------------------------------------------------- #
-
-
 def clean_page(payload: dict[str, Any], *, page: int) -> PageResult:
-    """把一页响应洗成 :class:`PageResult`。
+    """把一页响应洗成 `PageResult`。
 
-    做的事（**同步、立刻**，不缓存原始响应）：
+    同步清洗：取 jobList、丢掉缺主键/岗位名/公司名的、同页按
+    `encrypt_job_id` 去重，并记下丢弃原因。
 
-    1. 取 ``zpData.jobList``；
-    2. 逐条 :meth:`Job.from_api`，丢掉缺主键/岗位名/公司名的；
-    3. 同页内按 ``encrypt_job_id`` 去重（接口偶尔会在相邻页重推）；
-    4. 记下丢弃原因，供 CLI 报告「本页 15 条，洗后 13 条」。
+    Args:
+        payload: 列表接口响应。
+        page: 页码。
+
+    Returns:
+        一页的清洗结果。
     """
     data = payload.get("zpData")
     if data is None:
@@ -354,35 +342,29 @@ def clean_pages(pages: Iterable[dict[str, Any]]) -> tuple[Job, ...]:
     return tuple(out)
 
 
-# --------------------------------------------------------------------------- #
-# 求职期望列表（recommend/expect/list.json）
-# --------------------------------------------------------------------------- #
-
-
 @dataclass(frozen=True)
 class ExpectItem:
-    """一条求职期望。``encrypt_expect_id`` 是**统一出口**，底层键名不对称：
+    """一条求职期望。
 
-    - ``expectList[]`` 用 ``encryptId``
-    - ``partTimeExpectList[]`` / ``mixExpect`` 用 ``encryptExpectId``
+    `encrypt_expect_id` 是统一出口；底层键名不对称，解析时两个键名都认。
 
-    **实测（2026-10-13，本账号有期望后复测）**：``expectList[]`` 真的是
-    ``encryptId``（数字 id 叫 ``id``），``partTimeExpectList[]`` 真的是
-    ``encryptExpectId``（数字 id 叫 ``expectId``）——不对称**实锤**，不是猜的。
-    解析时两个键名都认（见 :func:`clean_expects`）：``mixExpect`` 本账号仍是
-    ``null``，那一侧的键名还没被真数据定案，双键兜底继续留着。
-    ``location_name`` 是显示名（「佛山」）；``location_code`` 是混合期望里的
-    ``location``——前端把它当 **city code** 送进 ``getFormData().city``（推荐
-    tab 定位混合期望用），两者不是一回事，别混。
+    Attributes:
+        kind: mix / expect / part_time。
+        encrypt_expect_id: 加密期望 id；mix/part_time 用 encryptExpectId，expect 用 encryptId。
+        position_name: 期望职位名。
+        location_name: 显示名（如「佛山」）。
+        tag_name: 标签名。
+        mix_expect_type: 混合期望类型（仅 mix 有）。
+        location_code: 混合期望的 city code（仅 mix 用得上）。
     """
 
-    kind: str                 # "mix" | "expect" | "part_time"
-    encrypt_expect_id: str    # 统一出口：mix/part_time 用 encryptExpectId，expect 用 encryptId
+    kind: str
+    encrypt_expect_id: str
     position_name: str
     location_name: str = ""
     tag_name: str = ""
-    mix_expect_type: str = ""  # 仅 mix 有
-    location_code: str = ""    # 仅 mix 用得上（= 前端 mixLocation → city）
+    mix_expect_type: str = ""
+    location_code: str = ""
 
     @property
     def label(self) -> str:
@@ -394,7 +376,13 @@ class ExpectItem:
 
 @dataclass(frozen=True)
 class ExpectList:
-    """账号的期望集合：混合期望（推荐 tab）+ 我的期望 + 兼职期望。"""
+    """账号的期望集合：混合期望（推荐 tab）+ 我的期望 + 兼职期望。
+
+    Attributes:
+        mix: 混合期望。
+        expects: 我的期望列表。
+        part_time: 兼职期望列表。
+    """
 
     mix: ExpectItem | None = None
     expects: tuple[ExpectItem, ...] = ()
@@ -412,17 +400,9 @@ class ExpectList:
 
 
 def _expect_item(raw: Any, kind: str) -> ExpectItem | None:
-    """把一条原始期望对象洗成 :class:`ExpectItem`；认不出就丢。
+    """把一条原始期望对象洗成 `ExpectItem`；认不出就丢。
 
-    **字段名不对称**是前端真实行为（chunk ``job~0.0c757050.js``
-    ``clickItemAction`` / ``partTimeExpectList``）：``expectList[]`` 的 id 叫
-    ``encryptId``，另两类叫 ``encryptExpectId``。**实测（2026-10-13，有期望后
-    复测）**：``expectList[]`` 响应里真的只有 ``encryptId``（数字 id 叫 ``id``），
-    ``partTimeExpectList[]`` 真的只有 ``encryptExpectId``（数字 id 叫
-    ``expectId``）。这里仍然两个键名都认——``mixExpect`` 那侧还没验到，免得
-    接口侧字段名一变就整批丢。地点也有两副面孔：``locationName``
-    是显示名（「佛山」），``location`` 是混合期望的 **city code**（前端
-    ``getFormData().city = mixLocation``）。
+    字段名不对称（encryptId / encryptExpectId）两个键名都认。
     """
     if not isinstance(raw, dict):
         return None
@@ -446,19 +426,7 @@ def _expect_item(raw: Any, kind: str) -> ExpectItem | None:
 
 
 def clean_expects(payload: dict) -> ExpectList:
-    """把期望列表响应洗成 :class:`ExpectList`。
-
-    响应形状（**2026-10-13 本账号有期望后实测**：``expectList`` 1 条 /
-    ``partTimeExpectList`` 4 条 / ``mixExpect`` 仍 ``null``）::
-
-        {"code": 0, "zpData": {
-            "mixExpect": {"encryptExpectId": "...", "mixExpectType": "...",
-                          "positionName": "...", "locationName": "..."},
-            "expectList": [{"encryptId": "...", "id": 1098941709,
-                            "positionName": "...", "location": 101280800}],
-            "partTimeExpectList": [{"encryptExpectId": "...", "expectId": 1174275776,
-                                    "positionName": "...", "type": 0}]
-        }}
+    """把期望列表响应洗成 `ExpectList`。
 
     缺字段、类型不对一律按空处理，不抛——账号没配兼职期望是常态。
     """
@@ -472,6 +440,7 @@ def clean_expects(payload: dict) -> ExpectList:
     mix = _expect_item(mix_raw, "mix") if isinstance(mix_raw, dict) else None
 
     def _collect(key: str, kind: str) -> tuple[ExpectItem, ...]:
+        """收集列表字段为期望元组。"""
         items = data.get(key)
         if not isinstance(items, list):
             return ()
@@ -488,9 +457,7 @@ def clean_expects(payload: dict) -> ExpectList:
 def extract_job_desc(payload: dict[str, Any]) -> str:
     """从详情响应里抠出 JD 正文并清洗。
 
-    **实测**（2026-10-08）：正文在 ``zpData.jobInfo.postDescription``，
-    纯文本（带 ``\\n``），不是 HTML。顶层 ``zpData.postDescription`` 没有这格。
-    这里按实测路径优先，再兜几个同义位置，万一以后包一层也不用改。
+    优先 `zpData.jobInfo.postDescription`，再兜几个同义位置。
     """
     data = payload.get("zpData")
     if data is None:
@@ -510,18 +477,15 @@ def extract_job_desc(payload: dict[str, Any]) -> str:
     return ""
 
 
-# --------------------------------------------------------------------------- #
-# 小工具
-# --------------------------------------------------------------------------- #
-
-
 def _as_str(value: Any) -> str:
+    """任意值转干净字符串；`None` → 空串。"""
     if value is None:
         return ""
     return clean_text(value) if isinstance(value, str) else str(value)
 
 
 def _as_int(value: Any, *, default: int = 0) -> int:
+    """任意值转 int；`None` 或转不动就回默认。"""
     if value is None:
         return default
     try:

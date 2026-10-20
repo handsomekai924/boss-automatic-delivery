@@ -1,9 +1,9 @@
-"""P3 实测校准：把「求职期望流」五个待定点一次打清楚（见 docs/job-expect-flow-plan.md §七）。
+"""P3 实测校准：把「求职期望流」五个待定点一次打清楚（见 `notes/boss_filter/expect.md`）。
 
-只打**只读列表**接口（expect/list、recommend/job/list、search/joblist），不发消息、
+只打只读列表接口（expect/list、recommend/job/list、search/joblist），不发消息、
 不改账号状态。每次探针都把原始 code / zpData 顶层键打出来，方便对着注释回填。
 
-用法::
+用法：
 
     python tools/probe_expect.py                 # 全套五点
     python tools/probe_expect.py --only auth     # 只打第 1 点（expect/list 鉴权）
@@ -52,6 +52,7 @@ def _brief(payload: Any, *, keys: int = 12) -> dict[str, Any]:
 
 
 def _sample_items(payload: Any, name: str, limit: int = 3) -> list[dict[str, Any]]:
+    """从响应列表里抽样例，只留 id / 名称类字段。"""
     zp = (payload or {}).get("zpData") if isinstance(payload, dict) else None
     if not isinstance(zp, dict):
         return []
@@ -71,21 +72,32 @@ def _sample_items(payload: Any, name: str, limit: int = 3) -> list[dict[str, Any
 
 
 class Probe:
+    """收集探针记录与结论。
+
+    Attributes:
+        rows: 各探针点的原始记录。
+        findings: 结论列表。
+    """
+
     def __init__(self) -> None:
+        """初始化。"""
         self.rows: list[dict[str, Any]] = []
         self.findings: list[str] = []
 
     def note(self, text: str) -> None:
+        """记一条结论并打印。"""
         self.findings.append(text)
         print(f"  → {text}")
 
     def record(self, point: str, **kwargs: Any) -> None:
+        """记一条探针原始结果并打印。"""
         row = {"point": point, **kwargs}
         self.rows.append(row)
         print(f"  [{point}] {json.dumps(kwargs, ensure_ascii=False)[:400]}")
 
 
 def main() -> int:
+    """跑求职期望流探针并打印报告。"""
     parser = argparse.ArgumentParser(description="P3 实测校准探针（只读）")
     parser.add_argument("--only", help="只打某一点：auth / ids / searchctx / parttime / method")
     parser.add_argument("--skip-stoken", action="store_true", help="不拉 Chrome，只用库里已有的令牌")
@@ -102,7 +114,7 @@ def main() -> int:
     print(f"会话已装配，base={client.base_url}")
 
     def strip_cookie(name: str) -> None:
-        """同名 cookie 先清再写的老坑：这里要**摘掉**令牌，得按名清干净。"""
+        """按名清干净同名 cookie（摘掉令牌时用）。"""
         jar = getattr(http, "cookies", None)
         if jar is None:
             return
@@ -114,20 +126,17 @@ def main() -> int:
                     pass
 
     def want(name: str) -> bool:
+        """本轮要不要打这个探针点。"""
         return args.only in (None, name)
 
-    # ------------------------------------------------------------------ #
-    # 点 1 + 2：expect/list.json 的鉴权 & 三类期望的真实字段名
-    # ------------------------------------------------------------------ #
     if want("auth") or want("ids"):
         print("\n=== 点 1/2：GET /pc/recommend/expect/list.json ===")
         path = client.endpoints["job_expect_list"]
-        # 先**不带** __zp_stoken__ 打一发（点 1）
         from boss_jobs import STOKEN_COOKIE
         saved_stoken = client._get_cookie(STOKEN_COOKIE)
         saved_provider = client.stoken_provider
         strip_cookie(STOKEN_COOKIE)
-        client.stoken_provider = None  # 别让 _ensure_stoken 又给塞回去
+        client.stoken_provider = None
         try:
             raw = client._get_json(path, params={}, action="探针-期望列表-无令牌")
             probe.record("auth/no-stoken", **_brief(raw))
@@ -144,7 +153,6 @@ def main() -> int:
             probe.record("auth/no-stoken", error=str(exc))
             probe.note(f"点1：无令牌抛 {type(exc).__name__}")
 
-        # 带令牌再打一发
         if saved_stoken:
             from boss_jobs.stoken import put_cookie
             put_cookie(getattr(http, "cookies", None), STOKEN_COOKIE, saved_stoken)
@@ -172,9 +180,6 @@ def main() -> int:
             probe.record("ids/raw", error=str(exc), code=getattr(exc, "code", None))
             probe.note(f"点2：拉期望列表失败 {exc}")
 
-    # ------------------------------------------------------------------ #
-    # 点 5：期望流 / 搜索流 GET vs POST
-    # ------------------------------------------------------------------ #
     if want("method"):
         print("\n=== 点 5：GET vs POST ===")
         print("  （GET 走生产的 stoken 重试；裸 _request_json 不 _ensure_stoken，会把 37 误判成「方法不行」）")
@@ -185,7 +190,6 @@ def main() -> int:
                 params.update({"encryptExpectId": "PROBE", "jobType": "1903"})
             else:
                 params.update({"query": "python", "scene": "1"})
-            # GET：走生产的 stoken 重试（先 _ensure_stoken，撞 37 还会退避换新）
             try:
                 payload = client._get_json_with_stoken_retry(
                     path, params=params, action=f"探针-{label}-GET",
@@ -193,7 +197,6 @@ def main() -> int:
                 probe.record(f"method/{key}/GET", **_brief(payload))
             except Exception as exc:  # noqa: BLE001
                 probe.record(f"method/{key}/GET", error=f"{type(exc).__name__}: {exc}")
-            # POST：同一枚令牌，只为确认服务端认不认 POST
             try:
                 payload = client._request_json(
                     "POST", path, params=params, data=params,
@@ -203,9 +206,6 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 probe.record(f"method/{key}/POST", error=f"{type(exc).__name__}: {exc}")
 
-    # ------------------------------------------------------------------ #
-    # 点 3 + 4：期望流 / 搜索流的真实参数（有期望 id 才有意义）
-    # ------------------------------------------------------------------ #
     if want("searchctx") or want("parttime"):
         print("\n=== 点 3/4：期望上下文与兼职参数（需要库里有期望 id）===")
         try:
@@ -229,8 +229,6 @@ def main() -> int:
                         **extra,
                     }
                     try:
-                        # 走生产路径的 stoken 重试——裸 _get_json 不 _ensure_stoken，
-                        # 会把「缺令牌」误判成「参数不行」
                         payload = client._get_json_with_stoken_retry(
                             client.endpoints["job_expect_flow"], params=params,
                             action=f"探针-兼职-{sorted(extra)}",
@@ -241,7 +239,7 @@ def main() -> int:
                         probe.record(f"parttime/{'with' if extra else 'only'}", code=getattr(exc, "code", None), error=str(exc))
                     except JobError as exc:
                         probe.record(f"parttime/{'with' if extra else 'only'}", error=str(exc))
-                    time.sleep(1.0)  # 隔开两发，免得被安全网关当过频连环 37
+                    time.sleep(1.0)
                 probe.note("点4：上面 with/only 两发对比——若 only 就 code 0 且有职位，服务端不要 partTimeExpect")
 
             if want("searchctx") and (ex is not None or mix is not None):
@@ -266,7 +264,7 @@ def main() -> int:
                         probe.record(f"searchctx/{label}", code=getattr(exc, "code", None), error=str(exc))
                     except JobError as exc:
                         probe.record(f"searchctx/{label}", error=str(exc))
-                    time.sleep(1.0)  # 隔开两发，免得被安全网关当过频连环 37
+                    time.sleep(1.0)
                 if seen.get("no-ctx") and seen.get("with-ctx"):
                     a, b = seen["no-ctx"], seen["with-ctx"]
                     overlap = set(a) & set(b)

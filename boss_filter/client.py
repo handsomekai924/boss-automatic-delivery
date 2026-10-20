@@ -1,7 +1,7 @@
 """筛选条件的线上接口客户端。
 
-调的是真实 wapi 路径（见 :mod:`boss_filter.config`），不是界面模拟。
-登录态复用 ``boss_login`` 落盘的 Cookie：筛选接口本身不强制登录，
+调的是真实 wapi 路径（见 `boss_filter.config`），不是界面模拟。
+登录态复用 `boss_login` 落盘的 Cookie：筛选接口本身不强制登录，
 但带上登录态能拿到定位城市、也更接近浏览器真实流量。
 """
 
@@ -33,13 +33,15 @@ logger = logging.getLogger(__name__)
 class FilterClient:
     """筛选条件客户端。
 
-    :param base_url: 站点地址
-    :param endpoints: 覆盖 :data:`config.ENDPOINTS` 里的路径（探路/测试用）
-    :param http: 带 ``request()`` 的会话对象，默认新建 ``requests.Session``
-    :param timeout: 单次请求超时（秒）
-    :param retries: 失败重试次数（网络层 / 5xx）
-    :param backoff: 重试退避基数（秒），按 2 的幂递增
-    :param sleeper: 可替换的 sleep（测试里注入 no-op）
+    Args:
+        base_url: 站点地址。
+        endpoints: 覆盖 `config.ENDPOINTS` 里的路径（探路/测试用）。
+        http: 带 `request()` 的会话对象，默认新建 `requests.Session`。
+        timeout: 单次请求超时（秒）。
+        retries: 失败重试次数（网络层 / 5xx）。
+        backoff: 重试退避基数（秒），按 2 的幂递增。
+        headers: 额外请求头。
+        sleeper: 可替换的 sleep（测试里注入 no-op）。
     """
 
     def __init__(
@@ -54,6 +56,7 @@ class FilterClient:
         headers: Mapping[str, str] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
+        """初始化。"""
         self.base_url = base_url.rstrip("/")
         self.endpoints = {**C.ENDPOINTS, **(endpoints or {})}
         self.timeout = timeout
@@ -65,22 +68,14 @@ class FilterClient:
         merged = {**C.DEFAULT_HEADERS, **(headers or {})}
         if hasattr(self._http, "headers"):
             self._http.headers.update(merged)
-        else:  # 简易假会话：退化成每次请求都带
+        else:
             self._default_headers = merged
-
-    # ------------------------------------------------------------------ #
-    # 对外入口
-    # ------------------------------------------------------------------ #
 
     def get_filter_conditions(self, *, use_fallback: bool = True) -> FilterConditions:
         """拿齐 todo.md 列的 7 类筛选条件。
 
-        策略：
-          1. 条件接口 → 求职类型/薪资/经验/学历/规模（+3 个辅助维度）
-          2. 城市接口 → 城市树 + 热点城市
-          3. 公司行业 → 写死表（接口侧没有这张表，见 config）
-          4. 任一步失败：``use_fallback`` 为真时用写死表补齐该步，
-             并记进 ``FilterConditions.degraded``；为假则把异常抛出去。
+        条件接口、城市接口、行业接口依次取；任一步失败且 `use_fallback`
+        为真时用写死表补齐，并记进 `FilterConditions.degraded`。
         """
         degraded: dict[str, str] = {}
         parts: dict[str, Any] = {}
@@ -143,8 +138,7 @@ class FilterClient:
     def fetch_conditions(self) -> dict[str, tuple]:
         """打条件接口，返回模型字段名 → 选项元组。
 
-        主力路由是 ``pc/all/filter/conditions.json``；它 404/异常时依次降级到
-        推荐页、搜索页那两份（字段子集不同，缺的维度不补）。
+        主力路由 404/异常时依次降级到推荐页、搜索页那两份（缺的维度不补）。
         """
         last_error: FilterError | None = None
         for key in ("conditions", "recommend_conditions", "search_condition"):
@@ -161,7 +155,7 @@ class FilterClient:
         raise last_error
 
     def fetch_cities(self) -> dict[str, tuple]:
-        """打城市接口，返回 ``cities``（省→市→区树）和 ``hot_cities``。"""
+        """打城市接口，返回 `cities`（省→市→区树）和 `hot_cities`。"""
         payload = self._get_json(self.endpoints["city"], action="城市接口")
         data = _zpdata(payload)
         cities = tuple(
@@ -181,15 +175,15 @@ class FilterClient:
         return options
 
     def fetch_default_city(self) -> dict[str, Any]:
-        """默认城市（站点当前城市）。原样返回 ``zpData.city``。"""
+        """默认城市（站点当前城市）。原样返回 `zpData.city`。"""
         payload = self._get_json(self.endpoints["default_city"], action="默认城市接口")
         return _zpdata(payload).get("city") or {}
 
     def fetch_industries(self) -> tuple[IndustryGroup, ...]:
         """打行业接口，返回分组树（15 组 + 134 子项，code 为 1000xx）。
 
-        接口路径 ``/wapi/zpCommon/data/industry.json``，不需要登录态。
-        ``zpData`` 直接是分组列表（不是 dict）。
+        接口路径 `/wapi/zpCommon/data/industry.json`，不需要登录态。
+        `zpData` 直接是分组列表（不是 dict）。
         """
         payload = self._get_json(self.endpoints["industry"], action="行业接口")
         raw = payload.get("zpData", payload.get("data"))
@@ -211,11 +205,8 @@ class FilterClient:
             raise FilterDataError("行业接口返回的分组为空")
         return tuple(groups)
 
-    # ------------------------------------------------------------------ #
-    # 传输层
-    # ------------------------------------------------------------------ #
-
     def _get_json(self, path: str, *, action: str = "") -> dict[str, Any]:
+        """GET 一条 wapi 路径，返回业务码成功的 JSON 对象。"""
         url = self.base_url + path
         headers = getattr(self, "_default_headers", None)
         last_error: Exception | None = None
@@ -262,21 +253,10 @@ class FilterClient:
         raise last_error or FilterTransportError(f"{action or path} 请求失败")
 
 
-# --------------------------------------------------------------------------- #
-# 响应解析
-# --------------------------------------------------------------------------- #
-
-
 def parse_conditions_payload(payload: Mapping[str, Any]) -> dict[str, tuple]:
-    """把 ``conditions.json`` 的 ``zpData`` 映射成模型字段。
+    """把 `conditions.json` 的 `zpData` 映射成模型字段。
 
-    线上形状（2026-09-30 实测）::
-
-        zpData: {jobTypeList, salaryList, experienceList, degreeList,
-                 scaleList, payTypeList, stageList, partTimeList}
-
-    ``search/job/condition.json`` 是子集（salary 无 low/high，有的版本没 stage），
-    缺的键按空元组处理，不让它把整次请求拖垮。
+    缺的键按空元组处理；`zpData` 里没有任何筛选项时抛 `FilterDataError`。
     """
     data = _zpdata(payload)
     if not data:
@@ -294,8 +274,7 @@ def parse_conditions_payload(payload: Mapping[str, Any]) -> dict[str, tuple]:
 def load_industries() -> tuple[IndustryGroup, ...]:
     """公司行业的写死兜底表。
 
-    在线时优先走 :meth:`FilterClient.fetch_industries`（``/wapi/zpCommon/data/industry.json``）；
-    接口挂掉才退到这里。表本身已与线上接口对齐（2026-10-19）。
+    在线时优先走 `FilterClient.fetch_industries`；接口挂掉才退到这里。
     """
     return tuple(
         IndustryGroup(name=name, options=options_from_rows(rows))
@@ -312,9 +291,10 @@ def get_filter_conditions(
 ) -> FilterConditions:
     """一步拿齐筛选条件。
 
-    :param use_fallback: 接口挂掉时是否用写死表补齐
-    :param html_path: 给定后优先解析这份已保存 HTML（完全不打接口），
-        用于离线环境或校对写死表
+    Args:
+        use_fallback: 接口挂掉时是否用写死表补齐。
+        html_path: 给定后优先解析这份已保存 HTML（完全不打接口）。
+        client: 复用已有客户端。
     """
     if html_path is not None:
         return conditions_from_html(html_path)
@@ -324,12 +304,8 @@ def get_filter_conditions(
     return client.get_filter_conditions(use_fallback=use_fallback)
 
 
-# --------------------------------------------------------------------------- #
-# 小工具
-# --------------------------------------------------------------------------- #
-
-
 def _zpdata(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """取出 `zpData`（或兼容的 `data`）字段；形状不对时返回空 dict。"""
     data = payload.get("zpData")
     if data is None:
         data = payload.get("data")
@@ -337,6 +313,7 @@ def _zpdata(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _biz_code(payload: Mapping[str, Any]) -> int:
+    """取出业务码；解析不出来时返回 -1。"""
     raw = payload.get("code", payload.get("status", C.CODE_OK))
     try:
         return int(raw)

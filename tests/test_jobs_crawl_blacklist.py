@@ -1,7 +1,7 @@
-"""采集链路的黑名单集成测试：走完整的 ``JobClient.crawl``。
+"""采集链路的黑名单集成测试：走完整的 `JobClient.crawl`。
 
-规矩：假 HTTP 会话，不打真站点；隔离库。验的是**顺序**——
-公司规则在详情之前、JD 规则在详情之后、``store_blacklisted=false`` 连入库都不做。
+规矩：假 HTTP 会话，不打真站点；隔离库。验的是顺序——
+公司规则在详情之前、JD 规则在详情之后、`store_blacklisted=false` 连入库都不做。
 """
 
 from __future__ import annotations
@@ -12,29 +12,32 @@ from boss_jobs.client import CrawlBlacklistContext, JobClient
 from boss_jobs.store import JobStore
 
 
-# --------------------------------------------------------------------------- #
-# 假 HTTP / 页面脚本
-# --------------------------------------------------------------------------- #
-
-
 class FakeResponse:
+    """假 HTTP 响应。"""
+
     def __init__(self, payload=None) -> None:
+        """初始化。"""
         self.status_code = 200
         self._payload = payload
         self.text = ""
 
     def json(self):
+        """返回预置的 JSON 载荷。"""
         return self._payload
 
 
 class FakeHttp:
+    """假 HTTP 会话：按序吐预置响应并记下调用。"""
+
     def __init__(self, responses) -> None:
+        """初始化。"""
         self._responses = list(responses)
         self.calls: list[dict] = []
         self.headers: dict[str, str] = {}
         self.cookies = None
 
     def request(self, method, url, **kwargs):
+        """记一次请求并返回下一个预置响应。"""
         self.calls.append({"method": method, "url": url, **kwargs})
         if not self._responses:
             raise AssertionError(f"没有预置响应可给，却收到第 {len(self.calls)} 次请求：{url}")
@@ -45,6 +48,7 @@ class FakeHttp:
 
 
 def api_item(encrypt_job_id: str, *, job_name: str = "Python 开发", brand_name: str = "甲公司", **overrides) -> dict:
+    """造一条列表接口的职位项。"""
     item = {
         "encryptJobId": encrypt_job_id,
         "jobName": job_name,
@@ -57,14 +61,17 @@ def api_item(encrypt_job_id: str, *, job_name: str = "Python 开发", brand_name
 
 
 def ok_page(items, *, has_more: bool = False) -> dict:
+    """造一页成功的职位列表响应。"""
     return {"code": 0, "message": "Success", "zpData": {"jobList": items, "hasMore": has_more}}
 
 
 def detail_ok(desc: str) -> dict:
+    """造一条成功的详情响应。"""
     return {"code": 0, "zpData": {"jobInfo": {"postDescription": desc}}}
 
 
 def hit(rule_id: str, rule_type: str, *, pattern: str, matched_text: str, source: str = "brand_name") -> dict:
+    """造一条规则命中记录。"""
     return {
         "rule_id": rule_id,
         "rule_type": rule_type,
@@ -76,7 +83,10 @@ def hit(rule_id: str, rule_type: str, *, pattern: str, matched_text: str, source
 
 
 def company_matcher(pattern: str):
+    """造一个按公司名匹配的 company_matches 钩子。"""
+
     def match(job) -> list[dict[str, Any]]:
+        """公司名包含 pattern 时命中。"""
         if pattern and pattern in (job.brand_name or ""):
             return [hit("r-co", "company", pattern=pattern, matched_text=job.brand_name)]
         return []
@@ -85,7 +95,10 @@ def company_matcher(pattern: str):
 
 
 def jd_matcher(pattern: str):
+    """造一个按岗位名/正文匹配的 jd_matches 钩子。"""
+
     def match(job, desc: str) -> list[dict[str, Any]]:
+        """岗位名或正文包含 pattern 时命中。"""
         hits: list[dict[str, Any]] = []
         if pattern and pattern in (job.job_name or ""):
             hits.append(hit("r-jd", "jd_keyword", pattern=pattern, matched_text=job.job_name, source="job_name"))
@@ -97,18 +110,21 @@ def jd_matcher(pattern: str):
 
 
 def empty_matcher(job, desc: str = "") -> list[dict[str, Any]]:
+    """永不命中的匹配器。"""
     return []
 
 
 class RecordingContext:
-    """把 ``record_hit`` 的调用记下来，好断言审计动作（stored / skipped）。"""
+    """把 `record_hit` 的调用记下来，好断言审计动作（stored / skipped）。"""
 
     def __init__(self, **kwargs) -> None:
+        """初始化。"""
         self.hits: list[dict[str, Any]] = []
         kwargs.setdefault("record_hit", self._record)
         self.ctx = CrawlBlacklistContext(**kwargs)
 
     def _record(self, job, match, *, action: str = "stored", jd_status: str = "") -> None:
+        """记录一次命中审计。"""
         self.hits.append(
             {
                 "job_id": job.encrypt_job_id,
@@ -119,6 +135,7 @@ class RecordingContext:
         )
 
     def actions_for(self, job_id: str) -> list[str]:
+        """取某职位的审计动作序列。"""
         return [h["action"] for h in self.hits if h["job_id"] == job_id]
 
 
@@ -126,17 +143,20 @@ class _StubFilter:
     """最小 search_filter 桩——推荐页 special/zone 已移除，crawl 必须给一条流。"""
 
     def __init__(self, params=None):
+        """初始化。"""
         self._params = dict(params or {"query": "python", "page": "1"})
 
     def to_params(self):
+        """返回查询参数。"""
         return dict(self._params)
 
     def for_page(self, page):
+        """返回换页后的新桩。"""
         return _StubFilter({**self._params, "page": str(page)})
 
 
 def run_crawl(tmp_path, responses, *, context=None, enrich_details=False, max_pages=1, events=None, expect_filter=None, search_filter=None):
-    """跑一轮 crawl，回 ``(store, report, http)``。**不关库**——调用方自己收尾。
+    """跑一轮 crawl，回 `(store, report, http)`。不关库——调用方自己收尾。
 
     黑名单行为与路由无关；不显式给流就走最小搜索流桩。
     """
@@ -160,16 +180,12 @@ def run_crawl(tmp_path, responses, *, context=None, enrich_details=False, max_pa
 
 
 def detail_urls(http) -> list[str]:
+    """取出所有详情请求的 URL。"""
     return [c["url"] for c in http.calls if "detail" in c["url"]]
 
 
-# --------------------------------------------------------------------------- #
-# 公司命中：不入库 vs 入库并标记
-# --------------------------------------------------------------------------- #
-
-
 def test_公司命中_不入库时连详情都不抓(tmp_path):
-    """``store_blacklisted=false``：命中那条不打详情、不入库；普通条照常。"""
+    """`store_blacklisted=false`：命中那条不打详情、不入库；普通条照常。"""
     rec = RecordingContext(
         store_blacklisted=False,
         company_matches=company_matcher("甲公司"),
@@ -184,7 +200,6 @@ def test_公司命中_不入库时连详情都不抓(tmp_path):
         events=events,
     )
     try:
-        # 只有 j2 抓了详情；j1 命中公司规则，连详情都不该请求
         detail_calls = detail_urls(http)
         assert len(detail_calls) == 1
         assert store.get_job("j1") is None
@@ -202,7 +217,7 @@ def test_公司命中_不入库时连详情都不抓(tmp_path):
 
 
 def test_公司命中_入库并标记时仍抓JD(tmp_path):
-    """``store_blacklisted=true``：照抓详情，行里带上公司命中与阻断标记。"""
+    """`store_blacklisted=true`：照抓详情，行里带上公司命中与阻断标记。"""
     rec = RecordingContext(
         store_blacklisted=True,
         company_matches=company_matcher("甲公司"),
@@ -229,12 +244,8 @@ def test_公司命中_入库并标记时仍抓JD(tmp_path):
         store.close()
 
 
-# --------------------------------------------------------------------------- #
-# JD 命中：入库并标记 vs 不入库
-# --------------------------------------------------------------------------- #
-
-
 def test_JD命中_入库并标记(tmp_path):
+    """JD 命中入库并标记阻断。"""
     rec = RecordingContext(
         store_blacklisted=True,
         has_jd_rules=True,
@@ -265,7 +276,7 @@ def test_JD命中_入库并标记(tmp_path):
 
 
 def test_JD命中_不入库时整条丢掉(tmp_path):
-    """``store_blacklisted=false`` 的 JD 命中：详情抓了，但不落 ``jobs`` 行。"""
+    """`store_blacklisted=false` 的 JD 命中：详情抓了，但不落 `jobs` 行。"""
     rec = RecordingContext(
         store_blacklisted=False,
         has_jd_rules=True,
@@ -288,12 +299,8 @@ def test_JD命中_不入库时整条丢掉(tmp_path):
         store.close()
 
 
-# --------------------------------------------------------------------------- #
-# 不补详情 / 详情失败 / 详情为空
-# --------------------------------------------------------------------------- #
-
-
 def test_关详情_有JD规则时状态是未检查并阻断(tmp_path):
+    """关详情且有 JD 规则时标未检查并阻断投递。"""
     rec = RecordingContext(
         has_jd_rules=True,
         jd_scopes=("job_desc",),
@@ -317,6 +324,7 @@ def test_关详情_有JD规则时状态是未检查并阻断(tmp_path):
 
 
 def test_关详情_没有JD规则时视为已检查且不阻断(tmp_path):
+    """关详情且无 JD 规则时视为已检查且不阻断。"""
     rec = RecordingContext(company_matches=empty_matcher)
     store, report, http = run_crawl(
         tmp_path,
@@ -335,6 +343,7 @@ def test_关详情_没有JD规则时视为已检查且不阻断(tmp_path):
 
 
 def test_详情失败_标记failed并阻断自动投递(tmp_path):
+    """详情失败标 `failed` 并阻断自动投递。"""
     from boss_jobs.errors import JobApiError
 
     rec = RecordingContext(has_jd_rules=True, jd_scopes=("job_desc",), company_matches=empty_matcher)
@@ -355,6 +364,7 @@ def test_详情失败_标记failed并阻断自动投递(tmp_path):
 
 
 def test_详情为空_有需正文的JD规则时算未检查(tmp_path):
+    """详情为空且 JD 规则需正文时算未检查。"""
     rec = RecordingContext(has_jd_rules=True, jd_scopes=("job_desc",), company_matches=empty_matcher)
     store, report, http = run_crawl(
         tmp_path,
@@ -425,14 +435,8 @@ def test_关详情_纯名称JD规则就地查岗位名(tmp_path):
         store.close()
 
 
-# --------------------------------------------------------------------------- #
-# 重抓刷新旧状态
-# --------------------------------------------------------------------------- #
-
-
 def test_重抓会刷新旧的安全状态(tmp_path):
-    """规则删了以后重抓：旧的 ``jd_keyword`` 快照要被清掉，不再挡投递。"""
-    # 第一轮：有 JD 规则并命中
+    """规则删了以后重抓：旧的 `jd_keyword` 快照要被清掉，不再挡投递。"""
     first = RecordingContext(
         has_jd_rules=True,
         jd_scopes=("job_desc",),
@@ -450,7 +454,6 @@ def test_重抓会刷新旧的安全状态(tmp_path):
     finally:
         store.close()
 
-    # 第二轮：规则已删（has_jd_rules=False），重抓同一条
     second = RecordingContext(has_jd_rules=False, company_matches=empty_matcher)
     store2, _, _ = run_crawl(
         tmp_path,
@@ -466,11 +469,6 @@ def test_重抓会刷新旧的安全状态(tmp_path):
         assert all(s.get("rule_type") != "jd_keyword" for s in job.matched_rule_snapshot)
     finally:
         store2.close()
-
-
-# --------------------------------------------------------------------------- #
-# 期望流路径：黑名单钩子照常触发
-# --------------------------------------------------------------------------- #
 
 
 def test_期望流路径下公司命中照常跳过(tmp_path):

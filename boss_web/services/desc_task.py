@@ -1,9 +1,14 @@
 """手动补抓职位描述（JD）：后台任务 + 进度 + 可取消。
 
-抓取流程里顺带补 JD 是主路径（见 :mod:`boss_web.services.crawl_task`）；
-这份是兜底——老数据、或某次抓取时详情失败的职位，点一下批量补。
+抓取流程里顺带补 JD 是主路径（见 `boss_web.services.crawl_task`）；这份是兜底
+——老数据、或某次抓取时详情失败的职位，点一下批量补。单条失败只记流水、
+下一条继续。
 
-单条失败只记流水、下一条继续，绝不拖垮整批（跟列表抓取同一条规矩）。
+Attributes:
+    ST_RUNNING: 任务运行中。
+    ST_DONE: 任务正常结束。
+    ST_ERROR: 任务出错。
+    ST_CANCELLED: 任务被取消。
 """
 
 from __future__ import annotations
@@ -32,7 +37,23 @@ ST_CANCELLED = "cancelled"
 
 
 class DescTask:
+    """一次补抓任务的状态、进度与事件流。
+
+    Attributes:
+        task_id: 任务 id。
+        params: 入参（`limit` / `interval`）。
+        status: 任务状态，取 `ST_*`。
+        created_at: 创建时间（Unix 秒）。
+        ended_at: 结束时间；未结束为 `None`。
+        error: 失败原因；成功为 `None`。
+        progress: 进度计数与当前条目。
+        events: 最近事件环。
+        cancel_flag: 是否已请求取消。
+        lock: 保护进度 / 状态的锁。
+    """
+
     def __init__(self, params: dict[str, Any]) -> None:
+        """初始化。"""
         self.task_id = "desc_" + uuid.uuid4().hex[:10]
         self.params = params
         self.status = ST_RUNNING
@@ -47,7 +68,6 @@ class DescTask:
             "skipped": 0,
             "already": 0,
             "current": "",
-            # 条间隔（秒），给前端算「还要多久」用；默认跟 DETAIL_INTERVAL 一致
             "interval": float(params.get("interval") or DETAIL_INTERVAL),
         }
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
@@ -55,10 +75,16 @@ class DescTask:
         self.lock = threading.Lock()
 
     def push(self, payload: dict[str, Any]) -> None:
+        """追加一条事件（带时间戳）。
+
+        Args:
+            payload: 事件字段，会盖上 `at`。
+        """
         with self.lock:
             self.events.append({"at": time.time(), **payload})
 
     def snapshot(self) -> dict[str, Any]:
+        """取一份只含最近 30 条事件的只读快照。"""
         with self.lock:
             return {
                 "task_id": self.task_id,
@@ -76,14 +102,24 @@ class DescTaskManager:
     """同一时刻只跑一个补抓任务。"""
 
     def __init__(self) -> None:
+        """初始化。"""
         self._lock = threading.Lock()
         self._task: DescTask | None = None
 
     def current(self) -> DescTask | None:
+        """当前任务；没有则 `None`。"""
         with self._lock:
             return self._task
 
     def snapshot(self, task_id: str | None = None) -> dict[str, Any]:
+        """取任务快照；指定 id 对不上时抛 `NotFoundError`。
+
+        Args:
+            task_id: 可选的期望任务 id；省略则取当前任务。
+
+        Returns:
+            任务快照；没有任务时回 `{"task_id": None, "status": "idle"}`。
+        """
         task = self.current()
         if task is None:
             return {"task_id": None, "status": "idle"}
@@ -92,8 +128,13 @@ class DescTaskManager:
         return task.snapshot()
 
     def start(self, *, limit: int = 0, interval: float | None = None) -> DescTask:
-        """:param interval: 条间隔（秒）；``None``/``0`` = 用 :data:`DETAIL_INTERVAL`。
-        下限夹到 0.2s，免得前端手滑把风控敲出来。"""
+        """启动补抓；已有任务在跑时抛 `ConflictError`。
+
+        Args:
+            limit: 最多补几条；`0` = 不限。
+            interval: 条间隔（秒）；`None` / `0` 用 `DETAIL_INTERVAL`，
+                下限夹到 0.2s。
+        """
         if interval is None or interval <= 0:
             interval = DETAIL_INTERVAL
         else:
@@ -111,6 +152,11 @@ class DescTaskManager:
         return task
 
     def cancel(self, task_id: str | None = None) -> DescTask:
+        """请求取消当前任务；没有在跑的任务时抛 `NotFoundError`。
+
+        Args:
+            task_id: 可选的期望任务 id。
+        """
         task = self.current()
         if task is None or (task_id and task.task_id != task_id):
             raise NotFoundError("没有在跑的补抓任务")
@@ -118,9 +164,8 @@ class DescTaskManager:
         task.push({"event": "cancel_requested"})
         return task
 
-    # ------------------------------------------------------------------ #
-
     def _run(self, task: DescTask) -> None:
+        """后台逐条补抓并写库、记流水。"""
         limit = int(task.params.get("limit") or 0)
         interval = float(task.progress.get("interval") or DETAIL_INTERVAL)
         try:
@@ -134,7 +179,6 @@ class DescTaskManager:
                     task.progress["total"] = len(missing)
                 task.push({"event": "start", "total": len(missing)})
 
-                # 连续撞安全网关的计数：连环 N 次就整批停（见 BROWSER_CHECK_GIVEUP）
                 consecutive_37 = 0
                 for i, job in enumerate(missing):
                     if task.cancel_flag:
@@ -144,9 +188,6 @@ class DescTaskManager:
                         task.push({"event": "cancelled"})
                         return
 
-                    # 兜底：列表本来就没带这些，但真跑起来再确认一次——
-                    # 已有描述的不再重复获取；抓过但回空 JD 的也不再撞。
-                    # 失败的要重试（它只是 detail_fetched_at 被盖过，不算抓到）。
                     if job.job_desc or (job.detail_fetched_at and job.jd_status != "failed"):
                         with task.lock:
                             task.progress["done"] += 1
@@ -239,7 +280,6 @@ class DescTaskManager:
                             jd_rule_checked=False,
                             jd_rule_checked_at="",
                         )
-                        # 失败也要同步安全快照，避免留下「已检查/可投递」的陈旧状态
                         missing_company = not str(job.brand_name or "").strip()
                         store.update_blacklist_state(
                             job.encrypt_job_id,
@@ -267,7 +307,6 @@ class DescTaskManager:
                         if isinstance(exc, JobApiError) and exc.is_browser_check:
                             consecutive_37 += 1
                             if consecutive_37 >= BROWSER_CHECK_GIVEUP:
-                                # 整段被限速了：别再砸，停下来等人歇几分钟
                                 msg = (
                                     f"连续 {consecutive_37} 次撞安全网关 code 37，"
                                     "已停；过几分钟再试"
@@ -281,7 +320,6 @@ class DescTaskManager:
                                     task.progress["failed"] += 1
                                 task.push({"event": "stopped", "reason": msg})
                                 return
-                            # 限速墙抬手前多躺一会儿，别拿下一条去探墙
                             time.sleep(BROWSER_CHECK_COOLOFF)
 
                     with task.lock:
@@ -302,7 +340,6 @@ class DescTaskManager:
                                 "has_desc": bool(detail and detail.has_desc),
                             }
                         )
-                    # 最后一条不睡，省掉尾部那一秒
                     if interval > 0 and i < len(missing) - 1:
                         time.sleep(interval)
 

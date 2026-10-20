@@ -1,8 +1,11 @@
-"""投递配置存取：状态库 ``data/boss.db`` 的 ``doc('deliver_config')``。
+"""投递配置存取：状态库 `data/boss.db` 的 `doc('deliver_config')`。
 
-目前只有一项——**一键投递的评分阈值** ``min_score``（默认 70）：匹配分 ≥ 它的
-岗位才进「一键发送全部」。做法照搬 :mod:`boss_web.services.llm_config_store`：
-整包存 JSON、读时归一化、坏值不报错只回默认。
+目前只有一项——一键投递的评分阈值 `min_score`（默认 70）：匹配分 ≥ 它的
+岗位才进「一键发送全部」。整包存 JSON、读时归一化、坏值不报错只回默认。
+
+Attributes:
+    MIN_SCORE_FLOOR: 阈值合法下限（0-100 分制）。
+    MIN_SCORE_CEILING: 阈值合法上限（0-100 分制）。
 """
 
 from __future__ import annotations
@@ -20,13 +23,18 @@ from .. import config as C
 
 logger = logging.getLogger(__name__)
 
-#: 阈值的合法区间（0-100 分制）
 MIN_SCORE_FLOOR = 0
 MIN_SCORE_CEILING = 100
 
 
 @dataclass
 class DeliverConfig:
+    """一键投递配置。
+
+    Attributes:
+        min_score: 进「一键发送全部」的匹配分下限，默认 70。
+    """
+
     min_score: int = C.DEFAULT_DELIVER_MIN_SCORE
 
     def normalize(self) -> "DeliverConfig":
@@ -34,11 +42,12 @@ class DeliverConfig:
         return DeliverConfig(min_score=clamp_min_score(self.min_score))
 
     def to_dict(self) -> dict[str, Any]:
+        """归一化后转普通字典。"""
         return asdict(self.normalize())
 
 
 def clamp_min_score(value: Any) -> int:
-    """夹到 ``[0, 100]``；不是数字就回默认值。"""
+    """夹到 `[0, 100]`；不是数字就回默认值。"""
     try:
         n = int(value)
     except (TypeError, ValueError):
@@ -49,7 +58,8 @@ def clamp_min_score(value: Any) -> int:
 def load_config(path: Path | str | None = None) -> DeliverConfig:
     """读状态库里的投递配置；没有 / 坏了 → 默认配置（不报错）。
 
-    :param path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    Args:
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
     """
     try:
         raw = boss_db.doc_get_raw(boss_db.DOC_DELIVER_CONFIG, path)
@@ -69,9 +79,14 @@ def load_config(path: Path | str | None = None) -> DeliverConfig:
 
 
 def save_config(cfg: DeliverConfig, path: Path | str | None = None) -> Path:
-    """写回状态库；返回库路径。
+    """写回状态库。
 
-    :param path: 状态库路径；省略 = ``BOSS_DB`` = ``data/boss.db``
+    Args:
+        cfg: 待保存的配置，保存前会归一化。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+
+    Returns:
+        实际写入的库路径。
     """
     resolved = boss_db.doc_set(boss_db.DOC_DELIVER_CONFIG, cfg.normalize().to_dict(), path)
     logger.info("投递配置已保存到 %s", resolved)
@@ -79,7 +94,12 @@ def save_config(cfg: DeliverConfig, path: Path | str | None = None) -> Path:
 
 
 def update_config(payload: dict[str, Any], path: Path | str | None = None) -> DeliverConfig:
-    """合并更新：``min_score`` 传空 / 非法则保持旧值。"""
+    """合并更新：`min_score` 传空 / 非法则保持旧值。
+
+    Args:
+        payload: 只包含要改字段的字典。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+    """
     current = load_config(path)
     if payload.get("min_score") is not None:
         current = DeliverConfig(min_score=clamp_min_score(payload["min_score"]))
