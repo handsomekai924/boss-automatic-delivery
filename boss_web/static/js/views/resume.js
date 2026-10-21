@@ -3,7 +3,7 @@
 import { api } from "../api.js";
 import { toast, escapeHtml, fmtTime, taskPanel } from "../ui.js";
 
-//: 固定模板八段（与 boss_web/services/resume_parser.py 的 TEMPLATE_FIELDS 对齐）
+/** 固定模板八段（与 boss_web/services/resume_parser.py 的 TEMPLATE_FIELDS 对齐）。 */
 const SECTIONS = [
   { key: "basic", label: "基本信息", sec: "基本信息" },
   { key: "intent", label: "求职意向", sec: "求职意向" },
@@ -15,16 +15,18 @@ const SECTIONS = [
   { key: "summary", label: "摘要", sec: "摘要", kind: "text" },
 ];
 
-//: 切走再切回时别把用户选的那份简历弄丢
+/** 切走再切回时记住用户选的那份简历。 */
 let lastResumeId = "";
 
-//: 全页唯一一个画出来的图标：上传
+/** 全页唯一一个画出来的图标：上传。 */
 const ICO_UPLOAD = `<svg class="rs-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
   stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M12 15.5V4.5"/><path d="m7.5 9 4.5-4.5L16.5 9"/><path d="M4.5 16v2.5a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5V16"/></svg>`;
 
-//: 原文自己的标题 → 模板八段。整词判断，不用单字前缀
-//: （后端 SECTION_ALIASES 里那个 "项目" 会把「项目管理与技术架构」也算成项目经历）
+/**
+ * 原文自己的标题 → 模板八段。整词判断，不用单字前缀——后端 SECTION_ALIASES
+ * 里那个 "项目" 会把「项目管理与技术架构」也算成项目经历。
+ */
 const RAW_ALIASES = {
   基本信息: ["基本信息", "个人信息", "联系信息", "联系方式"],
   求职意向: ["求职意向", "求职目标", "期望岗位", "求职期望"],
@@ -35,6 +37,7 @@ const RAW_ALIASES = {
   自我评价: ["自我评价", "个人总结", "自我介绍", "个人评价"],
 };
 
+/** 标题归一化：去掉空白与常见装饰符号。 */
 function normHeading(text) {
   return String(text || "").replace(/[\s:：*#｜|·—–\-、,，。.]+/g, "");
 }
@@ -49,9 +52,14 @@ function rawPart(head) {
   return "";
 }
 
-/** 原文按它自己的标题切块：一块一个标题，正文逐字留着。 */
 let blockCache = { key: "", blocks: [] };
 
+/**
+ * 原文按它自己的标题切块：一块一个标题，正文逐字留着。
+ *
+ * @param {string} raw 简历原文
+ * @returns {Array<{i: number, head: string, level: number, text: string, part: string}>} 块列表，`part` 为认出的模板段
+ */
 function rawBlocks(raw) {
   const text = String(raw || "");
   const key = `${text.length}:${text.slice(0, 32)}`;
@@ -84,6 +92,12 @@ function rawBlocks(raw) {
   return blockCache.blocks;
 }
 
+/**
+ * 渲染简历页：上传 / 选库、LLM 解析、原文与解析结果双面展示。
+ *
+ * @param {HTMLElement} root 挂载容器
+ * @returns {Promise<() => void>} 卸载时取消滚动监听的动画帧
+ */
 export async function renderResume(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -130,21 +144,27 @@ export async function renderResume(root) {
   const body = $("rs-body");
   const fileInput = $("file");
 
-  let resumes = [];       // /api/resume/list 的 items
-  let current = null;     // 载入中的整份（含 raw / sections / llm）
-  let llmCfg = null;      // { model, configured }
-  let face = "parsed";    // parsed | source
+  let resumes = [];
+  let current = null;
+  let llmCfg = null;
+  let face = "parsed";
   let parsing = false;
   let activeSec = SECTIONS[0].sec;
-  let rawHas = new Set(); // 原文里认得出模板段的那些章节
+  let rawHas = new Set();
   const scrollTops = { parsed: 0, source: 0 };
   let spyFrame = 0;
 
-  // LLM 解析是同步 HTTP，一次调用十几秒——用统一进度面板给可视化反馈
   const parsePanel = taskPanel({ title: "LLM 解析", stopLabel: "" });
   $("rs-task").appendChild(parsePanel.el);
   parsePanel.update({ status: "idle", percent: 0 });
 
+  /**
+   * 刷 LLM 解析进度面板。
+   *
+   * @param {string} state 面板状态（idle / running / done / error）
+   * @param {string} detail 当前说明文案
+   * @param {number} percent 进度百分比
+   */
   function paintParse(state, detail, percent) {
     parsePanel.update({
       status: state,
@@ -154,7 +174,7 @@ export async function renderResume(root) {
     });
   }
 
-  // ---------- 小工具 ----------
+  /** 秒级时间戳 → 「刚刚 / N 分钟前 / …」；无值显示「—」。 */
   function relTime(ts) {
     if (!ts) return "—";
     const d = Math.floor(Date.now() / 1000 - ts);
@@ -165,7 +185,12 @@ export async function renderResume(root) {
     return fmtTime(ts).slice(0, 10);
   }
 
-  /** 这一段的识别情况：目录上那个点与右侧读数的唯一来源。 */
+  /**
+   * 这一段的识别情况：目录上那个点与右侧读数的唯一来源。
+   *
+   * @param {{key: string, kind?: string}} s 模板段定义
+   * @returns {{state: "none"|"on"|"off", note: string}} 点状态与短读数
+   */
   function coverage(s) {
     const d = (current && current.llm && current.llm.data) || null;
     if (!d) return { state: "none", note: "未解析" };
@@ -186,16 +211,23 @@ export async function renderResume(root) {
     return { state: text ? "on" : "off", note: text ? `${text.length} 字` : "空" };
   }
 
-  // ---------- 目录（导航 + 解析审计） ----------
-  /** 这一面里有没有这一段的落点——没有就不给点，免得点了没反应。 */
+  /**
+   * 这一面里有没有这一段的落点——没有就不给点，免得点了没反应。
+   *
+   * 解析面里姓名与意向两段恒在场，其余段有内容才渲染。
+   *
+   * @param {string} sec 章节 key
+   * @param {"parsed"|"source"} onFace 哪一面
+   * @returns {boolean} 有落点为 `true`
+   */
   function targetExists(sec, onFace) {
     if (onFace === "source") return rawHas.has(sec);
     const s = SECTIONS.find((x) => x.sec === sec);
     if (!s || !(current && current.llm && current.llm.data)) return false;
-    // 姓名与意向那两段恒在场，其余段有内容才渲染
     return s.key === "basic" || s.key === "intent" || coverage(s).state === "on";
   }
 
+  /** 画左侧章节目录（模板八段 + 模板没接住的原文章节）。 */
   function renderToc() {
     const d = current && current.llm && current.llm.data;
     const captured = SECTIONS.filter((s) => coverage(s).state === "on").length;
@@ -216,7 +248,6 @@ export async function renderResume(root) {
         </button>`;
     }).join("");
 
-    // 模板没接住的原文章节：文件自己的一级章节（标题那层不算，它已经变成了上面的姓名）
     const orphans = rawBlocks(current && current.raw).filter((b) => !b.part && b.level === 2);
     const orphanRows = orphans.length
       ? `<div class="rs-toc-sep">模板没接住</div>
@@ -243,11 +274,10 @@ export async function renderResume(root) {
     paintToc();
   }
 
+  /** 同步目录行高亮与置灰（两个面共用同一套锚点）。 */
   function paintToc() {
     root.querySelectorAll(".rs-toc-row").forEach((b) => {
-      // 两个面共用同一套锚点：原文面里高亮的也是「这一段」那一行
       b.classList.toggle("is-active", b.dataset.sec === activeSec);
-      // 这一段在它自己那一面里没有落点：安静下来，别让人点了没反应
       b.classList.toggle("is-dead", b.dataset.has === "0");
     });
   }
@@ -258,6 +288,7 @@ export async function renderResume(root) {
     if (target) target.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "start" });
   }
 
+  /** 滚动时把目录高亮跟到视口顶部那段。 */
   function spy() {
     const marks = [...body.querySelectorAll("[data-sec]")];
     if (!marks.length) return;
@@ -266,7 +297,6 @@ export async function renderResume(root) {
     for (const m of marks) {
       if (m.getBoundingClientRect().top <= top) hit = m;
     }
-    // 原文里比章节更深的那些块没有自己的行，保持上一段高亮不闪
     const key = hit.dataset.part || hit.dataset.sec;
     if (key !== activeSec && root.querySelector(`.rs-toc-row[data-sec="${key}"]`)) {
       activeSec = key;
@@ -282,7 +312,12 @@ export async function renderResume(root) {
     });
   });
 
-  // ---------- 两个面 ----------
+  /**
+   * 切到原文 / 解析结果另一面，可指定落点章节。
+   *
+   * @param {"parsed"|"source"} next 目标面
+   * @param {string} [sec] 切过去后要对准的章节
+   */
   function flipTo(next, sec) {
     if (next === face) return;
     scrollTops[face] = body.scrollTop;
@@ -293,11 +328,11 @@ export async function renderResume(root) {
     $("sw-source").setAttribute("aria-selected", String(face === "source"));
     renderBody();
     body.classList.remove("is-flip");
-    void body.offsetWidth; // 让动画重跑
+    void body.offsetWidth;
     body.classList.add("is-flip");
     if (sec) {
       jumpTo(sec, false);
-      activeSec = sec; // 点哪一行就高亮哪一行，滚起来再由 spy 接手
+      activeSec = sec;
     } else {
       body.scrollTop = scrollTops[face] || 0;
       activeSec = firstKey();
@@ -308,7 +343,13 @@ export async function renderResume(root) {
   $("sw-parsed").addEventListener("click", () => flipTo("parsed"));
   $("sw-source").addEventListener("click", () => flipTo("source"));
 
-  // ---------- 解析结果面 ----------
+  /**
+   * 渲染一条经历 / 教育条目。
+   *
+   * @param {{period?: string, highlights?: string[]}} e 条目数据
+   * @param {{titleOf: (x: *) => string, subOf: (x: *) => string}} opts 取标题与副标题
+   * @returns {string} HTML
+   */
   function entryHtml(e, opts) {
     const when = escapeHtml(e.period || "");
     const title = opts.titleOf(e);
@@ -329,6 +370,7 @@ export async function renderResume(root) {
       </div>`;
   }
 
+  /** 画解析结果面：姓名头 + 求职意向 + 各经历段。 */
   function renderParsedFace(d) {
     const basic = d.basic || {};
     const intent = d.intent || {};
@@ -461,7 +503,7 @@ export async function renderResume(root) {
       </div>`;
   }
 
-  // ---------- 原文面：一个字没改，只把文件自己的标题提上来 ----------
+  /** 画原文面：一个字没改，只把文件自己的标题提上来。 */
   function renderSourceFace() {
     const blocks = rawBlocks(current && current.raw);
     const head = `
@@ -499,7 +541,11 @@ export async function renderResume(root) {
     );
   }
 
-  // ---------- 渲染调度 ----------
+  /**
+   * 按当前面 / 解析状态重画阅读区，并同步目录与顶栏。
+   *
+   * @param {boolean} [animate=false] 是否播一段入场动画
+   */
   function renderBody(animate = false) {
     let html;
     if (!current) {
@@ -556,6 +602,7 @@ export async function renderResume(root) {
     return "";
   }
 
+  /** 还没有简历时的拖放上传空态。 */
   function renderEmptyState() {
     return `
       <div class="rs-empty">
@@ -571,6 +618,7 @@ export async function renderResume(root) {
       </div>`;
   }
 
+  /** 更新阅读区右上角的模型 / 时间（或原文段数）读数。 */
   function renderMeta() {
     const m = $("rs-meta");
     if (!current) {
@@ -590,7 +638,7 @@ export async function renderResume(root) {
       : `<span class="muted">尚未解析</span>`;
   }
 
-  // ---------- 库条与新鲜度 ----------
+  /** 画顶部简历库条与新鲜度提示，并同步按钮可用态。 */
   function renderBar() {
     const lib = $("rs-lib");
     if (!resumes.length) {
@@ -616,7 +664,7 @@ export async function renderResume(root) {
     const hasCur = !!current;
     const llm = current && current.llm;
     if (!llmCfg) {
-      f.innerHTML = ""; // 还没读到配置，先别下结论
+      f.innerHTML = "";
     } else if (!llmCfg.configured) {
       f.innerHTML = `<span class="pill warn static" title="解析需要先配好 API Key / Base URL / 模型名">LLM 未配置</span>`;
     } else if (llm && llm.data && llm.model && llm.model !== llmCfg.model) {
@@ -633,9 +681,9 @@ export async function renderResume(root) {
     $("btn-parse").disabled = !hasCur || parsing;
     $("btn-parse").textContent = parsing ? "解析中…" : "重新解析";
     $("btn-del").disabled = !hasCur || parsing;
-    // 空态那枚 ico 只在按钮内部，disabled 时不用管
   }
 
+  /** 读 LLM 配置（失败置空，不弹错）。 */
   async function loadLlmCfg() {
     try {
       llmCfg = await api.get("/api/llm/config");
@@ -644,7 +692,7 @@ export async function renderResume(root) {
     }
   }
 
-  // ---------- 数据 ----------
+  /** 拉简历列表并刷新库条。 */
   async function loadList() {
     try {
       const r = await api.get("/api/resume/list");
@@ -655,6 +703,11 @@ export async function renderResume(root) {
     renderBar();
   }
 
+  /**
+   * 切换到指定简历并重画。
+   *
+   * @param {string} id 简历 ID
+   */
   async function selectResume(id) {
     if (parsing) return toast("解析中，等它跑完再切", "warn");
     if (current && current.resume_id === id) return;
@@ -669,6 +722,11 @@ export async function renderResume(root) {
     }
   }
 
+  /**
+   * 上传简历文件，成功后自动开始解析。
+   *
+   * @param {File} file 选中或拖入的文件
+   */
   async function upload(file) {
     if (parsing) return toast("解析中，等它跑完再传", "warn");
     const fd = new FormData();
@@ -687,6 +745,11 @@ export async function renderResume(root) {
     }
   }
 
+  /**
+   * 调后端 LLM 解析这份简历；失败时屏上保留旧解析结果。
+   *
+   * @param {string} resumeId 简历 ID
+   */
   async function runParse(resumeId) {
     if (parsing) return;
     const prev = current && current.llm;
@@ -701,13 +764,12 @@ export async function renderResume(root) {
       }
       parsing = false;
       paintParse("done", "解析完成", 100);
-      renderBody(true); // 解析完成：八段依次落位
+      renderBody(true);
       toast("解析完成", "ok");
       await loadList();
     } catch (err) {
       parsing = false;
       paintParse("error", err.message || "解析失败", 100);
-      // 后端不会覆盖原有解析结果——失败了也要把它留在屏幕上
       renderBody();
       const banner = `
         <div class="banner bad">
@@ -726,6 +788,7 @@ export async function renderResume(root) {
     }
   }
 
+  /** 删除当前简历（先确认）。 */
   async function remove() {
     if (!current) return toast("没有可删除的简历", "warn");
     if (!confirm(`删除「${current.title || current.resume_id}」？`)) return;
@@ -742,7 +805,6 @@ export async function renderResume(root) {
     }
   }
 
-  // ---------- 事件 ----------
   $("btn-upload").addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", () => {
     if (fileInput.files[0]) upload(fileInput.files[0]);
@@ -754,7 +816,6 @@ export async function renderResume(root) {
   });
   $("btn-del").addEventListener("click", remove);
 
-  // 整条库条都是落点：拖进来就传
   ["dragenter", "dragover"].forEach((ev) =>
     bar.addEventListener(ev, (e) => {
       e.preventDefault();
@@ -773,7 +834,6 @@ export async function renderResume(root) {
     if (f) upload(f);
   });
 
-  // ---------- 起步 ----------
   renderBody();
   await Promise.all([loadLlmCfg(), loadList()]);
   renderBar();

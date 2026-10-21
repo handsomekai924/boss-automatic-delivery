@@ -3,6 +3,12 @@
 import { api } from "../api.js";
 import { toast, modal, escapeHtml, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
 
+/**
+ * 渲染找工作页：采集入口、筛选、职位卡片流、补全描述。
+ *
+ * @param {HTMLElement} root 挂载容器
+ * @returns {Promise<() => void>} 卸载时清搜索 / 补全的轮询
+ */
 export async function renderJobs(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -100,7 +106,6 @@ export async function renderJobs(root) {
     crawl: "翻页搜索",
   };
 
-  // 统一长任务面板：搜索 + 补全职位描述
   const crawlPanel = taskPanel({ title: "职位搜索", stopLabel: "停止搜索" });
   $("crawl-task").appendChild(crawlPanel.el);
   crawlPanel.onStop(async () => {
@@ -126,18 +131,21 @@ export async function renderJobs(root) {
     }
   });
 
-  // ---------- 当前采集配置 ----------
+  /**
+   * 把当前采集配置拼成一行人话摘要。
+   *
+   * 期望流与搜索流生效维度不同，只列这次真会进请求串的项，别把「配了但不生效」的也打上去。
+   *
+   * @param {{collection?: Object<string, any>, search?: Object<string, any>}} data 采集配置
+   * @returns {string} 用「 · 」连接的摘要；没设维度时给兜底文案
+   */
   function collectionSummary(data) {
     const search = data?.search || {};
     const collection = data?.collection || {};
-    // 采集来源二选一：expect_kind 非空 = 期望流，空 = 搜索流
     const kind = (collection.expect_kind || "").trim();
     const expectMode = !!kind;
     const partTime = kind === "part_time";
     const parts = [];
-    // 期望流只带筛选维度：from_search 不搬 query/stage/jobType，兼职态 salary
-    // 又被 payType/partTime 顶替——摘要只列这次真会进请求串的维度，别把
-    // 「配了但不生效」的也打上去，那会看成「期望 + 关键词」。
     if (search.query && !expectMode) parts.push(`关键词「${search.query}」`);
     if (search.city) parts.push(`城市 ${search.city}`);
     if (search.jobType && !expectMode) parts.push(`职位类型 ${search.jobType}`);
@@ -172,8 +180,6 @@ export async function renderJobs(root) {
     } else if (kind === "temp_expect") {
       parts.push(`临时期望流「${collection.expect_name || "未命名"}」`);
     } else {
-      // 搜索流。选了期望 = 站点「期望 tab + 输入关键词」，
-      // encryptExpectId 会进请求串——摘要得点出来，别让人以为是纯关键词。
       const ctx = collection.encrypt_expect_id || search.encryptExpectId || "";
       if (ctx) {
         parts.push(`使用搜索条件 · 期望上下文「${collection.expect_name || ctx}」`);
@@ -187,6 +193,7 @@ export async function renderJobs(root) {
     return parts.join(" · ") || "不限（未设置筛选维度）";
   }
 
+  /** 读系统里的采集配置并刷新摘要；失败给出提示。 */
   async function loadCollectionConfig() {
     try {
       collectionConfig = await api.get("/api/collection/config");
@@ -198,11 +205,9 @@ export async function renderJobs(root) {
     return collectionConfig;
   }
 
-  // ---------- 搜索 ----------
   $("btn-crawl").addEventListener("click", async () => {
     try {
       const task = await api.post("/api/crawl/start", {
-        // 采集条件已集中保存到系统配置；空 body 让后端使用同一份配置快照。
       });
       crawlTaskId = task.task_id;
       $("btn-crawl").classList.add("hidden");
@@ -224,6 +229,7 @@ export async function renderJobs(root) {
     }
   });
 
+  /** 开始轮询搜索任务进度并刷面板；结束后重载列表。 */
   function startPoll() {
     clearInterval(pollTimer);
     pollTimer = setInterval(async () => {
@@ -268,11 +274,11 @@ export async function renderJobs(root) {
           loadJobs();
           toast(s.status === "error" ? "搜索出错：" + (s.error || "") : "搜索结束", s.status === "error" ? "bad" : "ok");
         }
-      } catch { /* ignore */ }
+      } catch { }
     }, 1000);
   }
 
-  // ---------- 职位列表 ----------
+  /** 按当前筛选条件拉一页职位并渲染。 */
   async function loadJobs() {
     const keyword = $("q").value.trim();
     const city = $("city-f").value.trim();
@@ -299,6 +305,11 @@ export async function renderJobs(root) {
     }
   }
 
+  /**
+   * 画职位卡片流（含黑名单 / JD 状态 pill 与勾选）。
+   *
+   * @param {Array<Object<string, any>>} items 当页职位
+   */
   function renderGrid(items) {
     const grid = $("job-grid");
     if (!items.length) {
@@ -312,7 +323,6 @@ export async function renderJobs(root) {
         const statusLabels = [
           j.company_blacklisted ? "公司黑名单" : "",
           j.jd_blacklisted ? "JD 关键词黑名单" : "",
-          // 规则没查完就打「未检查」：covers empty/pending/failed/unchecked + completed 但没查规则
           j.jd_rule_checked ? "" : "JD 规则未检查",
           j.jd_status && j.jd_status !== "completed" && j.jd_status !== "unchecked" ? ({
             pending: "JD 待采集",
@@ -354,6 +364,11 @@ export async function renderJobs(root) {
     });
   }
 
+  /**
+   * 打开职位详情弹窗（技能 / 福利 / 命中规则 / JD），并挂上删除。
+   *
+   * @param {string} id 加密职位 ID
+   */
   async function openDetail(id) {
     try {
       const j = await api.get("/api/jobs/" + encodeURIComponent(id));
@@ -485,9 +500,13 @@ export async function renderJobs(root) {
     }
   });
 
-  // ---------- 手动补全职位描述 ----------
   let descPollTimer = null;
 
+  /**
+   * 用补全描述任务状态刷进度面板；安全网关停时从事件里捞出原因。
+   *
+   * @param {Object<string, any>} s 任务状态（status / progress / events）
+   */
   function renderDesc(s) {
     const p = s.progress || {};
     const total = p.total || 0;
@@ -500,7 +519,6 @@ export async function renderJobs(root) {
     $("btn-fetch-desc").disabled = running;
     $("btn-fetch-desc").textContent = running ? `补全 ${done}/${total}` : "补全描述";
 
-    // 撞安全网关停批时，从事件里捞出原因展示
     const stopEvent = (s.events || []).find((e) => e.event === "stopped");
     const eta = running ? fmtEta((total - done) * (interval + 0.6)) : undefined;
 
@@ -522,6 +540,7 @@ export async function renderJobs(root) {
     });
   }
 
+  /** 停掉补全描述的轮询并恢复按钮。 */
   function stopDescPoll() {
     clearInterval(descPollTimer);
     descPollTimer = null;
@@ -529,6 +548,7 @@ export async function renderJobs(root) {
     $("btn-fetch-desc").textContent = "补全描述";
   }
 
+  /** 开始轮询补全描述任务；结束后 toast 汇总并重载列表。 */
   function startDescPoll() {
     clearInterval(descPollTimer);
     descPollTimer = setInterval(async () => {
@@ -551,14 +571,13 @@ export async function renderJobs(root) {
           );
           loadJobs();
         }
-      } catch { /* ignore */ }
+      } catch { }
     }, 1200);
   }
 
   $("btn-fetch-desc").addEventListener("click", async () => {
     if (descPollTimer) return toast("补全任务已在跑", "warn");
     try {
-      // interval 不传 = 服务端默认 1s（防风控）
       const task = await api.post("/api/jobs/fetch-descriptions", { limit: 0 });
       toast(`补全已开始（${task.progress?.total ?? "?"} 条）`, "ok");
       renderDesc(task);
@@ -590,7 +609,6 @@ export async function renderJobs(root) {
   await loadCollectionConfig();
   await loadJobs();
 
-  // 恢复进行中的搜索
   try {
     const s = await api.get("/api/crawl/status");
     if (s.task_id && s.status === "running") {
@@ -599,18 +617,17 @@ export async function renderJobs(root) {
       $("btn-stop").classList.remove("hidden");
       startPoll();
     }
-  } catch { /* ignore */ }
+  } catch { }
 
-  // 恢复进行中的补全
   try {
     const s = await api.get("/api/jobs/fetch-descriptions/status");
     if (s.task_id && s.status === "running") {
       renderDesc(s);
       startDescPoll();
     } else if (s.task_id) {
-      renderDesc(s); // 上一轮结果留着看
+      renderDesc(s);
     }
-  } catch { /* ignore */ }
+  } catch { }
 
   return () => {
     clearInterval(pollTimer);

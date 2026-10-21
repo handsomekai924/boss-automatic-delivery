@@ -1,7 +1,6 @@
 /** 通用 UI 工具：toast / modal / 主题 / 长任务面板 */
 
-/* ---------- 主题 ---------- */
-
+/** 从 localStorage / 系统偏好恢复主题写回 `<html>`；返回 `"light"` 或 `"dark"`。 */
 export function initTheme() {
   const saved = localStorage.getItem("orbit-theme");
   const theme = saved === "light" || saved === "dark"
@@ -11,17 +10,20 @@ export function initTheme() {
   return theme;
 }
 
+/** 当前主题：`"light"` 或 `"dark"`。 */
 export function currentTheme() {
   return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
 }
 
+/** 在明暗之间切换并记住选择；返回切换后的主题。 */
 export function toggleTheme() {
   const next = currentTheme() === "light" ? "dark" : "light";
   document.documentElement.setAttribute("data-theme", next);
-  try { localStorage.setItem("orbit-theme", next); } catch { /* private mode */ }
+  try { localStorage.setItem("orbit-theme", next); } catch { }
   return next;
 }
 
+/** 给主题切换按钮绑点击：切主题并更新 `aria-label`。 */
 export function bindThemeToggle(btn) {
   if (!btn) return;
   btn.addEventListener("click", () => {
@@ -30,8 +32,13 @@ export function bindThemeToggle(btn) {
   });
 }
 
-/* ---------- 基础 ---------- */
-
+/**
+ * 弹出一条 toast，到点淡出并移除。
+ *
+ * @param {string}  message  文案
+ * @param {string}  [kind=ok] 样式类：`ok` / `warn` / `bad`
+ * @param {number}  [ms=3200] 停留毫秒
+ */
 export function toast(message, kind = "ok", ms = 3200) {
   const root = document.getElementById("toasts");
   const el = document.createElement("div");
@@ -44,6 +51,13 @@ export function toast(message, kind = "ok", ms = 3200) {
   }, ms);
 }
 
+/**
+ * 居中对话框：标题 + 内容 + 右上关闭，Esc / 点遮罩也能关。
+ *
+ * @param {{title?: string, body?: string|HTMLElement, wide?: boolean, onClose?: () => void}} o
+ *   `body` 是 HTML 字符串或节点；`wide` 用宽版样式
+ * @returns {{close: () => void, bodyEl: HTMLElement, box: HTMLElement}} 关闭句柄与内容节点
+ */
 export function modal({ title, body, wide = false, onClose }) {
   const root = document.getElementById("modal-root");
   const back = document.createElement("div");
@@ -63,11 +77,13 @@ export function modal({ title, body, wide = false, onClose }) {
   if (typeof body === "string") bodyEl.innerHTML = body;
   else if (body) bodyEl.appendChild(body);
 
+  /** 移除遮罩并触发 onClose。 */
   const close = () => {
     back.remove();
     document.removeEventListener("keydown", onKey);
     if (onClose) onClose();
   };
+  /** Esc 关闭。 */
   const onKey = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
   box.querySelector(".modal-close").addEventListener("click", close);
@@ -80,12 +96,14 @@ export function modal({ title, body, wide = false, onClose }) {
   return { close, bodyEl, box };
 }
 
+/** HTML 字符串 → 第一个元素节点。 */
 export function el(html) {
   const t = document.createElement("template");
   t.innerHTML = html.trim();
   return t.content.firstElementChild;
 }
 
+/** 秒级时间戳或日期 → 本地化日期时间；无效值 → "—"。 */
 export function fmtTime(ts) {
   if (!ts) return "—";
   const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
@@ -93,6 +111,7 @@ export function fmtTime(ts) {
   return d.toLocaleString("zh-CN", { hour12: false });
 }
 
+/** 秒级时间戳或日期 → `HH:MM:SS`；无效值 → "--:--:--"。 */
 export function fmtClock(ts) {
   if (!ts) return "--:--:--";
   const d = typeof ts === "number" ? new Date(ts * 1000) : new Date(ts);
@@ -112,17 +131,20 @@ export function fmtEta(sec) {
   return `${h} 小时 ${m % 60} 分`;
 }
 
+/** 评分 → CSS 类：≥75 空串、≥50 `mid`、其余 `low`。 */
 export function scoreClass(score) {
   if (score >= 75) return "";
   if (score >= 50) return "mid";
   return "low";
 }
 
+/** 评分 → 环形进度 HTML，可带角标文案。 */
 export function scoreRing(score, label = "") {
   const s = Math.max(0, Math.min(100, Number(score) || 0));
   return `<div class="score-ring ${scoreClass(s)}" style="--p:${s}">${s}${label ? `<small>${label}</small>` : ""}</div>`;
 }
 
+/** 转义 HTML 特殊字符，防注入。 */
 export function escapeHtml(str) {
   return String(str ?? "")
     .replace(/&/g, "&amp;")
@@ -131,6 +153,13 @@ export function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * 防抖：`ms` 毫秒内重复调用只留最后一次。
+ *
+ * @param {Function} fn    要包装的函数
+ * @param {number}   [ms=300] 等待毫秒
+ * @returns {(...args: any[]) => void} 防抖后的函数
+ */
 export function debounce(fn, ms = 300) {
   let t;
   return (...args) => {
@@ -139,12 +168,10 @@ export function debounce(fn, ms = 300) {
   };
 }
 
-/* ---------- 弹层通用（多选下拉 / 级联共用） ---------- */
-
-//: 弹层挂 body + fixed 定位：采集配置那栏是 overflow 滚动容器，贴在字段上会被裁掉。
-//: 同一时刻只开一个，全局只挂一份监听——组件再多个也不会漏，页面切换也不用手工拆。
+/** 当前打开的全局弹层；同一时刻只开一个，挂 body + fixed，免得被滚动容器裁掉。 */
 let openPop = null;
 
+/** 关掉当前打开的全局弹层。 */
 function closeOpenPop() {
   if (!openPop) return;
   openPop.close();
@@ -169,6 +196,7 @@ document.addEventListener("scroll", () => openPop && openPop.place(), true);
  * @param {{minWidth?: number, onOpen?: () => void, onClose?: () => void}} [opts]
  */
 function attachPop(trigger, pop, { minWidth = 200, onOpen, onClose } = {}) {
+  /** 贴着 trigger 定位；贴到窗口底部就翻上去。 */
   function place() {
     const r = trigger.getBoundingClientRect();
     const h = Math.min(pop.scrollHeight || 280, 360);
@@ -177,7 +205,6 @@ function attachPop(trigger, pop, { minWidth = 200, onOpen, onClose } = {}) {
     if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
     pop.style.left = `${left}px`;
     pop.style.width = `${w}px`;
-    // 默认向下；贴到窗口底部就翻上去，免得被截断
     const roomBelow = window.innerHeight - r.bottom;
     if (roomBelow < h + 12 && r.top > roomBelow) {
       pop.style.top = "auto";
@@ -190,6 +217,7 @@ function attachPop(trigger, pop, { minWidth = 200, onOpen, onClose } = {}) {
     }
   }
 
+  /** 打开弹层：挂 body、定位，并登记到全局 `openPop`。 */
   function open() {
     closeOpenPop();
     document.body.appendChild(pop);
@@ -198,11 +226,10 @@ function attachPop(trigger, pop, { minWidth = 200, onOpen, onClose } = {}) {
     place();
     trigger.classList.add("open");
     trigger.setAttribute("aria-expanded", "true");
-    // 点击后组件常会重绘（innerHTML 重写），e.target 已脱离文档，contains() 判不出来。
-    // 事件路径是派发那一刻算好的，照样包含弹层，用它认「点在弹层里」。
     openPop = {
       close,
       place,
+      /** 点击是否落在 trigger 或弹层内；用 composedPath，防组件重绘后 target 失效。 */
       inside(e) {
         const path = typeof e.composedPath === "function" ? e.composedPath() : [e.target];
         return path.includes(trigger) || path.includes(pop);
@@ -210,6 +237,7 @@ function attachPop(trigger, pop, { minWidth = 200, onOpen, onClose } = {}) {
     };
   }
 
+  /** 收起并移除弹层。 */
   function close() {
     pop.hidden = true;
     pop.remove();
@@ -222,12 +250,9 @@ function attachPop(trigger, pop, { minWidth = 200, onOpen, onClose } = {}) {
   return { open, close, place, isOpen: () => !pop.hidden };
 }
 
-/* ---------- 多选下拉 ---------- */
-
-//: 原生 `<select multiple>` 是列表框，选项一直摊开占半屏。
-//: 这里做成「点开才弹」的勾选面板，值仍然是 code 数组。
 /**
- * 多选下拉。外观对齐 `.select`，点开才显示选项。
+ * 多选下拉。外观对齐 `.select`，点开才显示选项（原生 `select multiple` 是一直摊开的列表框）。
+ * 值仍然是 code 数组。
  *
  *   const ms = multiSelect({ onChange: (values) => … });
  *   host.replaceWith(ms.el);
@@ -264,6 +289,7 @@ export function multiSelect({ options = [], values = [], placeholder = "不限",
   let opts = [];
   let selected = new Set();
 
+  /** 按已选集合刷新触发器上的文案。 */
   function paintLabel() {
     const names = opts.filter((o) => selected.has(o.code)).map((o) => o.name);
     if (!names.length) {
@@ -275,6 +301,7 @@ export function multiSelect({ options = [], values = [], placeholder = "不限",
     labelEl.textContent = names.length <= 2 ? names.join("、") : `${names[0]} 等 ${names.length} 项`;
   }
 
+  /** 重绘选项列表并绑勾选回调。 */
   function paintList() {
     if (!opts.length) {
       listEl.innerHTML = `<div class="muted multi-select-empty">暂无选项</div>`;
@@ -299,10 +326,12 @@ export function multiSelect({ options = [], values = [], placeholder = "不限",
     });
   }
 
+  /** 当前选中的 code 数组。 */
   function getValues() {
     return opts.filter((o) => selected.has(o.code)).map((o) => o.code);
   }
 
+  /** 替换选项；尽量保留仍存在的选中项。 */
   function setOptions(next) {
     const keep = [...selected];
     opts = (next || []).map((o) => ({ code: String(o.code), name: o.name || String(o.code) }));
@@ -311,6 +340,7 @@ export function multiSelect({ options = [], values = [], placeholder = "不限",
     paintLabel();
   }
 
+  /** 设置选中值（不触发 onChange）。 */
   function setValues(v) {
     selected = new Set((v || []).map(String));
     paintList();
@@ -332,8 +362,7 @@ export function multiSelect({ options = [], values = [], placeholder = "不限",
   return { el: root, getValues, setValues, setOptions, close: popApi.close };
 }
 
-/* ---------- 级联选择 ---------- */
-
+/** 深度优先遍历树上的每个节点。 */
 function eachNode(nodes, fn) {
   for (const n of nodes || []) {
     fn(n);
@@ -341,6 +370,7 @@ function eachNode(nodes, fn) {
   }
 }
 
+/** 按 code 找节点；找不到返回 `null`。 */
 function findNode(nodes, code) {
   let hit = null;
   eachNode(nodes, (n) => {
@@ -352,6 +382,7 @@ function findNode(nodes, code) {
 /** 到某个 code 的祖先链（不含自己）+ 自己；找不到返回 [] */
 function pathToNode(nodes, code) {
   const chain = [];
+  /** 深搜找目标，边走边压链，失败就弹栈。 */
   function go(list) {
     for (const n of list) {
       chain.push(n);
@@ -411,6 +442,7 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
   let picked = new Set();
   let pickedCode = "";
 
+  /** 当前要渲染的列：从树根沿 drill 往下一层层展开。 */
   function visibleColumns() {
     const cols = [tree];
     for (const node of drill) {
@@ -420,6 +452,7 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
     return cols;
   }
 
+  /** 刷新触发器上的路径 / 已选文案。 */
   function paintLabel() {
     if (multiple) {
       const names = [];
@@ -442,11 +475,12 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
       return;
     }
     labelEl.classList.remove("is-placeholder");
-    // 找不到就先把 code 亮出来，别让已存的值看起来像没配
     labelEl.textContent = hit ? hit.name : pickedCode;
   }
 
   /**
+   * 重绘级联列，并尽量保留各列滚动位置。
+   *
    * @param {number} [resetFrom] 该列起（含）滚动重置为 0——换父级时子级要回顶部；
    *   不传 = 全部保留（勾选/清空不打断浏览位置）。
    */
@@ -470,7 +504,6 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
             const cls = `cascader-item${isActive ? " active" : ""}${isPicked ? " picked" : ""}`;
             const code = escapeHtml(n.code);
             const name = escapeHtml(n.name);
-            // 多选：只有叶子能勾，父级点开下一级；单选：市/区取值，顶层省只展开
             if (multiple && !hasKids) {
               return `<label class="${cls}" data-code="${code}">
                 <input type="checkbox" data-code="${code}" ${isPicked ? "checked" : ""}>
@@ -498,11 +531,9 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
         if (node.children?.length) drill.push(node);
         const resetFrom = drill.map((d) => d.code).join("/") === prevKey ? Infinity : colIndex + 1;
         if (multiple) {
-          // 多选的父级只负责展开
           paintCols(resetFrom);
           return;
         }
-        // 顶层有子级 = 省级分组（如「广东」101280000），只展开不取值——搜索只吃市/区 code
         if (colIndex === 0 && node.children?.length) {
           paintCols(resetFrom);
           return;
@@ -511,7 +542,6 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
         paintCols(resetFrom);
         paintLabel();
         if (onChange) onChange(pickedCode);
-        // 选完不关窗：还能继续改主意 / 往下点别的路径，点「确定」或点外面才收
       });
     });
     colsEl.querySelectorAll("input[data-code]").forEach((input) => {
@@ -529,6 +559,7 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
     });
   }
 
+  /** 单选取 code 字符串，多选取 code 数组。 */
   function getValue() {
     if (!multiple) return pickedCode || "";
     const out = [];
@@ -544,6 +575,7 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
    */
   function isSelectableCode(code) {
     let ok = false;
+    /** 深搜：命中且不是「顶层有子级 = 省级分组」才算可选。 */
     (function go(list, depth) {
       for (const n of list || []) {
         if (n.code === code && !(depth === 0 && n.children?.length)) ok = true;
@@ -553,22 +585,26 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
     return ok;
   }
 
+  /**
+   * 写入选中值；单选会丢掉省级 code，避免把 101280000 发给只吃市/区的接口。
+   *
+   * @param {string|string[]} v 单选取 code，多选取 code 数组
+   */
   function setValue(v) {
     if (multiple) {
       picked = new Set((v || []).map(String));
     } else {
       const code = v ? String(v) : "";
-      // 丢掉省级 code，别把 101280000 这种旧值原样发给接口
       pickedCode = code && tree.length && !isSelectableCode(code) ? "" : code;
     }
     paintCols();
     paintLabel();
   }
 
+  /** 替换整棵树并重置展开路径；换树后会重判一次单选值是否仍合法。 */
   function setNodes(next) {
     tree = normalizeNodes(next || []);
     drill = [];
-    // 换树后重判一次：先 setValue 后 setNodes 的调用顺序也兜得住
     if (!multiple && pickedCode && tree.length && !isSelectableCode(pickedCode)) pickedCode = "";
     paintCols(0);
     paintLabel();
@@ -585,7 +621,7 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
 
   const popApi = attachPop(trigger, pop, {
     minWidth: 320,
-    // 打开时把路径还原到当前值那一层（含自己，好让它的子级也亮出来），不用每次从头点
+    /** 打开时把路径还原到当前值那一层（含自己），子级跟着亮出来。 */
     onOpen() {
       const target = multiple ? getValue()[0] : pickedCode;
       drill = target ? pathToNode(tree, target) : [];
@@ -608,8 +644,7 @@ export function cascader({ nodes = [], value, multiple = false, placeholder = "�
   return { el: root, getValue, setValue, setNodes, close: popApi.close };
 }
 
-/* ---------- 长任务状态 ---------- */
-
+/** 后端状态 → 面板上的文案与样式类。 */
 export const TASK_STATUS = {
   idle:    { label: "待命",   cls: "" },
   running: { label: "进行中", cls: "is-run" },
@@ -666,6 +701,7 @@ export function taskPanel({ title = "任务", stopLabel = "停止", logTitle = "
     if (stopHandler) stopHandler();
   });
 
+  /** 设置事件流水 HTML；空则收起日志区。 */
   function setLog(rows) {
     if (!rows || !rows.length) {
       logEl.classList.add("hidden");
@@ -683,11 +719,14 @@ export function taskPanel({ title = "任务", stopLabel = "停止", logTitle = "
 
   return {
     el: root,
+    /** 注册停止按钮回调。 */
     onStop(fn) {
       stopHandler = fn;
       return this;
     },
     /**
+     * 刷新进度条、状态徽标与计数条。
+     *
      * @param {object} p
      * @param {string} p.status  后端状态或 running/done/error/cancelled/idle
      * @param {number} [p.percent] 0-100；缺省且 running 时用 indeterminate
@@ -743,14 +782,18 @@ export function taskPanel({ title = "任务", stopLabel = "停止", logTitle = "
   };
 }
 
-/** 事件列表 → task-log 的 HTML 行（从两种事件格式提取关键信息） */
+/**
+ * 事件列表 → task-log 的 HTML 行（兼容 match/deliver 的 payload 嵌套与 crawl 的平铺两种格式）。
+ *
+ * @param {Array<Object<string, any>>} events 后端事件
+ * @param {{limit?: number, nameKey?: string}} [opts] `limit` 最多取末尾几条
+ */
 export function renderEvents(events, { limit = 30, nameKey = "name" } = {}) {
   return (events || [])
     .slice(-limit)
     .map((ev) => {
       const at = ev.at || ev.ts || ev.time;
       const name = ev[nameKey] || ev.event || ev.type || "event";
-      // 两种格式：match/deliver 是 {name, payload:{...}}，crawl/desc 是平铺字段
       const flat = { ...ev };
       if (ev.payload && typeof ev.payload === "object") Object.assign(flat, ev.payload);
       const kind = /error|fail|bad|stopped/i.test(String(name))
@@ -773,38 +816,30 @@ function formatEventLabel(name, f) {
   const brand = f.brand || f.brand_name || "";
   const who = job ? (brand ? `${job} @ ${brand}` : job) : "";
 
-  // 抓取：翻页（没有 event 字段，靠 page 计数）
   if (f.page != null && (f.inserted != null || f.kept_count != null)) {
     return `第 ${f.page} 页 · 原始 ${f.raw_count ?? "?"} · 入库 +${f.inserted ?? 0} · 更新 ${f.updated ?? 0}`;
   }
-  // 抓取：JD 补抓
   if (n === "detail_done") return `✓ ${who}${f.has_desc ? "" : "（无描述）"}`;
   if (n === "detail_error") return `✗ ${who} — ${f.message || "拉取失败"}`;
   if (n === "detail_skipped") return `– ${who}（${f.reason || "已有描述"}）`;
   if (n === "detail_stopped") return `⛔ ${f.reason || "已停"}`;
-  // 抓取：生命周期
   if (n === "stoken") return f.message || "正在准备搜索令牌…";
   if (n === "finished") {
-    // crawl 有 stopped_reason，deliver/match 有 sent/failed/skipped 或 analysis_id
     if (f.stopped_reason) return `抓取结束（${f.stopped_reason}）`;
     if (f.sent != null || f.failed != null || f.skipped != null)
       return `完成 · 成功 ${f.sent ?? f.ok ?? 0} / 失败 ${f.failed ?? 0} / 跳过 ${f.skipped ?? 0}`;
     return "完成";
   }
-  // 补抓 JD
   if (n === "item_done") return `${f.has_desc ? "✓" : "○"} ${who}`;
   if (n === "item_error") return `✗ ${who} — ${f.message || "拉取失败"}`;
   if (n === "item_skipped") return `– ${who}（${f.reason || "已有描述"}）`;
   if (n === "start") return `开始补抓 · 共 ${f.total ?? "?"} 条`;
   if (n === "stopped") return `⛔ ${f.reason || "已停"}`;
-  // 匹配
   if (n === "job_start") return `→ 开始匹配 ${who}`;
   if (n === "job_done") return `✓ ${who}${f.score != null ? ` · 评分 ${f.score}` : ""}`;
-  // 投递
   if (n === "send_start") return `→ 发送 ${who || f.encrypt_job_id || ""}`;
   if (n === "sent") return `✓ 已发送 ${who || f.encrypt_job_id || ""}`;
   if (n === "skipped") return `– 跳过 ${who || f.encrypt_job_id || ""}（${f.reason || "已发送"}）`;
-  // 通用兜底：挑几个有意义的字段
   const bits = [who, f.message || f.reason || ""].filter(Boolean);
   return bits.length ? `${n} · ${bits.join(" · ")}` : n;
 }

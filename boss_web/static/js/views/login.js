@@ -4,10 +4,20 @@ import { api } from "../api.js";
 import { toast, modal, el, escapeHtml } from "../ui.js";
 import { refreshBridge } from "../app.js";
 
-//: 模块级状态：整页刷新/新开标签会重新求值（false），页内路由来回切不会（保持 true）。
-//: 用它区分「刷新页面」与「页内切走再切回」——前者当放弃，后者接上原有流程。
+/**
+ * 模块级状态：整页刷新/新开标签会重新求值为 `false`，页内路由来回切保持 `true`。
+ * 用来区分「刷新页面」（放弃原流程）与「页内切回」（接上原有流程）。
+ */
 let bootstrapped = false;
 
+/**
+ * 渲染登录页：短信验证码与 APP 扫码两条登录流，以及会话信息侧栏。
+ *
+ * 已有进行中的任务时：整页刷新视为放弃并清残留；页内切回则接上原任务。
+ *
+ * @param {HTMLElement} root 挂载容器
+ * @returns {() => void} 离开页面时的清理（停轮询、关滑块）
+ */
 export async function renderLogin(root) {
   const freshPageLoad = !bootstrapped;
   bootstrapped = true;
@@ -139,11 +149,16 @@ export async function renderLogin(root) {
   let taskId = null;
   let pollTimer = null;
   let sliderModal = null;
-  let sliderAutoClose = false; // 程序化关闭弹窗时置位，免得被当成「用户放弃」
-  let currentTask = null;      // 最近一次任务快照，供「打开滑块验证」重开弹窗用
+  let sliderAutoClose = false;
+  let currentTask = null;
   let currentStep = 1;
   let lastStatus = null;
 
+  /**
+   * 短信流步骤条与四步面板的显隐。
+   *
+   * @param {number} n 1 手机号 / 2 滑块 / 3 验证码 / 4 完成
+   */
   function goStep(n) {
     currentStep = n;
     root.querySelectorAll("#track .node").forEach((node) => {
@@ -157,10 +172,14 @@ export async function renderLogin(root) {
     $("step-done").classList.toggle("hidden", n !== 4);
   }
 
-  // ---- 扫码登录 --------------------------------------------------------- //
-  let mode = "sms";          // "sms" | "qr"
-  let qrRevision = -1;       // 票据换发后二维码内容会变，变了就重取图
+  let mode = "sms";
+  let qrRevision = -1;
 
+  /**
+   * 切换短信/扫码页签的面板与按钮样式。
+   *
+   * @param {"sms"|"qr"} next 目标页签
+   */
   function setMode(next) {
     if (next === mode) return;
     mode = next;
@@ -173,34 +192,47 @@ export async function renderLogin(root) {
     $("mode-qr").classList.toggle("ghost", sms);
   }
 
+  /**
+   * 只显示扫码流的某一块面板，其余隐藏。
+   *
+   * @param {"qr-idle"|"qr-wait"|"qr-scanned"|"qr-done"} name 目标面板 id
+   */
   function showQrPane(name) {
     for (const id of ["qr-idle", "qr-wait", "qr-scanned", "qr-done"]) {
       $(id).classList.toggle("hidden", id !== name);
     }
   }
 
-  /** 图挂了（502/404）浏览器只给裂图，这里把响应里的 message 接住摆出来。 */
+  /**
+   * 二维码图片加载失败时改显示响应里的 message。
+   *
+   * @param {HTMLImageElement} img 裂图的 `<img>`
+   */
   async function onQrImgError(img) {
-    img.onerror = null; // 同一张图别反复重试
+    img.onerror = null;
     img.classList.add("hidden");
     let msg = "二维码图片加载失败，请点「刷新二维码」重试";
     try {
       const res = await fetch(img.src);
       const data = await res.json();
       if (data && data.message) msg = data.message;
-    } catch { /* 非 JSON（网络断了/被顶成页面）就用兜底文案 */ }
+    } catch { }
     const box = $("qr-img-error");
     box.textContent = msg;
     box.classList.remove("hidden");
     toast(msg, "bad");
   }
 
+  /**
+   * 按任务里的 qr 快照刷新二维码图/状态；`revision` 变了才重新取图。
+   *
+   * @param {Object} task 任务快照，取 `task.qr`
+   */
   function applyQr(task) {
     const qr = task.qr || {};
     if (!qr.payload) return;
     if (qr.revision !== qrRevision) {
       qrRevision = qr.revision;
-      // ?v= 破缓存：票据换发后内容变了，旧图不能再留着
       const img = $("qr-img");
       const err = $("qr-img-error");
       err.classList.add("hidden");
@@ -220,6 +252,11 @@ export async function renderLogin(root) {
     }
   }
 
+  /**
+   * 把最近事件画进右侧事件流（最多 25 条）。
+   *
+   * @param {Array<{at?: number, name: string, payload?: Object}>} events 任务事件列表
+   */
   function renderTaskEvents(events) {
     const box = $("events");
     if (!events || !events.length) return;
@@ -235,6 +272,7 @@ export async function renderLogin(root) {
     box.scrollTop = box.scrollHeight;
   }
 
+  /** 读 `/api/auth/status` 刷新「当前会话」卡片。 */
   async function refreshSession() {
     try {
       const st = await api.get("/api/auth/status");
@@ -249,13 +287,19 @@ export async function renderLogin(root) {
     }
   }
 
+  /** 关掉滑块弹窗；置 `sliderAutoClose`，免得被 `onClose` 当成用户放弃。 */
   function closeSlider() {
     if (!sliderModal) return;
-    sliderAutoClose = true; // 告诉 onClose：这是程序化关闭，不是用户放弃
+    sliderAutoClose = true;
     sliderModal.close();
     sliderModal = null;
   }
 
+  /**
+   * 打开极验官方滑块弹窗。challenge 一次性，重载前必须先 `/refresh` 换新。
+   *
+   * @param {Object} task 任务快照，取 `task.task_id`
+   */
   function openSlider(task) {
     const url = `/api/auth/slider/${task.task_id}`;
     if (sliderModal) return;
@@ -279,22 +323,25 @@ export async function renderLogin(root) {
           sliderAutoClose = false;
           return;
         }
-        // 用户手动关闭弹窗 = 放弃本次登录，回到手机号阶段
         abandonLogin("已关闭滑块验证，本次登录已放弃。");
       },
     });
     body.querySelector("#btn-retry-slider").addEventListener("click", async () => {
       const f = body.querySelector("iframe");
       try {
-        // 极验的 challenge 一次性：重载旧页面必然报错，得先换一张新的。
         await api.post(`/api/auth/slider/${task.task_id}/refresh`);
-        f.src = `${url}?t=${Date.now()}`; // 换新挑战，顺便破缓存
+        f.src = `${url}?t=${Date.now()}`;
       } catch (err) {
         toast(err.message || "刷新滑块失败", "bad");
       }
     });
   }
 
+  /**
+   * 放弃当前登录流：停轮询、关滑块、把本条流的界面归位，并通知后端取消任务。
+   *
+   * @param {string} [message] 放弃原因，非空则弹 toast
+   */
   async function abandonLogin(message) {
     const id = taskId;
     const wasQr = currentTask?.kind === "qr";
@@ -304,7 +351,6 @@ export async function renderLogin(root) {
       pollTimer = null;
     }
     closeSlider();
-    // 只把**自己那条**流的界面归位，别顺手推对方的进度条
     if (wasQr) {
       showQrPane("qr-idle");
     } else {
@@ -313,11 +359,17 @@ export async function renderLogin(root) {
     if (id) {
       try {
         await api.post("/api/auth/cancel", { task_id: id });
-      } catch { /* 任务已结束就算了 */ }
+      } catch { }
     }
     if (message) toast(message, "warn");
   }
 
+  /**
+   * 按任务快照分派到短信或扫码处理器。必须按 `task.kind` 分——两条流的
+   * status 字符串重叠（pending / logging_in / done），共用分派器会串台。
+   *
+   * @param {Object} task 任务快照
+   */
   function applyTask(task) {
     if (!task || !task.task_id) return;
     taskId = task.task_id;
@@ -325,11 +377,6 @@ export async function renderLogin(root) {
     $("gate-state").textContent = task.status;
     renderTaskEvents(task.events);
 
-    // 按**任务自己的类型**分派，不按当前停在哪个页签。
-    //
-    // 两条流的 status 字符串是重叠的（pending / logging_in / done），共用一个
-    // 分派器就会串台：扫码任务一启动也是 pending，落进短信那支就会把短信的
-    // 步骤条往前推一格——短信进度无端前进，就是这么来的。
     if (task.kind === "qr") {
       applyQrTask(task);
     } else {
@@ -344,11 +391,9 @@ export async function renderLogin(root) {
     lastStatus = st;
 
     if (st === "need_slider") {
-      // 第二步：人机验证。后端已把帮助页挂出来，这里弹窗给人拖。
       goStep(2);
       if (!sliderModal) openSlider(task);
     } else if (st === "need_code") {
-      // 第三步：验证码已发出，等输入 + 点「登录」。
       closeSlider();
       goStep(3);
       $("code-hint").textContent = task.error
@@ -358,7 +403,6 @@ export async function renderLogin(root) {
       closeSlider();
       goStep(3);
     } else if (st === "pending" || st === "sending_sms") {
-      // 滑块刚通过 → 关掉弹窗、进入等验证码那一步；否则保持在滑块那一步。
       if (prev === "need_slider") {
         closeSlider();
         goStep(3);
@@ -382,18 +426,18 @@ export async function renderLogin(root) {
     }
   }
 
-  /** APP 扫码登录：只推进扫码那几块面板，绝不碰短信的步骤条。 */
-  //
-  // 也**绝不切页签**。poll 每 900ms 打一发，只要这里调过一次 setMode("qr")，
-  // 用户点「短信登录」就会在一秒内被拽回来，表现成「点了没反应」。页签只听
-  // 用户的（生成二维码 / 页内切回），任务状态只管自己那几块面板。
+  /**
+   * APP 扫码登录：只推进扫码那几块面板，绝不碰短信的步骤条，也绝不切页签。
+   * 轮询每 900ms 一发，这里若调过 `setMode`，用户点页签会在一秒内被拽回来。
+   *
+   * @param {Object} task 任务快照
+   */
   function applyQrTask(task) {
     const st = task.status;
     lastStatus = st;
     if (task.qr && (task.qr.payload || task.qr.scanned)) applyQr(task);
 
     if (st === "pending") {
-      // 刚起线程，二维码还没出：留在「生成中」，别去动短信轨
       if (mode === "qr") showQrPane("qr-idle");
     } else if (st === "need_scan") {
       showQrPane("qr-wait");
@@ -413,6 +457,7 @@ export async function renderLogin(root) {
     }
   }
 
+  /** 拉一次任务状态并分派；终态（done/error/cancelled）时停掉轮询。 */
   async function poll() {
     if (!taskId) return;
     try {
@@ -433,7 +478,6 @@ export async function renderLogin(root) {
       const task = await api.post("/api/auth/sms", { phone, dial_code: $("dial").value.trim() || "86" });
       taskId = task.task_id;
       lastStatus = null;
-      // 点「发送验证码」先进滑块那一步；命中人机验证时后端会把弹窗挂出来。
       goStep(2);
       applyTask(task);
       clearInterval(pollTimer);
@@ -445,10 +489,10 @@ export async function renderLogin(root) {
     }
   });
 
-  // ---- 扫码登录按钮 ---- //
+  /** 请求生成二维码，切到扫码页签并开始轮询。 */
   async function startQr() {
     try {
-      qrRevision = -1; // 强制重取图
+      qrRevision = -1;
       const task = await api.post("/api/auth/qr", {});
       taskId = task.task_id;
       lastStatus = null;
@@ -467,11 +511,16 @@ export async function renderLogin(root) {
     if (taskId) {
       try {
         await api.post("/api/auth/cancel", { task_id: taskId });
-      } catch { /* 已结束就算了 */ }
+      } catch { }
     }
     await startQr();
   });
 
+  /**
+   * 放弃扫码登录：停轮询、回 idle、通知后端取消。
+   *
+   * @param {string} [message] 放弃原因，非空则弹 toast
+   */
   async function cancelQr(message) {
     const id = taskId;
     taskId = null;
@@ -483,15 +532,19 @@ export async function renderLogin(root) {
     if (id) {
       try {
         await api.post("/api/auth/cancel", { task_id: id });
-      } catch { /* 任务已结束就算了 */ }
+      } catch { }
     }
     if (message) toast(message, "warn");
   }
   $("btn-qr-cancel").addEventListener("click", () => cancelQr("已放弃本次扫码登录"));
   $("btn-qr-cancel-2").addEventListener("click", () => cancelQr("已放弃本次扫码登录"));
 
-  // 切页签 = 换一条登录流。同一时刻只跑一条，旧的那条当场作废：
-  // 二维码留着也只会挡住「发送验证码」（后端 409），不如废掉，想扫再生成。
+  /**
+   * 切页签 = 换一条登录流。旧流当场作废（旧二维码留着也只会挡住发码，后端 409），
+   * 两条流的界面都归位，旧码作废。
+   *
+   * @param {"sms"|"qr"} next 目标页签
+   */
   async function switchFlow(next) {
     setMode(next);
     const alive = taskId && currentTask && !["done", "error", "cancelled"].includes(currentTask.status);
@@ -500,10 +553,9 @@ export async function renderLogin(root) {
     await abandonLogin(
       wasQr ? "已放弃本次扫码登录，要扫码请重新生成二维码" : "已放弃短信登录，请重新发送验证码"
     );
-    // 归位：把**对方**那条流的界面也清干净，免得残留半截状态
     showQrPane("qr-idle");
     goStep(1);
-    qrRevision = -1; // 旧码作废，下次生成必须重取图
+    qrRevision = -1;
   }
   $("mode-sms").addEventListener("click", () => switchFlow("sms"));
   $("mode-qr").addEventListener("click", () => switchFlow("qr"));
@@ -555,7 +607,6 @@ export async function renderLogin(root) {
 
   refreshSession();
 
-  // 若已有进行中的任务：整页刷新时视为放弃，清掉残留；页内切回时接上。
   try {
     const st = await api.get("/api/auth/status");
     const running = st.task && !["done", "error", "cancelled"].includes(st.task.status);
@@ -564,14 +615,12 @@ export async function renderLogin(root) {
         taskId = st.task.task_id;
         await abandonLogin("页面已刷新，上一次登录已放弃。");
       } else {
-        // 页内切回：接上进行中的任务，并把页签摆到那条流上（这里才是该切的时机，
-        // 轮询里不许切——否则用户点页签会被拽回去）。
         applyTask(st.task);
         setMode(st.task.kind === "qr" ? "qr" : "sms");
         pollTimer = setInterval(poll, 900);
       }
     }
-  } catch { /* ignore */ }
+  } catch { }
 
   return () => {
     clearInterval(pollTimer);

@@ -1,6 +1,6 @@
 """AST 检查：每个函数/类都要有 Google 风格文档字符串，且不残留 RST 标记。
 
-用法::
+用法：
 
     python tools/docstring_audit.py                # 全仓
     python tools/docstring_audit.py boss_jobs      # 指定路径

@@ -10,6 +10,7 @@ import { renderResume } from "./views/resume.js";
 import { renderMatch } from "./views/match.js";
 import { renderSettings } from "./views/settings.js";
 
+/** hash 路径 → 视图渲染函数。 */
 const routes = {
   "": renderHome,
   "/": renderHome,
@@ -21,13 +22,16 @@ const routes = {
   "/llm": renderSettings,
 };
 
+/** 上一视图的清理函数，换页前调用。 */
 let disposePrev = null;
 
+/** 从 `location.hash` 取路径（去掉 query）。 */
 function currentPath() {
   const h = location.hash.replace(/^#/, "") || "/";
   return h.split("?")[0];
 }
 
+/** 路径前缀 → 舰桥阶段 key；不在流程里返回 ""。 */
 function stageOf(path) {
   if (path.startsWith("/login")) return "login";
   if (path.startsWith("/jobs")) return "jobs";
@@ -37,6 +41,7 @@ function stageOf(path) {
   return "";
 }
 
+/** 把 `#stages` 里当前阶段的链接标成 `.active`。 */
 function paintStages(path) {
   const active = stageOf(path);
   document.querySelectorAll("#stages a").forEach((a) => {
@@ -44,12 +49,13 @@ function paintStages(path) {
   });
 }
 
+/** 按 hash 渲染当前视图，换页前先调用上一视图的 dispose。 */
 export async function navigate() {
   const path = currentPath();
   paintStages(path);
   const view = document.getElementById("view");
   if (typeof disposePrev === "function") {
-    try { disposePrev(); } catch { /* ignore */ }
+    try { disposePrev(); } catch { }
     disposePrev = null;
   }
   view.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>正在接入…</p></div>`;
@@ -63,14 +69,12 @@ export async function navigate() {
   window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
 }
 
-/** 舰桥上的会话信号球 */
+/** 刷新舰桥会话信号球，并广播 `boss:session` 给首页卡片。 */
 export async function refreshBridge() {
   const dot = document.getElementById("signal-session");
   const label = document.getElementById("signal-session-label");
   try {
     const st = await api.get("/api/auth/status");
-    // 广播一份：首页「会话」卡片跟着舰桥一起刷新。以前它只在渲染时取一次，
-    // 首屏那次请求失败/被缓存成「未登录」后就一直停在「离线」，得手动刷新页面。
     window.dispatchEvent(new CustomEvent("boss:session", { detail: st }));
     if (st.logged_in) {
       dot.className = "signal ok";
@@ -96,9 +100,7 @@ window.addEventListener("load", () => {
   navigate();
   refreshBridge();
   setInterval(refreshBridge, 8000);
-  // 开页面就比一次版本；只弹一次（本页刷新也不再弹第二回）
-  maybePromptUpdate().catch(() => { /* 检测失败不打扰 */ });
-  // 挂机也别错过新版：轻提示（toast + 系统设置圆点），不重复弹窗
+  maybePromptUpdate().catch(() => { });
   startUpdateWatcher();
 });
 

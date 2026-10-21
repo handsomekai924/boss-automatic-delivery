@@ -5,6 +5,13 @@ import { toast, escapeHtml, fmtTime } from "../ui.js";
 
 const MIN_SCORE_DEFAULT = 70;
 
+/**
+ * 渲染批量发送目录：发送工具条、投递任务面板、发送清单。
+ *
+ * @param {HTMLElement} pane   内容容器
+ * @param {Object}     state   页面级状态（matches / analysisId / selected 等）
+ * @param {Object}     helpers 共享助手（confirmAndSend、sendAllTargets 等）
+ */
 export function renderDeliver(pane, state, helpers) {
   const { matches, analysisId, selected, resumeTitle } = state;
   const { deliverPanelHost, sendRestriction, sendAllTargets, updateSendCounts,
@@ -60,16 +67,13 @@ export function renderDeliver(pane, state, helpers) {
     return;
   }
 
-  // 挂载投递任务面板
   if (deliverPanelHost) $("deliver-task").appendChild(deliverPanelHost);
 
-  // 阈值
   const minInput = $("send-min-score");
   helpers.loadMinScore(minInput);
   minInput.addEventListener("input", () => helpers.updateSendCounts(minInput));
   minInput.addEventListener("change", () => helpers.saveMinScore(minInput));
 
-  // 发送按钮
   $("btn-send-all").addEventListener("click", () => {
     const min = helpers.minScore(minInput);
     const targets = helpers.sendAllTargets(minInput);
@@ -82,9 +86,9 @@ export function renderDeliver(pane, state, helpers) {
     helpers.confirmAndSend(targets, "选中的职位将按匹配时安全快照执行策略", { mode: "selected" });
   });
 
-  // 发送清单
   renderSendList();
 
+  /** 按分数从高到低渲染发送清单，绑定勾选与详情按钮。 */
   function renderSendList() {
     const box = $("send-list");
     if (!box) return;

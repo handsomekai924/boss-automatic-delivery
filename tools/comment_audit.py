@@ -1,6 +1,6 @@
 """按 tokenize 分类注释：只留工具链注释，其余应已删除。
 
-用法::
+用法：
 
     python tools/comment_audit.py                  # 全仓
     python tools/comment_audit.py boss_jobs        # 指定路径

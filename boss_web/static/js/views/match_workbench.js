@@ -5,6 +5,13 @@ import { toast, modal, escapeHtml, scoreRing, taskPanel, renderEvents } from "..
 
 const PAGE_SIZE = 20;
 
+/**
+ * 渲染匹配工作台：简历选择、范围条、匹配按钮、岗位列表与匹配结果双栏。
+ *
+ * @param {HTMLElement} pane   内容容器
+ * @param {Object}     state   页面级状态
+ * @param {Object}     helpers 共享助手
+ */
 export function renderWorkbench(pane, state, helpers) {
   const {
     resumes, currentResumeId, jobs, totalJobs, page, selected,
@@ -66,10 +73,8 @@ export function renderWorkbench(pane, state, helpers) {
 
   const $ = (id) => pane.querySelector("#" + id);
 
-  // 挂载匹配任务面板
   if (matchPanelHost) $("match-task").appendChild(matchPanelHost);
 
-  // 简历下拉
   const sel = $("resume-select");
   sel.innerHTML =
     `<option value="">— 选择简历 —</option>` +
@@ -82,16 +87,12 @@ export function renderWorkbench(pane, state, helpers) {
     state.currentResumeId = sel.value;
   });
 
-  // 范围条
   renderScopeBar();
 
-  // 岗位列表
   renderJobs();
 
-  // 匹配结果
   renderMatches();
 
-  // 按钮
   $("btn-match-all").addEventListener("click", () => startMatch([]));
   $("btn-match-sel").addEventListener("click", () => {
     if (!selected.size) return toast("先在左侧勾选岗位", "warn");
@@ -118,12 +119,12 @@ export function renderWorkbench(pane, state, helpers) {
       helpers.loadJobs();
     }
   });
-  // 初始翻页按钮状态
   const prevBtn = $("btn-prev");
   const nextBtn = $("btn-next");
   if (prevBtn) prevBtn.disabled = state.page <= 0;
   if (nextBtn) nextBtn.disabled = (state.page + 1) * PAGE_SIZE >= state.totalJobs;
 
+  /** 绘制范围条（全部 / 抓取任务 / 已选），支持清除范围。 */
   function renderScopeBar() {
     const bar = $("scope-bar");
     if (!bar) return;
@@ -146,6 +147,5 @@ export function renderWorkbench(pane, state, helpers) {
     });
   }
 
-  // 暴露给壳层：外部（匹配本批职位）改了 scope 后可以重绘范围条
   helpers._renderScopeBar = renderScopeBar;
 }

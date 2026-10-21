@@ -3,8 +3,7 @@
 import { api } from "../api.js";
 import { toast, escapeHtml, taskPanel, modal } from "../ui.js";
 
-//: DeepSeek 的「一键预设」。用户自己去找 Base URL 是最容易卡住的一步，
-//: 直接给填好。Key 必须他自己去平台拿——程序碰不到，也不该碰。
+/** DeepSeek 的「一键预设」：Base URL 直接填好，Key 由用户自己去平台拿。 */
 const PRESET = {
   label: "DeepSeek",
   site: "https://platform.deepseek.com",
@@ -13,8 +12,7 @@ const PRESET = {
   model: "deepseek-chat",
 };
 
-//: 引导截图。有图更好懂，没有也不影响——onerror 直接摘掉，卡片退化成纯文字。
-//: 图放 ``boss_web/static/guide/``，随 static 目录一起进包。
+/** 引导截图表；缺失时 `onerror` 摘掉图片，卡片退化成纯文字。图在 `boss_web/static/guide/`。 */
 const GUIDE_SHOTS = {
   login: { src: "/static/guide/deepseek-login.png", alt: "DeepSeek 开放平台的登录页" },
   recharge: { src: "/static/guide/deepseek-recharge.png", alt: "左侧菜单里的「充值」入口" },
@@ -22,14 +20,14 @@ const GUIDE_SHOTS = {
   copy: { src: "/static/guide/deepseek-copy-key.png", alt: "创建后弹窗里的复制按钮" },
 };
 
+/** 按 key 取一张引导截图的 `<img>` 标签；没有这个 key 时返回空串。 */
 function shot(key) {
   const s = GUIDE_SHOTS[key];
   if (!s) return "";
   return `<img class="guide-shot" src="${s.src}" alt="${s.alt}" loading="lazy" onerror="this.remove()">`;
 }
 
-//: 配置指引正文。整段塞进弹窗里，页面上只留一个入口按钮——
-//: 步骤带截图，展开收起会把表单顶到很下面，弹窗关掉就完事。
+/** 配置指引正文（带截图的分步说明），整段塞进弹窗。 */
 function guideBodyHtml() {
   return `
     <ol class="guide-steps">
@@ -101,6 +99,12 @@ function guideBodyHtml() {
   `;
 }
 
+/**
+ * 渲染 AI 设置页：接口配置表单、模型下拉、连接状态与首次配置引导。
+ *
+ * @param {HTMLElement} root          挂载容器
+ * @param {(dirty: boolean) => void} [onDirty] 表单有无未保存改动的回调
+ */
 export async function renderLLM(root, onDirty = () => {}) {
   root.innerHTML = `
     <div class="page-head">
@@ -198,17 +202,22 @@ export async function renderLLM(root, onDirty = () => {}) {
   /** 拉到的模型列表（用于下拉框） */
   let modelList = [];
 
-  // 同步 HTTP 也可能要几十秒（LLM 测试超时 30s），用统一面板给进度
   const linkPanel = taskPanel({ title: "测试连接", stopLabel: "" });
   $("llm-task").appendChild(linkPanel.el);
   linkPanel.update({ status: "idle", percent: 0 });
 
+  /**
+   * 把测试/拉取进度刷进统一任务面板。
+   *
+   * @param {string} state   面板状态（idle/running/done/error）
+   * @param {string} detail  当前步骤文案
+   * @param {number} percent 进度百分比
+   */
   function paintLink(state, detail, percent) {
     linkPanel.update({ status: state, percent, current: detail, counts: [] });
   }
 
-  // ---------- 引导：正文进弹窗，页面只留入口按钮 ----------
-  // 配好了只换标题，不再做展开/收起——弹窗自己会关，页面上不需要记状态
+  /** 已配置则把引导卡片标题换成「配置指引」，否则维持拉新文案。 */
   function paintGuide(configured) {
     $("guide-title").textContent = configured
       ? "配置指引"
@@ -227,7 +236,6 @@ export async function renderLLM(root, onDirty = () => {}) {
   /** 打开配置指引弹窗。宽一点，截图才看得清 */
   function openGuide() {
     const dlg = modal({ title: "API Key 配置指引", body: guideBodyHtml(), wide: true });
-    // 弹窗里也有「一键填入」——先关窗再填，焦点才落到 Key 框上
     dlg.bodyEl.querySelector(".btn-preset").addEventListener("click", () => {
       dlg.close();
       applyPreset();
@@ -237,10 +245,14 @@ export async function renderLLM(root, onDirty = () => {}) {
   $("guide-open").addEventListener("click", openGuide);
   $("btn-preset").addEventListener("click", applyPreset);
 
+  /**
+   * 用 `modelList` 填模型下拉框。
+   *
+   * @param {string} [selected] 当前选中的模型 id（不在列表里也保留）
+   */
   function fillModelSelect(selected = "") {
     const sel = $("model");
     const ids = [...modelList];
-    // 已保存但不在列表里的模型也保留，别把用户的选择弄丢
     if (selected && !ids.includes(selected)) ids.unshift(selected);
     sel.innerHTML =
       `<option value="">${ids.length ? "请选择模型" : "先拉取模型列表"}</option>` +
@@ -252,6 +264,11 @@ export async function renderLLM(root, onDirty = () => {}) {
         .join("");
   }
 
+  /**
+   * 按服务端返回的固定参数刷新说明条。
+   *
+   * @param {Object<string, number>} [fixed] 温度 / tokens / 超时等键值
+   */
   function setFixedBanner(fixed) {
     const f = fixed || {};
     $("fixed-params").innerHTML =
@@ -262,6 +279,13 @@ export async function renderLLM(root, onDirty = () => {}) {
       `超时 ${f.timeout ?? 120} 秒）。`;
   }
 
+  /**
+   * 刷新「连接状态」卡片与配置状态标签。
+   *
+   * @param {boolean} configured 是否已配置
+   * @param {string}  [model]    当前模型名
+   * @param {string}  [baseUrl]  当前接口地址
+   */
   function paintReady(configured, model, baseUrl) {
     $("cfg-state").textContent = configured ? "已配置" : "没配置";
     if (!configured) {
@@ -277,6 +301,7 @@ export async function renderLLM(root, onDirty = () => {}) {
     $("llm-ring").innerHTML = `<div>已就绪<small>待测试</small></div>`;
   }
 
+  /** 读 `/api/llm/config` 回填表单；已有 Key 和接口地址时顺手拉一次模型列表。 */
   async function load() {
     try {
       const c = await api.get("/api/llm/config");
@@ -288,7 +313,6 @@ export async function renderLLM(root, onDirty = () => {}) {
       fillModelSelect(c.model || "");
       paintReady(c.configured, c.model, c.base_url);
       paintGuide(c.configured);
-      // 已有 Key 和接口地址就顺手把模型列表拉下来
       if (c.has_key && c.base_url) {
         await fetchModels({ silent: true });
         fillModelSelect(c.model || "");
@@ -299,8 +323,10 @@ export async function renderLLM(root, onDirty = () => {}) {
   }
 
   /**
-   * 拉模型列表。
-   * @param {{silent?: boolean}} opts silent=失败不弹 toast
+   * 拉模型列表；成功/失败都会写提示与进度面板。
+   *
+   * @param {{silent?: boolean}} [opts] `silent` 为真时失败不弹 toast
+   * @returns {Promise<boolean>} 是否拉取成功
    */
   async function fetchModels(opts = {}) {
     const btn = $("btn-models");
@@ -311,7 +337,6 @@ export async function renderLLM(root, onDirty = () => {}) {
     try {
       const payload = {
         base_url: $("base-url").value.trim(),
-        // 未保存的 Key 也带上，改完先拉再存
         api_key: $("api-key").value.trim() || undefined,
       };
       const r = await api.post("/api/llm/models", payload);
@@ -362,7 +387,6 @@ export async function renderLLM(root, onDirty = () => {}) {
       paintReady(saved.configured, saved.model, saved.base_url);
       paintGuide(true);
       toast("配置已保存", "ok");
-      // 刚填了新 Key 就顺手验一下——不然用户以为配好了，到匹配那步才发现 Key 是错的
       if (key) await testConnection({ auto: true });
     } catch (err) {
       toast(err.message, "bad");
@@ -370,8 +394,9 @@ export async function renderLLM(root, onDirty = () => {}) {
   });
 
   /**
-   * 测试连接。
-   * @param {{auto?: boolean}} opts auto=保存后自动跑，失败不弹 toast
+   * 测试连接；成功/失败都会写状态环与进度面板。
+   *
+   * @param {{auto?: boolean}} [opts] `auto` 为保存后自动跑，失败不弹 toast
    */
   async function testConnection(opts = {}) {
     const pill = $("test-result");

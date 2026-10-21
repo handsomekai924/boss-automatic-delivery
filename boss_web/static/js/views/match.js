@@ -11,6 +11,12 @@ const PAGE_SIZE = 20;
 const MIN_SCORE_DEFAULT = 70;
 const GREET_COOLDOWN_DAYS = 30;
 
+/**
+ * 渲染职位匹配目录壳：页面级状态、任务面板、四个子目录切换。
+ *
+ * @param {HTMLElement} root 挂载容器
+ * @returns {() => void} 卸载时清掉匹配 / 投递轮询定时器
+ */
 export async function renderMatch(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -30,7 +36,6 @@ export async function renderMatch(root) {
     </div>
   `;
 
-  // ---------- 页面级状态（跨目录不销毁） ----------
   const state = {
     resumes: [],
     currentResumeId: "",
@@ -41,7 +46,7 @@ export async function renderMatch(root) {
     matches: [],
     analysisId: null,
     resumeTitle: "",
-    scope: { type: "all" },   // {type:"all"} | {type:"crawl_task",crawl_task_id,job_count} | {type:"jobs",job_ids}
+    scope: { type: "all" },
     matchTaskId: null,
     deliverTaskId: null,
     greetDrafts: new Map(),
@@ -50,7 +55,6 @@ export async function renderMatch(root) {
     deliverTimer: null,
   };
 
-  // ---------- 任务面板 ----------
   const matchPanel = taskPanel({ title: "批量匹配", stopLabel: "停止匹配" });
   const deliverPanel = taskPanel({ title: "批量投递", stopLabel: "停止投递" });
   matchPanel.update({ status: "idle", percent: 0 });
@@ -75,17 +79,17 @@ export async function renderMatch(root) {
     }
   });
 
-  // ---------- 共享 helpers ----------
   const helpers = {
     matchPanelHost: matchPanel.el,
     deliverPanelHost: deliverPanel.el,
 
+    /** 切到指定目录。 */
     switchTab(name) {
       const tab = root.querySelector(`.settings-tab[data-tab="${name}"]`);
       if (tab) show(name);
     },
 
-    // --- 岗位列表 ---
+    /** 按当前 state 渲染岗位列表与分页控件。 */
     renderJobs() {
       const pane = root.querySelector("#match-pane");
       const jobList = pane?.querySelector("#job-list");
@@ -133,6 +137,7 @@ export async function renderMatch(root) {
       helpers.updateSelCount();
     },
 
+    /** 同步各处「已选 N」计数。 */
     updateSelCount() {
       const pane = root.querySelector("#match-pane");
       const selCount = pane?.querySelector("#sel-count");
@@ -141,23 +146,22 @@ export async function renderMatch(root) {
       if (sendSelN) sendSelN.textContent = String(state.selected.size);
     },
 
+    /** 按当前范围拉取一页岗位并刷新列表。 */
     async loadJobs() {
       try {
         const sc = state.scope;
         let url = `/api/jobs?limit=${PAGE_SIZE}&offset=${state.page * PAGE_SIZE}`;
         if (sc.type === "crawl_task" && sc.crawl_task_id) {
-          // 范围内职位：从任务归属取 id，再拉详情
           const r = await api.get(`/api/crawl/tasks/${encodeURIComponent(sc.crawl_task_id)}/jobs?limit=200`);
           const ids = (r.items || []).filter((j) => !j.missing).map((j) => j.encrypt_job_id);
           state.jobs = ids.slice(state.page * PAGE_SIZE, (state.page + 1) * PAGE_SIZE).map((id) => ({ encrypt_job_id: id, job_name: id, brand_name: "" }));
           state.totalJobs = ids.length;
-          // 拉全量摘要
           if (ids.length) {
             try {
               const full = await api.get(`/api/jobs?limit=${Math.min(ids.length, 200)}&offset=0`);
               const map = new Map((full.items || []).map((j) => [j.encrypt_job_id, j]));
               state.jobs = state.jobs.map((j) => map.get(j.encrypt_job_id) || j);
-            } catch { /* ignore */ }
+            } catch {}
           }
         } else if (sc.type === "jobs" && sc.job_ids?.length) {
           const ids = sc.job_ids;
@@ -174,14 +178,13 @@ export async function renderMatch(root) {
       }
     },
 
-    // --- 匹配结果 ---
+    /** 按分数从高到低渲染匹配结果卡片，绑定点击进详情。 */
     renderMatches() {
       const pane = root.querySelector("#match-pane");
       const box = pane?.querySelector("#an-results");
       const anSub = pane?.querySelector("#an-sub");
       const clearBtn = pane?.querySelector("#btn-clear-analysis");
       if (!box) return;
-      // 有分析结果时才显示清空按钮
       if (clearBtn) {
         clearBtn.classList.toggle("hidden", !(state.analysisId || state.matches.length));
       }
@@ -204,7 +207,6 @@ export async function renderMatch(root) {
           ["failed", "empty", "pending", "collecting", "unchecked"].includes(m.jd_status) ? `JD ${m.jd_status}` : "",
         ].filter(Boolean);
         const cool = helpers.greetState(m);
-        // 是否可发送：与安全状态同一行
         const sendPill = cool.in_cooldown
           ? `<span class="pill static warn">冷却中 · ${escapeHtml(cool.cooldown_date)} 可再发</span>`
           : helpers.sendRestriction(m)
@@ -258,15 +260,18 @@ export async function renderMatch(root) {
       });
     },
 
-    // --- 冷却状态 ---
+    /**
+     * 算招呼冷却状态：取发送时间与上次招呼时间中较晚者，加冷却天数。
+     *
+     * @param {Object} m 匹配结果项（last_greeted_at / delivered_at）
+     * @returns {{in_cooldown: boolean, cooldown_date: string, last_date: string, last_ts?: number}}
+     */
     greetState(m) {
       const last = m.last_greeted_at || "";
       const delivered = m.delivered_at || 0;
-      // 取较晚者
       let lastTs = 0;
       if (delivered) lastTs = Math.max(lastTs, Number(delivered) || 0);
       if (last) {
-        // last_greeted_at 是 ISO 字符串
         const t = new Date(last.replace(" ", "T")).getTime();
         if (!Number.isNaN(t)) lastTs = Math.max(lastTs, t / 1000);
       }
@@ -286,10 +291,12 @@ export async function renderMatch(root) {
       };
     },
 
+    /** 该职位是否还在招呼冷却期。 */
     inCooldown(m) {
       return helpers.greetState(m).in_cooldown;
     },
 
+    /** 投递状态短文案（失败原因 / 冷却 / 已发送 / 发送中）。 */
     deliverLabel(m) {
       if (m.deliver_status === "failed") return `失败：${m.deliver_error || ""}`;
       const cool = helpers.greetState(m);
@@ -298,6 +305,7 @@ export async function renderMatch(root) {
       return m.deliver_status === "sending" ? "发送中…" : "";
     },
 
+    /** 发送状态完整文案，含不可发送原因与「无招呼语 / 待发」。 */
     sendStatusLabel(m) {
       if (m.deliver_status === "failed") return `失败：${m.deliver_error || ""}`;
       const cool = helpers.greetState(m);
@@ -310,7 +318,12 @@ export async function renderMatch(root) {
       return "待发";
     },
 
-    // --- 发送判定 ---
+    /**
+     * 按匹配时安全快照判定能否发送。
+     *
+     * @param {Object} m 匹配结果项
+     * @returns {string} 不可发送的原因；空串表示可发送
+     */
     sendRestriction(m) {
       if (!["is_blacklisted", "company_blacklisted", "jd_blacklisted", "jd_rule_checked", "jd_status", "auto_delivery_blocked"].some((key) => key in m)) {
         return "缺少匹配时安全快照";
@@ -323,12 +336,19 @@ export async function renderMatch(root) {
       return "";
     },
 
+    /** 读输入框评分阈值并夹到 0–100；无效时用默认值。 */
     minScore(inputEl) {
       const v = parseInt(inputEl?.value, 10);
       if (Number.isNaN(v)) return MIN_SCORE_DEFAULT;
       return Math.min(100, Math.max(0, v));
     },
 
+    /**
+     * 挑出「一键发送全部」的目标：达阈值、未冷却、有招呼语、安全通过。
+     *
+     * @param {HTMLInputElement} [inputEl] 评分阈值输入框
+     * @returns {Array<Object>} 可发送的匹配结果项
+     */
     sendAllTargets(inputEl) {
       const min = helpers.minScore(inputEl);
       const sendRestriction = helpers.sendRestriction;
@@ -337,6 +357,7 @@ export async function renderMatch(root) {
       );
     },
 
+    /** 刷新「一键发送 / 发送选中」的计数与排除原因。 */
     updateSendCounts(inputEl) {
       const pane = root.querySelector("#match-pane");
       if (!inputEl) inputEl = pane?.querySelector("#send-min-score");
@@ -358,6 +379,7 @@ export async function renderMatch(root) {
       if (sendSelN) sendSelN.textContent = String(state.matches.filter((m) => state.selected.has(m.encrypt_job_id) && !helpers.inCooldown(m) && (m.greeting || "").trim() && !helpers.sendRestriction(m)).length);
     },
 
+    /** 从投递配置读回评分阈值并写入输入框。 */
     async loadMinScore(inputEl) {
       try {
         const cfg = await api.get("/api/deliver/config");
@@ -365,9 +387,10 @@ export async function renderMatch(root) {
           inputEl.value = String(cfg.min_score);
           helpers.updateSendCounts(inputEl);
         }
-      } catch { /* ignore */ }
+      } catch {}
     },
 
+    /** 校验并保存评分阈值到投递配置。 */
     async saveMinScore(inputEl) {
       const v = helpers.minScore(inputEl);
       if (inputEl) inputEl.value = String(v);
@@ -379,7 +402,11 @@ export async function renderMatch(root) {
       }
     },
 
-    // --- 任务面板 ---
+    /**
+     * 把匹配任务状态画进任务面板。
+     *
+     * @param {?Object} s 任务状态；空则回到 idle
+     */
     paintMatch(s) {
       if (!s) {
         matchPanel.update({ status: "idle", percent: 0 });
@@ -401,6 +428,11 @@ export async function renderMatch(root) {
       });
     },
 
+    /**
+     * 把投递任务状态画进任务面板。
+     *
+     * @param {?Object} s 任务状态；无 task_id 时回到 idle
+     */
     paintDeliver(s) {
       if (!s || !s.task_id) {
         deliverPanel.update({ status: "idle", percent: 0 });
@@ -424,13 +456,18 @@ export async function renderMatch(root) {
       });
     },
 
+    /** 运行中隐藏「匹配全部 / 匹配选中」按钮。 */
     setMatchButtons(running) {
       const pane = root.querySelector("#match-pane");
       pane?.querySelector("#btn-match-all")?.classList.toggle("hidden", running);
       pane?.querySelector("#btn-match-sel")?.classList.toggle("hidden", running);
     },
 
-    // --- 匹配任务 ---
+    /**
+     * 启动批量匹配任务并开始轮询。
+     *
+     * @param {Array<string>} [jobIds] 要匹配的职位 ID；抓取范围模式下忽略
+     */
     async startMatch(jobIds) {
       if (!state.currentResumeId) return toast("先选择一份简历", "warn");
       const sc = state.scope;
@@ -458,6 +495,12 @@ export async function renderMatch(root) {
       }
     },
 
+    /**
+     * 把某次抓取任务设为匹配范围，切到工作台并重拉岗位。
+     *
+     * @param {string} taskId   抓取任务 ID
+     * @param {number} jobCount 本批职位数
+     */
     async setMatchScope(taskId, jobCount) {
       state.scope = { type: "crawl_task", crawl_task_id: taskId, job_count: jobCount };
       state.page = 0;
@@ -467,6 +510,7 @@ export async function renderMatch(root) {
       toast("已设为匹配范围，可点击「一键匹配当前范围」开始匹配", "ok");
     },
 
+    /** 开始轮询匹配任务状态，结束后刷新结果与岗位列表。 */
     startPoll() {
       clearInterval(state.pollTimer);
       state.pollTimer = setInterval(async () => {
@@ -496,15 +540,16 @@ export async function renderMatch(root) {
             helpers.renderMatches();
             helpers.renderJobs();
           }
-        } catch { /* ignore */ }
+        } catch {}
       }, 1200);
     },
 
+    /** 页面加载时接上服务端仍在跑的匹配任务，或恢复上次结果。 */
     async restoreTask() {
       let s = null;
       try {
         s = await api.get("/api/match/analyze/status");
-      } catch { /* ignore */ }
+      } catch {}
       if (!s || !s.task_id) return;
 
       state.matchTaskId = s.task_id;
@@ -532,7 +577,13 @@ export async function renderMatch(root) {
       }
     },
 
-    // --- 发送 ---
+    /**
+     * 启动批量投递任务并开始轮询。
+     *
+     * @param {Array<Object>} targets 要发送的匹配结果项
+     * @param {{mode?: string, confirmed?: boolean, confirmationToken?: string}} [opts]
+     *   mode 为 all / selected / manual；manual 需带 confirmationToken
+     */
     async startDeliver(targets, { mode = "selected", confirmed = false, confirmationToken = "" } = {}) {
       if (!state.analysisId) return toast("先跑一次匹配再发送", "warn");
       if (state.deliverTaskId) return toast("已有发送任务在跑，等它结束", "warn");
@@ -554,6 +605,7 @@ export async function renderMatch(root) {
       }
     },
 
+    /** 把投递快照写回 matches，并刷新列表与详情弹窗状态。 */
     applyDeliverSnapshot(s) {
       let touched = false;
       (s.items || []).forEach((it) => {
@@ -572,6 +624,7 @@ export async function renderMatch(root) {
       }
     },
 
+    /** 开始轮询投递任务状态，结束后弹出成功 / 失败 / 取消提示。 */
     startDeliverPoll() {
       clearInterval(state.deliverTimer);
       state.deliverTimer = setInterval(async () => {
@@ -605,6 +658,7 @@ export async function renderMatch(root) {
       }, 1000);
     },
 
+    /** 页面加载时接上服务端仍在跑的投递任务。 */
     async restoreDeliver() {
       let s = null;
       try {
@@ -622,6 +676,13 @@ export async function renderMatch(root) {
       }
     },
 
+    /**
+     * 弹窗确认后发送目标职位。
+     *
+     * @param {Array<Object>} targets   要发送的匹配结果项
+     * @param {string}         [scopeNote] 弹窗里的补充说明
+     * @param {{mode?: string}} [opts]  mode 为 all / selected / manual
+     */
     confirmAndSend(targets, scopeNote = "", { mode = "selected" } = {}) {
       const restricted = targets.filter((m) => helpers.sendRestriction(m));
       const restrictionNote = restricted.length
@@ -658,7 +719,11 @@ export async function renderMatch(root) {
       });
     },
 
-    // --- 详情弹窗 ---
+    /**
+     * 打开单条匹配详情弹窗：分析结果、职位信息、招呼语草稿与发送。
+     *
+     * @param {string} jid 职位 encrypt_job_id
+     */
     openMatchDetail(jid) {
       const m = state.matches.find((x) => x.encrypt_job_id === jid);
       if (!m) return;
@@ -765,6 +830,7 @@ export async function renderMatch(root) {
       state.detailApi = {
         jid,
         close: dlg.close,
+        /** 更新弹窗底部的发送状态文案。 */
         setStatus: (text) => {
           const el = dlg.box.querySelector(".send-status");
           if (el) el.textContent = text;
@@ -773,6 +839,7 @@ export async function renderMatch(root) {
 
       const ta = dlg.box.querySelector(".greeting-edit");
       const draftHint = dlg.box.querySelector(".draft-hint");
+      /** 把文本框内容存进草稿，并切换「未保存」提示。 */
       const syncDraft = () => {
         state.greetDrafts.set(jid, ta.value);
         const cur = state.matches.find((x) => x.encrypt_job_id === jid);
@@ -852,7 +919,6 @@ export async function renderMatch(root) {
         });
       }
 
-      // 职位全量信息
       api.get("/api/jobs/" + encodeURIComponent(jid))
         .then((j) => {
           const boss = dlg.box.querySelector(".md-boss");
@@ -891,7 +957,7 @@ export async function renderMatch(root) {
         });
     },
 
-    // --- 清空当前分析，恢复初始状态 ---
+    /** 清空当前分析结果与草稿，恢复初始状态。 */
     clearAnalysis() {
       state.analysisId = null;
       state.matches = [];
@@ -911,7 +977,7 @@ export async function renderMatch(root) {
       toast("已清空分析结果", "ok");
     },
 
-    // --- 载入历史分析 ---
+    /** 把历史分析载入工作台并刷新列表。 */
     loadAnalysisIntoWorkbench(data) {
       state.analysisId = data.analysis_id;
       state.matches = data.matches || [];
@@ -925,12 +991,12 @@ export async function renderMatch(root) {
     },
   };
 
-  // ---------- 目录切换 ----------
   const pane = root.querySelector("#match-pane");
   const tabs = [...root.querySelectorAll(".settings-tab")];
   let active = "workbench";
   let loaded = { workbench: false, deliver: false, crawls: false, history: false };
 
+  /** 高亮当前目录 tab 并更新 aria-current。 */
   function setActive(name) {
     active = name;
     tabs.forEach((tab) => {
@@ -940,6 +1006,7 @@ export async function renderMatch(root) {
     });
   }
 
+  /** 切换并渲染指定子目录。 */
   async function show(name) {
     if (name === active && loaded[name]) return;
     setActive(name);
@@ -970,7 +1037,7 @@ export async function renderMatch(root) {
     });
   });
 
-  // ---------- 初始加载 ----------
+  /** 拉取简历列表，默认选中第一份。 */
   async function loadResumes() {
     try {
       const r = await api.get("/api/resume/list");
@@ -979,7 +1046,7 @@ export async function renderMatch(root) {
         state.currentResumeId = state.resumes[0].resume_id;
         state.resumeTitle = state.resumes[0].title || state.currentResumeId;
       }
-    } catch { /* ignore */ }
+    } catch {}
   }
 
   await loadResumes();
@@ -988,6 +1055,7 @@ export async function renderMatch(root) {
   await helpers.restoreDeliver();
   await show("workbench");
 
+  /** 卸载时清掉匹配 / 投递轮询定时器。 */
   return () => {
     clearInterval(state.pollTimer);
     clearInterval(state.deliverTimer);

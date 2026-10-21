@@ -35,6 +35,7 @@ export async function renderSettingsUpdate(root) {
   /** 最近一次接口回来的原始载荷，「复制诊断信息」直接从这拼 */
   let payload = null;
 
+  /** 拉日志 + 诊断，成功整页重画，失败只出错误横幅。 */
   async function loadAll() {
     try {
       payload = await api.get("/api/system/update/log");
@@ -46,6 +47,7 @@ export async function renderSettingsUpdate(root) {
     renderAll();
   }
 
+  /** 按当前 payload 刷摘要、日志、横幅和按钮。 */
   function renderAll() {
     if (!payload) return;
     renderSummary(payload);
@@ -54,6 +56,11 @@ export async function renderSettingsUpdate(root) {
     syncButtons(payload);
   }
 
+  /**
+   * 画顶部版本摘要：当前 / 最新 / 安装方式 / 上次检查结果 / 忽略版本。
+   *
+   * @param {Object} p 日志接口载荷，用 `p.diagnostics`
+   */
   function renderSummary(p) {
     const d = p.diagnostics || {};
     const current = d.current || "—";
@@ -76,7 +83,12 @@ export async function renderSettingsUpdate(root) {
     `;
   }
 
-  /** 错误横幅：版本 + 原因 + 「日志就在下面」——拍一张就够反馈 */
+  /**
+   * 错误横幅：版本 + 原因 + 「日志就在下面」——拍一张就够反馈。
+   *
+   * @param {?Object} p          日志接口载荷；`null` 表示只有 `extraError`
+   * @param {?string} extraError 额外错误文案（接口本身挂了时用）
+   */
   function renderBanner(p, extraError) {
     const box = root.querySelector("#upd-error-banner");
     const d = (p && p.diagnostics) || {};
@@ -96,6 +108,11 @@ export async function renderSettingsUpdate(root) {
     `;
   }
 
+  /**
+   * 把 update.log / progress.log 画进对应的 pre。
+   *
+   * @param {Object} p 日志接口载荷
+   */
   function renderLogs(p) {
     const byName = {};
     for (const f of p.files || []) byName[f.name] = f;
@@ -103,6 +120,13 @@ export async function renderSettingsUpdate(root) {
     paintLog("#log-progress", byName["progress.log"], p.hint);
   }
 
+  /**
+   * 画单个日志文件内容；缺文件 / 读失败 / 截断各有占位文案。
+   *
+   * @param {string}  sel  目标元素选择器
+   * @param {?Object} file 文件项（`exists` / `read_error` / `truncated` / `content`）
+   * @param {?string} hint 缺文件时的提示
+   */
   function paintLog(sel, file, hint) {
     const el = root.querySelector(sel);
     if (!el) return;
@@ -121,6 +145,11 @@ export async function renderSettingsUpdate(root) {
     el.scrollTop = el.scrollHeight;
   }
 
+  /**
+   * 按诊断显隐「立即更新 / 打开更新窗口」。
+   *
+   * @param {Object} p 日志接口载荷
+   */
   function syncButtons(p) {
     const d = p.diagnostics || {};
     const canApply = Boolean(d.has_update && d.can_self_update && d.zip_asset && d.zip_asset.url);
@@ -128,13 +157,13 @@ export async function renderSettingsUpdate(root) {
     root.querySelector("#upd-open").hidden = !d.has_update;
   }
 
+  /** 强制检测一次，顺手刷新日志区，结果用 toast 汇报。 */
   async function checkNow() {
     const btn = root.querySelector("#upd-check");
     btn.disabled = true;
     btn.textContent = "检测中…";
     try {
       const status = await api.get("/api/system/update?force=true");
-      // 顺手刷新日志区：检测可能刚把 error 写进诊断
       try {
         payload = await api.get("/api/system/update/log");
         renderAll();
@@ -166,7 +195,6 @@ export async function renderSettingsUpdate(root) {
     try {
       status = await api.get("/api/system/update");
     } catch {
-      /* 用诊断里那份顶上 */
     }
     const d = (payload && payload.diagnostics) || {};
     openUpdateDialog(
@@ -221,6 +249,7 @@ export async function renderSettingsUpdate(root) {
     return lines.join("\n");
   }
 
+  /** 复制诊断信息；剪贴板被拦就弹手动复制框。 */
   async function copyDiagnostics() {
     const text = buildDiagnosticsText();
     const ok = await copyText(text);
@@ -228,7 +257,6 @@ export async function renderSettingsUpdate(root) {
       toast("诊断信息已复制", "ok");
       return;
     }
-    // 剪贴板被浏览器拦了：摆一个能手动 Ctrl+C 的框
     const box = modal({
       title: "复制诊断信息",
       body: `
@@ -249,6 +277,7 @@ export async function renderSettingsUpdate(root) {
   root.querySelector("#upd-apply").addEventListener("click", openDialog);
   root.querySelector("#upd-open").addEventListener("click", openDialog);
 
+  /** `boss:update` 广播进来时，就地改诊断字段并重画摘要/横幅/按钮。 */
   const onUpdate = (e) => {
     const status = (e && e.detail) || {};
     if (!payload) payload = {};
@@ -286,7 +315,6 @@ async function copyText(text) {
       return true;
     }
   } catch {
-    /* 落到下面的兜底 */
   }
   try {
     const ta = document.createElement("textarea");
@@ -303,6 +331,12 @@ async function copyText(text) {
   }
 }
 
+/**
+ * 字节数 → 「1.2 KB」这类可读大小。
+ *
+ * @param {number} n 字节数
+ * @returns {string} 可读大小
+ */
 function fmtBytes(n) {
   const size = Number(n) || 0;
   if (size < 1024) return `${size} B`;

@@ -3,6 +3,14 @@
 import { api } from "../api.js";
 import { fmtTime, taskPanel, taskStateOf, renderEvents, toast } from "../ui.js";
 
+/**
+ * 渲染工作台：会话 / 职位 / AI / 简历卡片 + 环境自检 + 搜索任务面板。
+ *
+ * 会话卡片订阅舰桥的 `boss:session` 广播，避免只在渲染时取一次状态就卡在「离线」。
+ *
+ * @param {HTMLElement} root 挂载容器
+ * @returns {Promise<() => void>} 卸载时清定时器、退订广播
+ */
 export async function renderHome(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -115,9 +123,11 @@ export async function renderHome(root) {
 
   const $ = (id) => root.querySelector("#" + id);
 
-  // 会话：跟舰桥共用一份状态。只在渲染时取一次的话，首屏那次请求失败/被缓存
-  // 成「未登录」就会一直挂着「离线」，得手动刷新页面才恢复——所以订阅舰桥的
-  // boss:session 广播，它每 8 秒刷一次，卡片跟着走。
+  /**
+   * 按会话状态刷会话卡片，并接上登录 / 退出按钮。
+   *
+   * @param {Object<string, any>} st 会话状态（logged_in / user / phone_masked / saved_at）
+   */
   function paintSession(st) {
     if (!st) return;
     const name = (st.user?.name || "").trim();
@@ -146,7 +156,6 @@ export async function renderHome(root) {
   window.addEventListener("boss:session", onSession);
   api.get("/api/auth/status").then(paintSession).catch(() => {});
 
-  // 职位
   api.get("/api/jobs/stats").then((s) => {
     $("jobs-num").textContent = s.jobs ?? 0;
     $("jobs-pages").textContent = `流水 ${s.pages ?? 0} 页 · 原始 ${s.raw_seen ?? 0} 条`;
@@ -161,7 +170,6 @@ export async function renderHome(root) {
     }
   }).catch(() => {});
 
-  // LLM
   api.get("/api/llm/config").then((c) => {
     const sig = $("llm-signal");
     if (c.configured) {
@@ -173,7 +181,7 @@ export async function renderHome(root) {
     }
   }).catch(() => {});
 
-  // 环境自检：数据存哪 / Chrome 在不在 / 取令牌的窗口要不要显示出来
+  /** Chrome 取令牌窗口档位 → 下拉文案。 */
   const MODE_LABELS = {
     hidden: "隐藏窗口（默认，不打扰）",
     visible: "显示窗口（要你手动过验证时选它）",
@@ -181,11 +189,18 @@ export async function renderHome(root) {
     headless: "无界面",
   };
 
+  /**
+   * 往环境自检区加一条横幅。
+   *
+   * @param {string} kind 样式类名（bad / warn / ok）
+   * @param {string} text 文案；用 textContent 写入，防服务端兜底文案带出标记
+   * @param {{chrome?: boolean}} [opts] chrome=true 时打上 data-chrome，便于重检时清掉
+   */
   function addBanner(kind, text, { chrome = false } = {}) {
     const box = document.createElement("div");
     box.className = "banner " + kind;
     box.style.whiteSpace = "pre-line";
-    box.textContent = text; // 一律 textContent：服务端的兜底文案可能带原始异常
+    box.textContent = text;
     if (chrome) box.dataset.chrome = "1";
     $("env-banners").appendChild(box);
   }
@@ -205,6 +220,7 @@ export async function renderHome(root) {
     }
   }).catch(() => {});
 
+  /** 检测 Chrome 并刷新信号灯 / 路径 / 窗口档位选项。 */
   async function refreshChrome() {
     const sel = $("chrome-mode");
     root.querySelectorAll('[data-chrome="1"]').forEach((n) => n.remove());
@@ -251,7 +267,6 @@ export async function renderHome(root) {
     }
   };
 
-  // 分析
   api.get("/api/resume/analyses").then((r) => {
     const items = r.items || [];
     $("an-sub").textContent = items.length ? `${items.length} 份` : "—";
@@ -268,8 +283,7 @@ export async function renderHome(root) {
       .join("");
   }).catch(() => {});
 
-  // 抓取任务：统一进度面板
-  // 后端 phase 是英文内部阶段名，直接摆在页面上等于没翻译
+  /** 后端 phase 英文内部阶段名 → 页面文案。 */
   const PHASE_LABELS = {
     prepare: "准备中",
     client: "连接中",
@@ -282,10 +296,9 @@ export async function renderHome(root) {
   $("home-crawl-task").appendChild(crawl.el);
   crawl.onStop(async () => {
     try {
-      // 取消要带 task_id，没有统一的 /api/crawl/stop
       const s = await api.get("/api/crawl/status");
       if (s.task_id) await api.post(`/api/crawl/${s.task_id}/cancel`);
-    } catch { /* ignore */ }
+    } catch { }
   });
   crawl.update({ status: "idle", percent: 0 });
 
@@ -316,10 +329,9 @@ export async function renderHome(root) {
           ["职位描述", `${p.desc_ok || 0} 成功 / ${p.desc_failed || 0} 失败`],
         ],
         error: s.status === "error" ? s.error : undefined,
-        // crawl 事件的字段名是 event，不是 name
         log: renderEvents(s.events, { limit: 12, nameKey: "event" }),
       });
-    } catch { /* ignore */ }
+    } catch { }
   }, 1500);
 
   return () => {

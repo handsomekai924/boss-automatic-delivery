@@ -3,6 +3,13 @@
 import { api } from "../api.js";
 import { toast, modal, escapeHtml, fmtTime } from "../ui.js";
 
+/**
+ * 渲染抓取任务目录：任务列表、详情弹窗、设为匹配范围。
+ *
+ * @param {HTMLElement} pane   内容容器
+ * @param {Object}     state   页面级状态（本目录未直接改写）
+ * @param {Object}     helpers 共享助手，用到 `setMatchScope`
+ */
 export async function renderCrawls(pane, state, helpers) {
   pane.innerHTML = `
     <div class="flex between center gap-12 wrap mb-16">
@@ -20,6 +27,7 @@ export async function renderCrawls(pane, state, helpers) {
 
   await load();
 
+  /** 拉取最近 50 条抓取任务并渲染列表。 */
   async function load() {
     let data;
     try {
@@ -86,6 +94,12 @@ export async function renderCrawls(pane, state, helpers) {
     });
   }
 
+  /**
+   * 把任务启动参数拼成一行条件摘要。
+   *
+   * @param {Object} params 任务启动参数（keyword / city_name 等）
+   * @returns {string} 形如「关键词 · 城市 · 最多 N 页」；无条件时为「默认条件」
+   */
   function summarizeParams(params) {
     const parts = [];
     if (params.expect_kind || params.expect_name) {
@@ -98,6 +112,11 @@ export async function renderCrawls(pane, state, helpers) {
     return parts.join(" · ") || "默认条件";
   }
 
+  /**
+   * 打开任务详情弹窗：启动参数快照、抓取统计、本批职位预览。
+   *
+   * @param {string} taskId 任务 ID
+   */
   async function openDetail(taskId) {
     let t;
     try {
@@ -147,7 +166,6 @@ export async function renderCrawls(pane, state, helpers) {
       );
     });
 
-    // 职位预览
     try {
       const jobs = await api.get(`/api/crawl/tasks/${encodeURIComponent(taskId)}/jobs?limit=10`);
       const host = dlg.box.querySelector("#task-jobs-preview");
@@ -163,6 +181,11 @@ export async function renderCrawls(pane, state, helpers) {
     }
   }
 
+  /**
+   * 确认后把本批职位设为匹配范围并切到工作台。
+   *
+   * @param {string} taskId 任务 ID
+   */
   async function openMatchConfirm(taskId) {
     let t;
     try {

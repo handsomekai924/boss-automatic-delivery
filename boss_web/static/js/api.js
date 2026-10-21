@@ -1,5 +1,14 @@
 /** fetch 封装：统一错误 → 可读 message */
 
+/**
+ * 发请求并把失败收成可读错误对象抛出。
+ *
+ * @param {string}          method HTTP 方法
+ * @param {string}          url    路径
+ * @param {object|FormData} [body] JSON 对象或 FormData
+ * @param {object}          [opts] 额外 fetch init 项
+ * @returns {Promise<*>} 响应 JSON；网络不通或非 2xx 时抛 `{code, message, …}`
+ */
 async function request(method, url, body, opts = {}) {
   const init = {
     method,
@@ -16,7 +25,6 @@ async function request(method, url, body, opts = {}) {
   try {
     resp = await fetch(url, init);
   } catch (err) {
-    // 原始异常（"Failed to fetch" 之类）对用户毫无意义，留着排查用，别摆到脸上
     console.error("请求发不出去", method, url, err);
     throw {
       code: "network",
@@ -38,6 +46,7 @@ async function request(method, url, body, opts = {}) {
   return data;
 }
 
+/** 常用 HTTP 方法的快捷封装。 */
 export const api = {
   get: (url) => request("GET", url),
   post: (url, body) => request("POST", url, body),

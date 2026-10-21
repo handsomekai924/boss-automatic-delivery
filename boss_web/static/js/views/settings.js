@@ -6,6 +6,12 @@ import { applyUpdateStatus, peekUpdateStatus } from "../update.js";
 import { renderLLM } from "./llm.js";
 import { renderSettingsUpdate } from "./settings_update.js";
 
+/**
+ * 系统配置页：左侧目录（AI / 采集 / 版本更新）+ 右侧面板，返回卸载函数。
+ *
+ * @param {HTMLElement} root 挂载容器
+ * @returns {Promise<() => void>} 卸载函数，移除监听并销毁当前面板
+ */
 export async function renderSettings(root) {
   root.innerHTML = `
     <div class="page-head">
@@ -29,6 +35,11 @@ export async function renderSettings(root) {
   let dirty = false;
   let paneDispose = null;
 
+  /**
+   * 标/清「有未保存修改」，并切换副标题文案。
+   *
+   * @param {boolean} value 是否有未保存修改
+   */
   function setDirty(value) {
     dirty = Boolean(value);
     const title = root.querySelector(".hero-sub");
@@ -37,6 +48,11 @@ export async function renderSettings(root) {
       : "AI 接口、BOSS 搜索条件、采集参数和黑名单规则集中管理。修改后先保存，当前采集任务使用启动时的配置快照。";
   }
 
+  /**
+   * 高亮当前目录页签。
+   *
+   * @param {string} name 页签名（`ai` / `collection` / `update`）
+   */
   function setActive(name) {
     active = name;
     tabs.forEach((tab) => {
@@ -46,13 +62,18 @@ export async function renderSettings(root) {
     });
   }
 
+  /**
+   * 切到某个目录页；有未保存修改会先确认。同一目录不重载。
+   *
+   * @param {string} name 页签名
+   */
   async function show(name) {
     if (name === active && pane.childElementCount) return;
     if (dirty && !window.confirm("当前目录有未保存修改，确定放弃并切换吗？")) return;
     setDirty(false);
     setActive(name);
     if (typeof paneDispose === "function") {
-      try { paneDispose(); } catch { /* 卸干净就行 */ }
+      try { paneDispose(); } catch {}
     }
     paneDispose = null;
     pane.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>加载中…</p></div>`;
@@ -67,13 +88,18 @@ export async function renderSettings(root) {
     await renderCollection(pane, setDirty);
   }
 
-  /** 有新版且**没被忽略**才在「版本更新」页签上点小圆点；不弹窗（弹窗归首屏/update.js）。
-   *  后端 ``should_prompt = has_update && !suppressed``——``ignored`` 是忽略**水位线**，
-   *  新版比水位高时照亮，所以判断只看 ``should_prompt``，不能再拿 ``!ignored`` 卡一道。
+  /**
+   * 有新版且没被忽略才在「版本更新」页签上点小圆点；不弹窗（弹窗归首屏/update.js）。
    *
-   *  圆点要**一直挂着**：关掉弹窗 ≠ 忽略，只要还有没被忽略的新版就不灭。因此进页面
-   *  得先按缓存画上，不能只等 60s 一轮的 ``boss:update``——关完弹窗进设置页那一分钟
-   *  里圆点会是灭的，看着就像「关掉就没提示了」。 */
+   * 后端 `should_prompt = has_update && !suppressed`——`ignored` 是忽略水位线，
+   * 新版比水位高时照亮，所以判断只看 `should_prompt`，不能再拿 `!ignored` 卡一道。
+   *
+   * 圆点要一直挂着：关掉弹窗 ≠ 忽略，只要还有没被忽略的新版就不灭。因此进页面
+   * 得先按缓存画上，不能只等 60s 一轮的 `boss:update`——关完弹窗进设置页那一分钟
+   * 里圆点会是灭的，看着就像「关掉就没提示了」。
+   *
+   * @param {Event} e `boss:update` 事件，`detail` 为检测结果
+   */
   function onUpdateDot(e) {
     const dot = root.querySelector(".settings-tab-dot");
     if (!dot) return;
@@ -107,11 +133,17 @@ export async function renderSettings(root) {
   return () => {
     window.removeEventListener("boss:update", onUpdateDot);
     if (typeof paneDispose === "function") {
-      try { paneDispose(); } catch { /* 卸干净就行 */ }
+      try { paneDispose(); } catch {}
     }
   };
 }
 
+/**
+ * 「采集配置」面板：搜索条件、采集参数、来源切换和黑名单规则。
+ *
+ * @param {HTMLElement}  root      挂载容器
+ * @param {(v: boolean) => void} markDirty 标/清未保存修改
+ */
 async function renderCollection(root, markDirty) {
   root.innerHTML = `
     <div class="flex between center gap-12 wrap mb-16">
@@ -184,18 +216,15 @@ async function renderCollection(root, markDirty) {
   ["s-jobType", "s-salary", "c-expect"].forEach((id) => $(id).addEventListener("change", () => { updateSourceUI(); markDirty(true); }));
   root.querySelectorAll('input[name="c-source"]').forEach((el) => {
     el.addEventListener("change", () => {
-      // 搜索流要「不带期望」空项、期望流不要——来源一切就得重建下拉
       fillExpectSelect(expectOptions, $("c-expect").value);
       updateSourceUI();
       markDirty(true);
     });
   });
 
-  // 城市/行业是级联（省→市→区 / 分组→叶子），树很大，摊成 option 会卡死初始化
   const cityPicker = cascader({ onChange: () => markDirty(true) });
   cityPicker.el.id = "s-city";
   $("s-city").replaceWith(cityPicker.el);
-  // 临时期望的 location 也是城市 code，跟搜索流的 city 同一棵树
   const tmpLocationPicker = cascader({ onChange: () => markDirty(true) });
   tmpLocationPicker.el.id = "c-tmp-location";
   $("c-tmp-location").replaceWith(tmpLocationPicker.el);
@@ -203,7 +232,6 @@ async function renderCollection(root, markDirty) {
   industryPicker.el.id = "s-industry";
   $("s-industry").replaceWith(industryPicker.el);
 
-  // 其余多选维度用勾选下拉，不再用原生 select multiple（那是列表框，选项一直摊开）
   const multiIds = ["s-experience", "s-degree", "s-scale", "s-payType", "s-partTime", "s-stage"];
   const multis = {};
   multiIds.forEach((id) => {
@@ -213,6 +241,13 @@ async function renderCollection(root, markDirty) {
     multis[id] = ms;
   });
 
+  /**
+   * 用 code/name 列表填原生 select，保留当前选中值。
+   *
+   * @param {HTMLSelectElement} select 目标下拉
+   * @param {Array<{code: string, name?: string}>} options 选项列表
+   * @param {{blankLabel?: string}} [opts] 空项文案，缺省「不限」
+   */
   function fillSelect(select, options, { blankLabel = "不限" } = {}) {
     const current = select.value;
     select.innerHTML = `<option value="">${blankLabel}</option>`;
@@ -234,29 +269,39 @@ async function renderCollection(root, markDirty) {
     }));
   }
 
-  // ---- 采集来源（二选一）+ 期望下拉 ---------------------------------- //
   /** 期望选项：value 是「来源/期望」组合键，encryptId 用于写回 payload。 */
   let expectOptions = [];
 
+  /** 当前采集来源：`search` 或 `expect`。 */
   function sourceValue() {
     return root.querySelector('input[name="c-source"]:checked')?.value || "search";
   }
 
+  /**
+   * 选中采集来源单选，并同步 pill 高亮与表单可见性。
+   *
+   * @param {string} value `search` 或 `expect`
+   */
   function setSource(value) {
     const target = root.querySelector(`input[name="c-source"][value="${value}"]`);
     if (target) target.checked = true;
-    // pill 高亮跟着 radio 走
     root.querySelectorAll("#c-source-row .pill").forEach((pill) => {
       pill.classList.toggle("on", !!pill.querySelector("input")?.checked);
     });
     updateSourceUI();
   }
 
+  /**
+   * 重建期望下拉。搜索流加「不带期望」空项；期望流末尾挂「临时期望」。
+   * 已保存但在线列表没有的值留占位，别静默丢掉。
+   *
+   * @param {Array<{value: string, label: string, kind?: string, encryptId?: string, mixType?: string}>} options 期望选项
+   * @param {string} [selected] 要选中的 value
+   */
   function fillExpectSelect(options, selected) {
     const select = $("c-expect");
     const source = sourceValue();
     select.innerHTML = "";
-    // 搜索流下期望是**可选上下文**（站点「期望 tab + 输入关键词」），加「不带」
     if (source === "search") {
       const blank = document.createElement("option");
       blank.value = "";
@@ -269,7 +314,6 @@ async function renderCollection(root, markDirty) {
       el.textContent = opt.label;
       select.appendChild(el);
     });
-    // 期望流末尾挂「临时期望」：不进账号列表，是临时检索（expectInfo JSON）
     if (source === "expect") {
       const temp = document.createElement("option");
       temp.value = "temp";
@@ -277,7 +321,6 @@ async function renderCollection(root, markDirty) {
       select.appendChild(temp);
     }
     if (selected && ![...select.options].some((o) => o.value === selected)) {
-      // 保存过但在线列表里没有（换了账号/删了期望）：留一个占位，别静默丢掉
       const stale = document.createElement("option");
       stale.value = selected;
       stale.textContent = `（已保存但列表里没有）${selected}`;
@@ -296,7 +339,6 @@ async function renderCollection(root, markDirty) {
     if (kind === "temp_expect") return "temp";
     if (kind === "expect" && id) return `expect:${id}`;
     if (id) {
-      // 搜索流上下文：expect_kind 空，按 id 反查（推荐/兼职/我的期望都可能）
       const hit = expectOptions.find((o) => o.encryptId === id);
       return hit ? hit.value : `expect:${id}`;
     }
@@ -332,13 +374,16 @@ async function renderCollection(root, markDirty) {
     tmpLocationPicker.setValue(info.location ?? "");
   }
 
-  /** 下拉当前项 → 要写回配置的三件套。 */
+  /**
+   * 下拉当前项 → 要写回配置的期望三件套。
+   *
+   * @returns {{expect_kind: string, encrypt_expect_id: string, mix_expect_type: string, expect_name: string, expect_info: string}} 写回字段
+   */
   function expectSelection() {
     const source = sourceValue();
     const raw = $("c-expect").value;
     const hit = expectOptions.find((o) => o.value === raw);
     if (source === "expect") {
-      // 期望流：kind 必填。下拉没命中时从 value 形状兜底推断
       if (raw === "temp") {
         return {
           expect_kind: "temp_expect",
@@ -363,7 +408,6 @@ async function renderCollection(root, markDirty) {
         expect_info: "",
       };
     }
-    // 搜索流 + 期望上下文：只带 encryptExpectId（前端 onSearch 的 lastExpectId）
     const id = hit?.encryptId || (raw.startsWith("expect:") ? raw.slice("expect:".length) : "");
     return {
       expect_kind: "",
@@ -374,6 +418,11 @@ async function renderCollection(root, markDirty) {
     };
   }
 
+  /**
+   * 从账号在线拉期望列表并重建下拉；拉失败只提示，不挡其它配置。
+   *
+   * @param {string} [selected] 要选中的下拉键
+   */
   async function loadExpects(selected) {
     const hint = $("c-expect-hint");
     try {
@@ -425,12 +474,14 @@ async function renderCollection(root, markDirty) {
     updateSourceUI();
   }
 
-  /** 采集来源切了之后：关键词/职位类型/薪资 vs 兼职维度跟着变。 */
+  /**
+   * 采集来源切了之后：关键词/职位类型/薪资 vs 兼职维度跟着变。
+   * 期望流不带关键词、自己写 jobType；兼职态用 payType/partTime 顶替 salary。
+   */
   function updateSourceUI() {
     const source = sourceValue();
     const expectMode = source === "expect";
     const select = $("c-expect");
-    // pill 高亮跟着 radio 走（label 包 input，没有 :has 可用）
     root.querySelectorAll("#c-source-row .pill").forEach((pill) => {
       pill.classList.toggle("on", !!pill.querySelector("input")?.checked);
     });
@@ -439,18 +490,15 @@ async function renderCollection(root, markDirty) {
     const partTime = expectMode && (selected?.kind === "part_time" || select.value === "part_time");
     const temp = expectMode && select.value === "temp";
 
-    // 期望流永远不带关键词（前端 onExpectChange 删 query）
     const hideQuery = expectMode;
     const queryField = $("f-query");
     if (queryField) queryField.classList.toggle("hidden", hideQuery);
     if ($("s-query")) $("s-query").disabled = hideQuery;
 
-    // 期望流自己写 jobType（兼职态 1903），不进筛选面板
     const jobTypeField = $("f-jobType");
     if (jobTypeField) jobTypeField.classList.toggle("hidden", expectMode);
     if ($("s-jobType")) $("s-jobType").disabled = expectMode;
 
-    // 兼职态：payType/partTime 顶替 salary（对齐前端 getConfigFields()）
     const salaryField = $("f-salary");
     const payTypeField = $("f-payType");
     const partTimeField = $("f-partTime");
@@ -459,7 +507,6 @@ async function renderCollection(root, markDirty) {
     if (partTimeField) partTimeField.classList.toggle("hidden", !partTime);
     if ($("s-salary")) $("s-salary").disabled = partTime;
 
-    // 临时期望：多出 expectInfo 那几个字段
     const tempFields = $("c-temp-fields");
     if (tempFields) tempFields.classList.toggle("hidden", !temp);
 
@@ -475,6 +522,11 @@ async function renderCollection(root, markDirty) {
     }
   }
 
+  /**
+   * 拉筛选条件并填满城市/行业/各维度控件。
+   *
+   * @returns {Promise<Object>} 条件接口原样返回
+   */
   async function loadConditions() {
     const cond = await api.get("/api/filters/conditions");
     const sourceEl = $("search-source");
@@ -498,9 +550,21 @@ async function renderCollection(root, markDirty) {
     return cond;
   }
 
+  /**
+   * 读某个多选维度的当前值。
+   *
+   * @param {string} id 控件 id
+   * @returns {Array<string>} 选中的 code 列表
+   */
   function multiValues(id) {
     return multis[id].getValues();
   }
+
+  /**
+   * 把已存配置回填到整页控件。
+   *
+   * @param {Object} data 配置接口载荷（`collection` + `search`）
+   */
   function fill(data) {
     const c = data.collection || {};
     $("c-max-pages").value = c.max_pages ?? 5;
@@ -509,8 +573,6 @@ async function renderCollection(root, markDirty) {
     $("c-detail-interval").value = c.detail_interval ?? 1;
     $("c-fetch-details").checked = c.fetch_details !== false;
     $("c-store-blacklisted").checked = c.store_blacklisted !== false;
-    // 采集来源二选一：有 expect_kind 就是期望流，否则搜索流
-    // （旧 use_search=false 的「推荐页」已移除，打开就是搜索）
     const kind = (c.expect_kind || "").trim();
     setSource(kind ? "expect" : "search");
     fillExpectSelect(expectOptions, expectSelectValue(c));
@@ -519,7 +581,6 @@ async function renderCollection(root, markDirty) {
     const s = data.search || {};
     $("s-query").value = s.query || "";
     $("s-pageSize").value = s.pageSize ?? 15;
-    // code 值直接落到控件（选项已由 loadConditions 填好）
     cityPicker.setValue(s.city || "");
     industryPicker.setValue(s.industry || []);
     if ($("s-jobType")) $("s-jobType").value = s.jobType || "";
@@ -536,6 +597,12 @@ async function renderCollection(root, markDirty) {
       multis[id].setValues(values || []);
     });
   }
+
+  /**
+   * 收集整页表单 → 保存接口的请求体。
+   *
+   * @returns {Object} 配置载荷
+   */
   function payload() {
     const source = sourceValue();
     const picked = expectSelection();
@@ -553,7 +620,6 @@ async function renderCollection(root, markDirty) {
       stage: multiValues("s-stage"),
       pageSize: Number($("s-pageSize").value) || 15,
       max_pages: Number($("c-max-pages").value) || 5, start_page: Number($("c-start-page").value) || 1, page_interval: Number($("c-page-interval").value) || 0,
-      // 二选一写回：期望流带 expect_kind；搜索流上下文只带 encrypt_expect_id
       use_search: true,
       expect_kind: picked.expect_kind,
       encrypt_expect_id: picked.encrypt_expect_id,
@@ -563,12 +629,13 @@ async function renderCollection(root, markDirty) {
       fetch_details: $("c-fetch-details").checked, detail_interval: Number($("c-detail-interval").value) || 0, store_blacklisted: $("c-store-blacklisted").checked,
     };
   }
+
+  /** 先定来源再拉期望列表，最后回填配置与黑名单规则。 */
   async function load() {
     try {
       await loadConditions();
       const data = await api.get("/api/collection/config");
       const c = data.collection || {};
-      // 先定来源（决定下拉要不要「不带期望」空项），再拉期望列表，最后回填
       setSource((c.expect_kind || "").trim() ? "expect" : "search");
       await loadExpects(expectSelectValue(c));
       fill(data);
@@ -576,6 +643,8 @@ async function renderCollection(root, markDirty) {
       markDirty(false);
     } catch (err) { toast(err.message || "读取采集配置失败", "bad"); }
   }
+
+  /** 拉黑名单规则列表并绑定测试/命中/编辑/停用/删除。 */
   async function loadRules() {
     const data = await api.get("/api/blacklist/rules");
     $("rules-list").innerHTML = (data.items || []).map((r) => `
@@ -602,6 +671,12 @@ async function renderCollection(root, markDirty) {
     });
   }
 
+  /**
+   * 新增/编辑/测试黑名单规则弹窗。公司规则只有精确/正则；JD 规则多一个匹配范围。
+   *
+   * @param {Object}  [existing]  已有规则；空对象表示新增
+   * @param {boolean} [testOnly]  只做匹配测试，不出现「保存」
+   */
   function openRuleModal(existing = {}, testOnly = false) {
     const body = document.createElement("div");
     body.innerHTML = `
@@ -621,6 +696,7 @@ async function renderCollection(root, markDirty) {
     get("rule-mode").value = existing.match_mode || (existing.rule_type === "company" ? "exact" : "contains");
     get("rule-scope").value = existing.scope || "both";
     get("rule-description").value = existing.description || "";
+    /** 按规则类型 + 匹配方式给出帮助文案。 */
     const ruleModeHelpContent = () => {
       const ruleType = get("rule-type").value;
       const ruleMode = get("rule-mode").value;
@@ -634,6 +710,7 @@ async function renderCollection(root, markDirty) {
           : "正则匹配：按正则搜索职位名/JD 正文，保存/启用前会校验正则。";
       }
     }
+    /** 规则类型变了就换匹配方式选项，并刷新帮助文案。 */
     const updateMode = () => {
       const company = get("rule-type").value === "company";
       get("rule-scope-field").classList.toggle("hidden", company);
@@ -680,10 +757,8 @@ async function renderCollection(root, markDirty) {
           rule_type: ruleType,
           pattern: get("rule-pattern").value.trim(),
           match_mode: get("rule-mode").value,
-          // 公司规则不接受匹配范围；JD 规则必须带 scope
           scope: isCompany ? "" : get("rule-scope").value,
           description: get("rule-description").value.trim(),
-          // 编辑时保留原启用状态，避免误把停用规则重新打开
           enabled: existing.rule_id ? existing.enabled !== false : true,
         };
         const url = existing.rule_id ? `/api/blacklist/rules/${existing.rule_id}` : "/api/blacklist/rules";

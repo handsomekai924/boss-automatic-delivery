@@ -3,6 +3,13 @@
 import { api } from "../api.js";
 import { toast, escapeHtml, fmtTime } from "../ui.js";
 
+/**
+ * 渲染分析历史目录：历史列表 + 载入 / 删除。
+ *
+ * @param {HTMLElement} pane   内容容器
+ * @param {Object}     state   页面级状态（analysisId / matches）
+ * @param {Object}     helpers 共享助手（loadAnalysisIntoWorkbench 等）
+ */
 export async function renderHistory(pane, state, helpers) {
   pane.innerHTML = `
     <div class="flex between center gap-12 wrap mb-16">
@@ -20,6 +27,7 @@ export async function renderHistory(pane, state, helpers) {
 
   await load();
 
+  /** 拉取历史分析列表并绑定载入 / 删除按钮。 */
   async function load() {
     let data;
     try {
