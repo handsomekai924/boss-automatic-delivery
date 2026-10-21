@@ -239,3 +239,78 @@ def test_crawl_task_uses_humanize():
 def test_runtime_app_data_dir_is_absolute():
     """验 `app_data_dir` 返回绝对路径。"""
     assert runtime.app_data_dir().is_absolute()
+
+
+def test_greeting_prompt_roundtrip_and_restore(client):
+    """验招呼语约束能存能读，空串回到内置默认。"""
+    from boss_web.services.greeting_prompt import GREETING_REQUIREMENT
+
+    resp = client.get("/api/system/greeting-prompt")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["custom"] == ""
+    assert body["is_default"] is True
+    assert body["requirement"] == GREETING_REQUIREMENT
+    assert body["default"] == GREETING_REQUIREMENT
+
+    custom = "写 80 字，风格 {轻松}，不要『我们』"
+    resp = client.put("/api/system/greeting-prompt", json={"requirement": custom})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["custom"] == custom
+    assert body["requirement"] == custom
+    assert body["is_default"] is False
+
+    resp = client.put("/api/system/greeting-prompt", json={"requirement": ""})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["custom"] == ""
+    assert body["is_default"] is True
+    assert body["requirement"] == GREETING_REQUIREMENT
+    assert app_settings_store.load_settings().greeting_requirement == ""
+
+
+def test_greeting_prompt_keeps_sibling_settings(client):
+    """改招呼语不许冲掉 Chrome 档位与忽略版本水位线。"""
+    app_settings_store.apply_chrome_mode("visible")
+    app_settings_store.apply_ignored_update_version("1.2.0")
+
+    resp = client.put("/api/system/greeting-prompt", json={"requirement": "自定义约束"})
+    assert resp.status_code == 200
+
+    settings = app_settings_store.load_settings()
+    assert settings.greeting_requirement == "自定义约束"
+    assert settings.chrome_mode == "visible"
+    assert settings.ignored_update_version == "1.2.0"
+
+    assert client.put("/api/system/greeting-prompt", json={"requirement": ""}).status_code == 200
+    settings = app_settings_store.load_settings()
+    assert settings.chrome_mode == "visible"
+    assert settings.ignored_update_version == "1.2.0"
+
+
+def test_greeting_prompt_rejects_too_long(client):
+    """超 500 字直接 422，不落库。"""
+    limit = app_settings_store.GREETING_REQUIREMENT_MAX_LEN
+    resp = client.put("/api/system/greeting-prompt", json={"requirement": "字" * (limit + 1)})
+    assert resp.status_code == 422
+    assert app_settings_store.load_settings().greeting_requirement == ""
+
+
+def test_greeting_requirement_store_truncates_overlong():
+    """绕过接口直写设置时，超长也要截断，别把状态库撑爆。"""
+    saved = app_settings_store.apply_greeting_requirement(
+        "字" * (app_settings_store.GREETING_REQUIREMENT_MAX_LEN + 300)
+    )
+    assert len(saved) == app_settings_store.GREETING_REQUIREMENT_MAX_LEN
+
+
+def test_resolve_greeting_requirement_prefers_custom():
+    """自定义非空用自定义，空则回落出厂常量。"""
+    from boss_web.services.greeting_prompt import GREETING_REQUIREMENT, resolve_greeting_requirement
+
+    assert resolve_greeting_requirement() == GREETING_REQUIREMENT
+    app_settings_store.apply_greeting_requirement("自定义 {花括号}")
+    assert resolve_greeting_requirement() == "自定义 {花括号}"
+    app_settings_store.apply_greeting_requirement("")
+    assert resolve_greeting_requirement() == GREETING_REQUIREMENT

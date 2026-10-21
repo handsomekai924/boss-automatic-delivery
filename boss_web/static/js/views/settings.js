@@ -1,13 +1,14 @@
-/** 系统配置：AI、采集参数、搜索条件、黑名单规则和版本更新。 */
+/** 系统配置：AI、采集参数、搜索条件、黑名单规则、招呼语提示词和版本更新。 */
 
 import { api } from "../api.js";
 import { toast, escapeHtml, modal, multiSelect, cascader } from "../ui.js";
 import { applyUpdateStatus, peekUpdateStatus } from "../update.js";
 import { renderLLM } from "./llm.js";
+import { renderGreetingPrompt } from "./greeting_prompt.js";
 import { renderSettingsUpdate } from "./settings_update.js";
 
 /**
- * 系统配置页：左侧目录（AI / 采集 / 版本更新）+ 右侧面板，返回卸载函数。
+ * 系统配置页：左侧目录（AI / 采集 / 招呼语 / 版本更新）+ 右侧面板，返回卸载函数。
  *
  * @param {HTMLElement} root 挂载容器
  * @returns {Promise<() => void>} 卸载函数，移除监听并销毁当前面板
@@ -17,13 +18,14 @@ export async function renderSettings(root) {
     <div class="page-head">
       <div class="page-head-text">
         <h1 class="hero-title">系统 <span class="grad">配置</span></h1>
-        <p class="hero-sub">AI 接口、BOSS 搜索条件、采集参数和黑名单规则集中管理。修改后先保存，当前采集任务使用启动时的配置快照。</p>
+        <p class="hero-sub">AI 接口、BOSS 搜索条件、采集参数、招呼语提示词和黑名单规则集中管理。修改后先保存，当前采集任务使用启动时的配置快照。</p>
       </div>
     </div>
     <div class="settings-shell">
       <aside class="card settings-nav" aria-label="系统配置目录">
         <button class="settings-tab active" data-tab="ai" type="button">AI 设置</button>
         <button class="settings-tab" data-tab="collection" type="button">采集配置</button>
+        <button class="settings-tab" data-tab="greeting" type="button">招呼语</button>
         <button class="settings-tab" data-tab="update" type="button">版本更新<span class="settings-tab-dot" hidden></span></button>
       </aside>
       <section class="card settings-pane" id="settings-pane"></section>
@@ -45,13 +47,13 @@ export async function renderSettings(root) {
     const title = root.querySelector(".hero-sub");
     if (title) title.textContent = dirty
       ? "有未保存修改。切换目录前请先保存或确认放弃修改。"
-      : "AI 接口、BOSS 搜索条件、采集参数和黑名单规则集中管理。修改后先保存，当前采集任务使用启动时的配置快照。";
+      : "AI 接口、BOSS 搜索条件、采集参数、招呼语提示词和黑名单规则集中管理。修改后先保存，当前采集任务使用启动时的配置快照。";
   }
 
   /**
    * 高亮当前目录页签。
    *
-   * @param {string} name 页签名（`ai` / `collection` / `update`）
+   * @param {string} name 页签名（`ai` / `collection` / `greeting` / `update`）
    */
   function setActive(name) {
     active = name;
@@ -79,6 +81,10 @@ export async function renderSettings(root) {
     pane.innerHTML = `<div class="empty"><div class="empty-icon">◌</div><p>加载中…</p></div>`;
     if (name === "ai") {
       await renderLLM(pane, setDirty);
+      return;
+    }
+    if (name === "greeting") {
+      await renderGreetingPrompt(pane, setDirty);
       return;
     }
     if (name === "update") {

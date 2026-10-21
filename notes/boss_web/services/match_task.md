@@ -22,6 +22,11 @@
 
 只重打招呼语用的短 prompt：不跑整套人岗评估，省 token 也更聚焦。
 
+招呼语约束不再烤进模板——`USER_TEMPLATE` / `GREETING_USER_TEMPLATE` 里只留
+`{greeting_requirement}` 字段，组装时调
+`greeting_prompt.resolve_greeting_requirement()` 现读用户设置。这样用户文本
+里的 `{}` 也不会被 `.format()` 二次解释炸掉，改完设置下次生成就生效。
+
 ### `MatchTask._run_parallel`
 
 并发跑：最多 `MATCH_CONCURRENCY` 条在途。

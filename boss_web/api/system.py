@@ -18,6 +18,7 @@ from .. import runtime
 from ..errors import ConflictError, EnvironmentWebError, UpstreamError, ValidationWebError
 from ..services import app_settings_store, troubleshoot, update_check
 from ..services import updater
+from ..services.greeting_prompt import GREETING_REQUIREMENT, resolve_greeting_requirement
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -51,6 +52,20 @@ class ApplyUpdateBody(BaseModel):
     """
 
     version: str = Field("", description="要更新到的版本号，空串表示最新版")
+
+
+class GreetingPromptBody(BaseModel):
+    """招呼语提示词请求体。
+
+    Attributes:
+        requirement: 自定义招呼语约束；空串 = 恢复出厂默认。
+    """
+
+    requirement: str = Field(
+        "",
+        max_length=app_settings_store.GREETING_REQUIREMENT_MAX_LEN,
+        description="自定义招呼语约束，空串表示恢复默认",
+    )
 
 
 @router.get("/health")
@@ -110,6 +125,35 @@ def open_chrome() -> dict[str, Any]:
         "ok": True,
         "message": "已用可见窗口打开 Chrome。如果它停在验证页面，把滑块拖完再回到本页继续。",
     }
+
+
+def _greeting_prompt_payload() -> dict[str, Any]:
+    """拼招呼语提示词的回包：生效值 + 自定义原文 + 默认值。"""
+    custom = app_settings_store.load_settings().greeting_requirement
+    return {
+        "requirement": resolve_greeting_requirement(),
+        "custom": custom,
+        "is_default": not custom,
+        "default": GREETING_REQUIREMENT,
+    }
+
+
+@router.get("/greeting-prompt")
+def get_greeting_prompt() -> dict[str, Any]:
+    """读招呼语提示词：生效值、自定义原文、内置默认。"""
+    return _greeting_prompt_payload()
+
+
+@router.put("/greeting-prompt")
+def put_greeting_prompt(body: GreetingPromptBody) -> dict[str, Any]:
+    """写招呼语提示词；空串 = 恢复出厂默认。下次生成任务立即生效。"""
+    raw = (body.requirement or "").strip()
+    if len(raw) > app_settings_store.GREETING_REQUIREMENT_MAX_LEN:
+        raise ValidationWebError(
+            f"招呼语提示词太长了，最多 {app_settings_store.GREETING_REQUIREMENT_MAX_LEN} 字。"
+        )
+    app_settings_store.apply_greeting_requirement(raw)
+    return _greeting_prompt_payload()
 
 
 @router.get("/update")

@@ -835,3 +835,107 @@ def test_api_rematch(db):
     assert r.status_code == 404
     r = c.post("/api/match/nope/rematch", json={"encrypt_job_id": "j1"})
     assert r.status_code == 404
+
+
+_MATCH_JOB_KWARGS = {
+    "job_name": "Python",
+    "brand_name": "某公司",
+    "location": "广州",
+    "salary_desc": "20-30K",
+    "job_experience": "3-5年",
+    "job_degree": "本科",
+    "brand_industry": "互联网",
+    "brand_scale_name": "100-499人",
+    "encrypt_job_id": "j1",
+    "job_desc": "负责后端开发\n要求 Python",
+}
+
+_CUSTOM_REQ = "写 80 字，风格 {轻松}，不要『我们』}，可以用 { } 任意"
+
+_MATCH_REPLY = json.dumps(
+    {
+        "match_score": 85,
+        "matched_skills": ["Python"],
+        "missing_skills": [],
+        "verdict": "合适",
+        "pros": ["亮点A"],
+        "cons": ["短板B"],
+        "advice": "补 K8s",
+        "greeting": "你好",
+    },
+    ensure_ascii=False,
+)
+
+
+def test_招呼语约束里的花括号不炸匹配提示词(db):
+    """用户写的 `{}` 走运行期注入，原样进提示词，不许把 `.format()` 炸掉。"""
+    from boss_jobs.models import Job
+    from boss_web.services import app_settings_store
+    from boss_web.services.match_task import _match_one
+
+    app_settings_store.apply_greeting_requirement(_CUSTOM_REQ)
+    llm = _FakeLLM([_MATCH_REPLY])
+    result = _match_one(llm, "简历摘要", Job(**_MATCH_JOB_KWARGS))
+
+    assert result["match_score"] == 85
+    prompt = llm.messages[0][1]["content"]
+    assert _CUSTOM_REQ in prompt
+    assert "100 到 150 个字" not in prompt, "自定义要顶掉内置默认"
+
+
+def test_招呼语约束里的花括号不炸重生成提示词(db):
+    """重生成路径同样原样注入用户约束，含 `{}` 也不炸。"""
+    from boss_web.services import app_settings_store
+    from boss_web.services.match_task import regenerate_greeting
+
+    _seed_greet_world()
+    app_settings_store.apply_greeting_requirement(_CUSTOM_REQ)
+
+    llm = _ScriptLLM(["您好，想聊聊"])
+    assert regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=llm)
+    prompt = llm.calls[0][1]["content"]
+    assert _CUSTOM_REQ in prompt
+    assert "100 到 150 个字" not in prompt, "自定义要顶掉内置默认"
+
+
+def test_自定义招呼语约束两条路径都立即生效(db):
+    """保存后下次组装就用新值——匹配与重生成都现读设置，不用重启。"""
+    from boss_jobs.models import Job
+    from boss_web.services import app_settings_store
+    from boss_web.services.greeting_prompt import GREETING_REQUIREMENT
+    from boss_web.services.match_task import _match_one, regenerate_greeting
+
+    job = Job(**_MATCH_JOB_KWARGS)
+
+    llm = _FakeLLM([_MATCH_REPLY])
+    _match_one(llm, "简历摘要", job)
+    assert GREETING_REQUIREMENT in llm.messages[0][1]["content"]
+
+    app_settings_store.apply_greeting_requirement("改后的约束：60 字以内")
+
+    llm = _FakeLLM([_MATCH_REPLY])
+    _match_one(llm, "简历摘要", job)
+    assert "改后的约束：60 字以内" in llm.messages[0][1]["content"]
+    assert GREETING_REQUIREMENT not in llm.messages[0][1]["content"]
+
+    _seed_greet_world()
+    greeter = _ScriptLLM(["第二版"])
+    regenerate_greeting(analysis_id="an_re", encrypt_job_id="j1", llm=greeter)
+    assert "改后的约束：60 字以内" in greeter.calls[0][1]["content"]
+
+
+def test_简历解析路径也读自定义招呼语约束(db):
+    """旧的 `/api/resume/analyze` 与匹配任务共用同一段约束。"""
+    from boss_jobs.models import Job
+    from boss_web.services import app_settings_store
+    from boss_web.services.resume_analyzer import _analyze_one
+    from boss_web.services.resume_store import ResumeDraft
+
+    app_settings_store.apply_greeting_requirement(_CUSTOM_REQ)
+    draft = ResumeDraft("rs_x", "简历", "", 1.0, "原文")
+    llm = _FakeLLM([_MATCH_REPLY])
+
+    _analyze_one(llm, draft, Job(**_MATCH_JOB_KWARGS))
+
+    prompt = llm.messages[0][1]["content"]
+    assert _CUSTOM_REQ in prompt

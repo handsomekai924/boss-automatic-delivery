@@ -29,7 +29,7 @@ from boss_jobs.models import Job
 
 from .. import config as C
 from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
-from .greeting_prompt import GREETING_REQUIREMENT
+from .greeting_prompt import resolve_greeting_requirement
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import load_config
 from .resume_store import (
@@ -75,9 +75,9 @@ USER_TEMPLATE = """# 简历（结构化摘要）
   "pros": ["求职者相对这个岗位的亮点，2-4 条"],
   "cons": ["相对这个岗位的短板，2-4 条"],
   "advice": "给求职者的建议",
-  "greeting": "{GREETING_REQUIREMENT}"
+  "greeting": "{greeting_requirement}"
 }}
-""".replace("{GREETING_REQUIREMENT}", GREETING_REQUIREMENT)
+"""
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -107,10 +107,8 @@ GREETING_USER_TEMPLATE = """# 简历（结构化摘要）
 {job_desc}
 
 请按以下要求写一条私信：
-- {GREETING_REQUIREMENT}
-- 只输出私信正文，不要引号、不要解释""".replace(
-    "{GREETING_REQUIREMENT}", GREETING_REQUIREMENT
-)
+- {greeting_requirement}
+- 只输出私信正文，不要引号、不要解释"""
 
 
 class MatchTask:
@@ -625,6 +623,7 @@ def _match_one(llm: LLMClient, resume_brief: str, job: Job) -> dict[str, Any]:
         job_labels="、".join(job.job_labels[:12]) or "-",
         job_skills="、".join(job.skills[:12]) or "-",
         job_desc=_job_desc_block(job),
+        greeting_requirement=resolve_greeting_requirement(),
     )
     raw = llm.chat(
         [
@@ -704,6 +703,7 @@ def regenerate_greeting(
 
     user = GREETING_USER_TEMPLATE.format(
         resume_brief=_resume_brief(resume, llm_parse),
+        greeting_requirement=resolve_greeting_requirement(),
         **_greet_fields(item, _load_job(encrypt_job_id)),
     )
     messages = [

@@ -22,7 +22,7 @@ from boss_jobs.models import Job
 
 from .. import config as C
 from ..errors import ConflictError, NotFoundError, ValidationWebError
-from .greeting_prompt import GREETING_REQUIREMENT
+from .greeting_prompt import resolve_greeting_requirement
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import load_config
 from .resume_store import ResumeDraft, load_resume, save_analysis
@@ -62,9 +62,9 @@ USER_TEMPLATE = """# 简历摘要
   "cons": ["短板1", "短板2"],
   "reasons": ["两三条理由"],
   "advice": "给求职者的改进建议",
-  "greeting": "{GREETING_REQUIREMENT}"
+  "greeting": "{greeting_requirement}"
 }}
-""".replace("{GREETING_REQUIREMENT}", GREETING_REQUIREMENT)
+"""
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -398,6 +398,7 @@ def _analyze_one(llm: LLMClient, resume: ResumeDraft, job: Job) -> dict[str, Any
         job_experience=job.job_experience or "-",
         job_degree=job.job_degree or "-",
         job_labels="、".join(job.job_labels[:12]) or "-",
+        greeting_requirement=resolve_greeting_requirement(),
     )
     raw = llm.chat(
         [

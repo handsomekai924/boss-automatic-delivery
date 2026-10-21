@@ -97,6 +97,27 @@ def test_系统配置是两栏目录(settings_js: str):
     assert 'data-tab="collection"' in settings_js
 
 
+def test_系统配置有独立招呼语页签(settings_js: str):
+    """招呼语提示词走独立页签，不挤进 AI 设置/采集配置。"""
+    assert 'data-tab="greeting"' in settings_js
+    assert "招呼语" in settings_js
+    assert "renderGreetingPrompt" in settings_js
+
+
+def test_招呼语面板只改这一段约束():
+    """面板只开招呼语约束；其他提示词不上界面。
+
+    `maxlength` 钉死 500，和 `app_settings_store.GREETING_REQUIREMENT_MAX_LEN`
+    一致——改一处就得改另一处。
+    """
+    src = _read("js/views/greeting_prompt.js")
+    assert "/api/system/greeting-prompt" in src
+    assert "恢复默认" in src
+    assert 'requirement: ""' in src
+    assert 'id="greet-req"' in src
+    assert 'maxlength="500"' in src
+
+
 def test_切换目录前有未保存确认(settings_js: str):
     """验切换目录前有未保存确认。"""
     assert "未保存" in settings_js

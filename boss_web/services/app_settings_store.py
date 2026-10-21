@@ -1,8 +1,10 @@
 """用户级应用设置：状态库 `doc('app_settings')`。
 
-目前两项：`chrome_mode`（Chrome 窗口档位）与 `ignored_update_version`
-（忽略更新的水位线版本号）。整包存 JSON、读时归一化、坏值不报错只回默认。
-档位一改就要立刻同步到 `os.environ`，否则要重启才生效。
+三项：`chrome_mode`（Chrome 窗口档位）、`ignored_update_version`
+（忽略更新的水位线版本号）、`greeting_requirement`（自定义招呼语约束，
+空串 = 用 `greeting_prompt.GREETING_REQUIREMENT` 默认）。整包存 JSON、
+读时归一化、坏值不报错只回默认。档位一改就要立刻同步到 `os.environ`，
+否则要重启才生效。
 """
 
 from __future__ import annotations
@@ -29,16 +31,20 @@ class AppSettings:
         ignored_update_version: 空串 = 没忽略过任何版本；否则是「忽略水位线」
             的版本号（不带 `v` 前缀）。连续忽略多个版本只留最高那一版，
             比它旧的忽略自动作废。
+        greeting_requirement: 空串 = 用 `greeting_prompt.GREETING_REQUIREMENT`
+            默认；非空 = 用户自定义的招呼语生成约束。
     """
 
     chrome_mode: str = ""
     ignored_update_version: str = ""
+    greeting_requirement: str = ""
 
     def normalize(self) -> "AppSettings":
         """把不认识的值收成空串（= 用默认）。"""
         return AppSettings(
             chrome_mode=normalize_chrome_mode(self.chrome_mode),
             ignored_update_version=normalize_version(self.ignored_update_version),
+            greeting_requirement=normalize_greeting_requirement(self.greeting_requirement),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -64,6 +70,15 @@ def normalize_version(value: Any) -> str:
     return text if parse_version(text) is not None else ""
 
 
+GREETING_REQUIREMENT_MAX_LEN = 500
+
+
+def normalize_greeting_requirement(value: Any) -> str:
+    """自定义招呼语约束：去空白、超长截断；空串 = 用默认。"""
+    text = str(value or "").strip()
+    return text[:GREETING_REQUIREMENT_MAX_LEN]
+
+
 def load_settings(path: Path | str | None = None) -> AppSettings:
     """读设置；没有 / 坏了 → 默认值（不报错）。"""
     try:
@@ -83,6 +98,7 @@ def load_settings(path: Path | str | None = None) -> AppSettings:
     return AppSettings(
         chrome_mode=data.get("chrome_mode", ""),
         ignored_update_version=data.get("ignored_update_version", ""),
+        greeting_requirement=data.get("greeting_requirement", ""),
     ).normalize()
 
 
@@ -140,6 +156,20 @@ def apply_ignored_update_version(version: str, path: Path | str | None = None) -
     """
     settings = _patch({"ignored_update_version": version}, path)
     return settings.ignored_update_version
+
+
+def apply_greeting_requirement(text: str, path: Path | str | None = None) -> str:
+    """存下自定义招呼语约束；空串 = 恢复出厂默认。
+
+    Args:
+        text: 自定义约束文本；超长截断到 500 字。
+        path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+
+    Returns:
+        归一化后的自定义文本（空串 = 用默认）。
+    """
+    settings = _patch({"greeting_requirement": text}, path)
+    return settings.greeting_requirement
 
 
 def restore_on_startup(path: Path | str | None = None) -> AppSettings:

@@ -35,6 +35,7 @@
 | [boss_web/services/app_settings_store.md](boss_web/services/app_settings_store.md) | `boss_web.services.app_settings_store` | 用户级应用设置，状态库 `doc('app_settings')` |
 | [boss_web/services/crawl_task.md](boss_web/services/crawl_task.md) | `boss_web.services.crawl_task` | 后台抓取任务：线程跑爬取，网页轮询进度 |
 | [boss_web/services/deliver_task.md](boss_web/services/deliver_task.md) | `boss_web.services.deliver_task` | 一键投递：串行打招呼并发出招呼语 |
+| [boss_web/services/greeting_prompt.md](boss_web/services/greeting_prompt.md) | `boss_web.services.greeting_prompt` | 招呼语生成约束：出厂默认 + 用户自定义，运行期注入模板 |
 | [boss_web/services/llm_client.md](boss_web/services/llm_client.md) | `boss_web.services.llm_client` | OpenAI 兼容的 Chat Completions 客户端 |
 | [boss_web/services/login_task.md](boss_web/services/login_task.md) | `boss_web.services.login_task` | 登录任务状态机，把阻塞回调接到网页表单 |
 | [boss_web/services/match_task.md](boss_web/services/match_task.md) | `boss_web.services.match_task` | 匹配任务：简历 vs 岗位，并行调 LLM 出匹配度与招呼语 |

@@ -8,7 +8,7 @@
 
 ## 细节
 
-目前两项：
+目前三项：
 
 - `chrome_mode`——Chrome 窗口档位。为什么它：`boss_jobs` 默认用
   `hidden`（屏幕外 + Win32 隐藏）拉 Chrome，用户不必被弹一脸窗口——
@@ -16,6 +16,10 @@
   够不着的。打包给非技术用户后必须有个界面开关能把它切成 `visible`。
 - `ignored_update_version`——用户点过「忽略此版本」的版本号，见
   `boss_web.services.update_check`。
+- `greeting_requirement`——自定义招呼语生成约束。空串 = 用
+  `boss_web.services.greeting_prompt.GREETING_REQUIREMENT` 出厂默认；
+  非空 = 用户在「系统配置 → 招呼语」改写的那段。组装提示词时现读，
+  保存即生效（见 `apply_greeting_requirement`）。
 
 做法照搬 `boss_web.services.deliver_config_store`：整包存 JSON、读时归一
 化、坏值不报错只回默认。
