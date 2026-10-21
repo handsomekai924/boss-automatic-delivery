@@ -2,7 +2,7 @@
 
 代码里的文档字符串只留**作用、入参、返回值**。协议逆向、实测记录、历史背景留在这里。
 
-风格规范见 [docstring-style.md](docstring-style.md)。
+风格规范见 [docstring-style.md](docstring-style.md)（已迁到 `.claude/skills/doc-style/`，含 JS / Vue3）。
 
 | 文件 | 源模块 | 一句话 |
 |------|--------|--------|
@@ -43,6 +43,7 @@
 | [boss_web/services/troubleshoot.md](boss_web/services/troubleshoot.md) | `boss_web.services.troubleshoot` | 技术异常翻成人话 + Chrome 环境检测 |
 | [boss_web/services/update_check.md](boss_web/services/update_check.md) | `boss_web.services.update_check` | 对着 Gitee 发行版比版本号 |
 | [boss_web/services/updater.md](boss_web/services/updater.md) | `boss_web.services.updater` | 应用内自更新：下载 zip → 校验 → bat 换文件重启，推 WS 进度 |
+| [boss_web/static/js/update.md](boss_web/static/js/update.md) | `boss_web/static/js/update.js` | 自更新前端：`showUpdateDone` 只刷新不关窗的三个坑 + 时序 |
 | [packaging/make_zip.md](packaging/make_zip.md) | `packaging.make_zip` | 发行 zip 过滤规则与 Windows 打包坑 |
 | [tools/mock_server.md](tools/mock_server.md) | `tools.mock_server` | 本地假服务端，离线演练登录/发码/滑块/筛选接口 |
 | [tools/probe_expect.md](tools/probe_expect.md) | `tools.probe_expect` | 求职期望流五个待定点的 P3 实测校准 |
