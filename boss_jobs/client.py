@@ -311,6 +311,8 @@ class JobClient:
 
         走 `search/joblist.json`；每次先补 `__zp_stoken__`，
         撞 code 37 时自动换新重试。条件页码可被 `page` 覆盖。
+
+        注：6 位区级代码会被自动提升到市级代码搜索（API 不接受区级代码）。
         """
         if page is not None:
             search_filter = search_filter.for_page(page)

@@ -85,10 +85,8 @@ def create_app() -> FastAPI:
         async def _no_cache_static(request: Request, call_next):  # noqa: ANN202
             """静态与接口响应加禁缓存头，避免跨文件版本错配与旧登录态。"""
             response = await call_next(request)
-            # StaticFiles 有时无法识别 .js 的 MIME，浏览器拒绝加载 ES module
             if request.url.path.endswith(".js"):
                 response.headers["Content-Type"] = "application/javascript; charset=utf-8"
-            # JS/CSS 是 ES module 依赖图的一部分，缓存过期会造成跨文件版本错配
             if request.url.path.startswith("/static/") or request.url.path == "/":
                 response.headers["Cache-Control"] = "no-cache, must-revalidate"
             elif request.url.path.startswith("/api/"):

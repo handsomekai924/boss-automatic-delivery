@@ -48,7 +48,32 @@ def conditions() -> dict[str, Any]:
     data = cond.to_dict()
     data["source"] = getattr(cond, "source", "")
     data["degraded"] = getattr(cond, "degraded", {})
+
+    if "city" in data and isinstance(data["city"], list):
+        data["city"] = _remove_district_level(data["city"])
+
     return data
+
+
+def _remove_district_level(city_tree: list[dict]) -> list[dict]:
+    """去掉城市树中市级节点下的区级子节点。
+
+    保留省→市两级结构，市级节点的 children 被清空。
+    前端城市选择器只允许选择市级代码。
+    """
+    result = []
+    for province in city_tree:
+        province_copy = {**province}
+        if "children" in province_copy and isinstance(province_copy["children"], list):
+            cities = []
+            for city in province_copy["children"]:
+                city_copy = {**city}
+                if "children" in city_copy:
+                    del city_copy["children"]
+                cities.append(city_copy)
+            province_copy["children"] = cities
+        result.append(province_copy)
+    return result
 
 
 @router.get("/search")

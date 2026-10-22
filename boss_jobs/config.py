@@ -74,6 +74,7 @@ GEEK_JOBS_REFERER: Final[str] = f"{BASE_URL}/web/geek/jobs"
 
 ENDPOINTS: Final[dict[str, str]] = {
     "job_search": "/wapi/zpgeek/search/joblist.json",
+    "business_district": "/wapi/zpgeek/businessDistrict.json",
     "job_expect_flow": "/wapi/zpgeek/pc/recommend/job/list.json",
     "job_expect_list": "/wapi/zpgeek/pc/recommend/expect/list.json",
     "job_detail": "/wapi/zpgeek/job/detail.json",
