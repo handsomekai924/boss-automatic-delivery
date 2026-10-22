@@ -7,7 +7,7 @@ import { modal, escapeHtml, toast } from "./ui.js";
 const RECONNECT_MS = 1500;
 /** 等新服务起来的总时长上限。超过就当更新没跑完，让用户自己看日志 */
 const WAIT_LIMIT_MS = 10 * 60 * 1000;
-/** 后台轻提示的轮询间隔。检测本身是后端每 5 分钟刷缓存，这里只管读 */
+/** 后台轻提示的轮询间隔。检测本身是后端每 30 分钟真打一次 Gitee，这里只管读缓存 */
 const WATCHER_POLL_MS = 60 * 1000;
 /** 「更新完成」提示停留多久再刷新——够看清更新到了哪一版，又不至于干等 */
 const RELOAD_DELAY_MS = 1500;

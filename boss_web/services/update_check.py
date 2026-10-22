@@ -40,6 +40,7 @@ GITHUB_RELEASES_PAGE = (
 HTTP_TIMEOUT = 8.0
 CACHE_TTL = 1800.0
 NOTES_LIMIT = 1200
+PERIODIC_INTERVAL = 1800.0
 
 _VERSION_RE = re.compile(r"^\D*(\d+(?:\.\d+)*).*$")
 
@@ -189,6 +190,10 @@ def fetch_latest_release() -> Release:
             timeout=HTTP_TIMEOUT,
             headers={"User-Agent": f"BossAutoDelivery/{APP_VERSION}"},
         )
+        if resp.status_code in (403, 429):
+            raise UpdateCheckError(
+                "Gitee 接口被限流了，等一会儿再试；不影响程序其它功能。"
+            )
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as exc:
@@ -289,18 +294,20 @@ def schedule_startup_check(on_done: Any = None) -> None:
     threading.Thread(target=_run, name="update-check", daemon=True).start()
 
 
-def schedule_periodic_check(interval: float = 300.0) -> None:
-    """每 `interval` 秒后台刷一次 Gitee 发行版，默认 5 分钟。
+def schedule_periodic_check(interval: float = PERIODIC_INTERVAL) -> None:
+    """每 `interval` 秒后台真打一次 Gitee 发行版，不依赖缓存。
 
-    放后端而不是让前端轮询：`CACHE_TTL` 是 30 分钟，前端带 `force` 会多打
-    Gitee。每一 tick 独立吞异常，版本检测永远不该拦住服务。
+    放后端而不是让前端轮询。这里用带 `force` 的 `refresh`：每个 tick 都重新拉
+    一次真实接口，保证版本号总是新的；靠拉长 `interval`（默认 30 分钟，匿名
+    限流 60 次/小时以内）来避免被 Gitee 限流。每一 tick 独立吞异常，版本检测
+    永远不该拦住服务。
 
     Args:
         interval: 刷新间隔（秒），下限夹到 5 秒。
     """
 
     def _run() -> None:
-        """后台线程体：按间隔反复刷新缓存。"""
+        """后台线程体：按间隔强制刷新一次真实接口。"""
         while True:
             try:
                 time.sleep(max(5.0, float(interval)))

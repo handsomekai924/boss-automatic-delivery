@@ -306,6 +306,28 @@ def test_检测失败不抛错只带人话(monkeypatch):
     assert "连不上 Gitee" in body["error"]
 
 
+def test_限流_403_算限流不算连不上(monkeypatch):
+    """Gitee 返回 403/429 是限流，提示要和对得上号，不能报成「连不上」。"""
+    import requests as _requests
+
+    class _Resp:
+        """模拟一个 403 响应。"""
+
+        status_code = 403
+
+        def raise_for_status(self):
+            """raise 成 HTTPError，但限流分支在它之前就拦截了。"""
+            raise _requests.HTTPError("403")
+
+    monkeypatch.setattr(
+        _requests, "get", lambda *_a, **_k: _Resp()
+    )
+    with pytest.raises(update_check.UpdateCheckError) as ei:
+        update_check.fetch_latest_release()
+    assert "限流" in str(ei.value)
+    assert "连不上" not in str(ei.value)
+
+
 def test_结果走缓存不重复打接口(monkeypatch):
     """验结果走缓存不重复打接口。"""
     calls: list[int] = []
@@ -627,9 +649,9 @@ def test_cached_snapshot_只读缓存(monkeypatch):
     assert snap["current"] == APP_VERSION.lstrip("vV")
 
 
-def test_周期检测_force_绕过缓存且每轮一次(monkeypatch):
-    """验周期检测 force 绕过缓存且每轮一次。"""
-    calls = []
+def test_周期检测_force_每轮真打一次(monkeypatch):
+    """周期线程用 `force`，每个 tick 都真打一次接口，不依赖缓存。"""
+    calls: list[int] = []
 
     def fake():
         """计数并回固定版本。"""
@@ -637,6 +659,7 @@ def test_周期检测_force_绕过缓存且每轮一次(monkeypatch):
         return update_check.pick_latest([_release("v1.9.9")])
 
     monkeypatch.setattr(update_check, "fetch_latest_release", fake)
+
     update_check.refresh(force=True)
     update_check.refresh(force=True)
     assert len(calls) == 2, "周期检测每轮都要真测一次，不许吃缓存"

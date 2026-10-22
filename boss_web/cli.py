@@ -268,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from .services.update_check import schedule_periodic_check
 
-        schedule_periodic_check(interval=300.0)
+        schedule_periodic_check()
     except Exception:  # noqa: BLE001 - 周期检测起不来也不该拦住启动
         logging.getLogger(__name__).warning("版本周期检测启动失败", exc_info=True)
 
