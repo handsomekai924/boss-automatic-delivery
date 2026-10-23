@@ -160,7 +160,7 @@ def put_greeting_prompt(body: GreetingPromptBody) -> dict[str, Any]:
 def update_status(force: bool = False) -> dict[str, Any]:
     """当前版本 / 最新版 / 要不要弹窗；`should_prompt` = 有更新且没被忽略压住。
 
-    检测失败时 `latest` 为空、`error` 带人话，不报 500。
+    检测失败时 `latest` 为空、`error` 带人话，不报 500。`force=true` 触发手动刷新。
     """
     body = update_check.build_status(force=force)
     body["version"] = APP_VERSION

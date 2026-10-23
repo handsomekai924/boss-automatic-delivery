@@ -1,7 +1,8 @@
 """版本更新检测：对着 Gitee 发行版比一版号，有新的就提示用户去下。
 
 只查 Gitee；GitHub 只提供下载入口，不参与版本判断。忽略版本记的是「水位线」
-——比水位新的版本会重新弹出提示。
+——比水位新的版本会重新弹出提示。检测触发时机：启动时后台预热一次、
+用户在网页里手动刷新。
 
 Attributes:
     GITEE_RELEASES_PAGE: 提示框上「去下载」按钮的落点。
@@ -40,7 +41,6 @@ GITHUB_RELEASES_PAGE = (
 HTTP_TIMEOUT = 8.0
 CACHE_TTL = 1800.0
 NOTES_LIMIT = 1200
-PERIODIC_INTERVAL = 1800.0
 
 _VERSION_RE = re.compile(r"^\D*(\d+(?:\.\d+)*).*$")
 
@@ -239,7 +239,7 @@ def _fresh(seconds: float | None = None) -> bool:
 def refresh(*, force: bool = False) -> dict[str, Any]:
     """拿一份检测结果；缓存没过期就直接回，过期才真去打 Gitee。
 
-    失败也缓存，避免用户每开一页都卡住等网络。
+    失败也缓存，避免用户每开一页都卡住等网络。触发检测：启动时后台预热、网页手动刷新。
 
     Args:
         force: 为真则忽略缓存强制重测。
@@ -292,34 +292,6 @@ def schedule_startup_check(on_done: Any = None) -> None:
             logger.debug("版本结果回调失败", exc_info=True)
 
     threading.Thread(target=_run, name="update-check", daemon=True).start()
-
-
-def schedule_periodic_check(interval: float = PERIODIC_INTERVAL) -> None:
-    """每 `interval` 秒后台真打一次 Gitee 发行版，不依赖缓存。
-
-    放后端而不是让前端轮询。这里用带 `force` 的 `refresh`：每个 tick 都重新拉
-    一次真实接口，保证版本号总是新的；靠拉长 `interval`（默认 30 分钟，匿名
-    限流 60 次/小时以内）来避免被 Gitee 限流。每一 tick 独立吞异常，版本检测
-    永远不该拦住服务。
-
-    Args:
-        interval: 刷新间隔（秒），下限夹到 5 秒。
-    """
-
-    def _run() -> None:
-        """后台线程体：按间隔强制刷新一次真实接口。"""
-        while True:
-            try:
-                time.sleep(max(5.0, float(interval)))
-            except Exception:  # noqa: BLE001 - 睡不醒就退出，别空转
-                logger.debug("版本周期检测的 sleep 中断", exc_info=True)
-                return
-            try:
-                refresh(force=True)
-            except Exception:  # noqa: BLE001 - 连不上就等下一 tick
-                logger.debug("版本周期检测失败", exc_info=True)
-
-    threading.Thread(target=_run, name="update-check-periodic", daemon=True).start()
 
 
 def cached_snapshot(*, path: Any = None) -> dict[str, Any]:

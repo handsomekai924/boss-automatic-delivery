@@ -265,12 +265,6 @@ def main(argv: list[str] | None = None) -> int:
         schedule_startup_check(on_done=_print_version_status)
     except Exception:  # noqa: BLE001 - 预热失败绝不拦住启动
         logging.getLogger(__name__).warning("版本检测预热失败", exc_info=True)
-    try:
-        from .services.update_check import schedule_periodic_check
-
-        schedule_periodic_check()
-    except Exception:  # noqa: BLE001 - 周期检测起不来也不该拦住启动
-        logging.getLogger(__name__).warning("版本周期检测启动失败", exc_info=True)
 
     session_ready = threading.Event()
     try:
