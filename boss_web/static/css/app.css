@@ -2175,7 +2175,7 @@ details.acc .acc-body {
   border: 1px solid var(--stroke);
 }
 
-/* ---------- 21b. 简历定向修改向导 ---------- */
+/* ---------- 21b. 简历简历优化向导 ---------- */
 
 .revise { display: flex; flex-direction: column; gap: var(--sp-4); }
 .rv-top {

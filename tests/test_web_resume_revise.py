@@ -1,4 +1,4 @@
-"""简历定向修改（resume_revisions / revise / 生成 / 保存）的单元测试。"""
+"""简历优化（resume_revisions / revise / 生成 / 保存）的单元测试。"""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def test_generate_revision_ok():
         config = type("C", (), {"model": "m1"})()
 
         def chat_with_metadata(self, messages, **kw):
-            """回带 changes 的定向修改 JSON。"""
+            """回带 changes 的简历优化 JSON。"""
             payload = {
                 "revised_md": SAMPLE + "\n## 新增说明\n对齐高并发要求",
                 "changes": [

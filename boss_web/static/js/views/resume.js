@@ -111,7 +111,7 @@ export async function renderResume(root) {
       <div class="rs-lib" id="rs-lib"></div>
       <div class="rs-bar-act">
         <span class="rs-fresh" id="rs-fresh"></span>
-        <button class="btn" id="btn-revise">定向修改</button>
+        <button class="btn" id="btn-revise">简历优化</button>
         <button class="btn" id="btn-upload">${ICO_UPLOAD}上传简历</button>
         <button class="btn primary" id="btn-parse">重新解析</button>
         <button class="btn danger" id="btn-del">删除</button>

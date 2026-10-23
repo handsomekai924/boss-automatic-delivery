@@ -452,7 +452,7 @@ def revision_regenerate(revision_id: str) -> dict[str, Any]:
 def revision_delete(revision_id: str) -> dict[str, Any]:
     """删一条简历优化记录（只删库内记录，不删已写盘文件）。"""
     if not delete_revision(revision_id):
-        raise NotFoundError(f"定向修改记录不存在：{revision_id}")
+        raise NotFoundError(f"简历优化记录不存在：{revision_id}")
     return {"deleted": True}
 
 

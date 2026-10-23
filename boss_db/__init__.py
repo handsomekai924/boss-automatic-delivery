@@ -222,7 +222,7 @@ CREATE TABLE IF NOT EXISTS crawl_task_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_crawl_task_jobs_job ON crawl_task_jobs(encrypt_job_id);
 
--- 简历定向修改：一次「按目标岗位改一版」的完整生命周期（草稿 / 已保存 / 丢弃 / 出错）。
+-- 简历优化：一次「按目标岗位改一版」的完整生命周期（草稿 / 已保存 / 丢弃 / 出错）。
 -- 一行 = 一次修改意图；原简历永不覆盖，确认保存才产生新的 resume 行。
 CREATE TABLE IF NOT EXISTS resume_revisions (
     revision_id      TEXT PRIMARY KEY,           -- rv_ + uuid hex[:10]

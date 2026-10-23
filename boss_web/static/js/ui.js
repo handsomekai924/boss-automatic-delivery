@@ -837,7 +837,7 @@ function formatEventLabel(name, f) {
   if (n === "stopped") return `⛔ ${f.reason || "已停"}`;
   if (n === "job_start") return `→ 开始匹配 ${who}`;
   if (n === "job_done") return `✓ ${who}${f.score != null ? ` · 评分 ${f.score}` : ""}`;
-  if (n === "revise_start") return `→ 开始定向修改（${f.job_count ?? "?"} 个岗位）`;
+  if (n === "revise_start") return `→ 开始简历优化（${f.job_count ?? "?"} 个岗位）`;
   if (n === "revise_llm") return `→ 正在调用 LLM 生成…`;
   if (n === "revise_done") return `✓ 生成完成，可对比`;
   if (n === "send_start") return `→ 发送 ${who || f.encrypt_job_id || ""}`;

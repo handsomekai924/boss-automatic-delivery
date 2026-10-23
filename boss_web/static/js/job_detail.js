@@ -1,4 +1,4 @@
-/** 职位详情弹窗（复用给「找工作」页与「定向修改」选岗位清单）。 */
+/** 职位详情弹窗（复用给「找工作」页与「简历优化」选岗位清单）。 */
 
 import { api } from "./api.js";
 import { toast, modal, escapeHtml } from "./ui.js";
