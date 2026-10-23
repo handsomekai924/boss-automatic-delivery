@@ -43,7 +43,7 @@ class CollectionBody(BaseModel):
     partTime: list[str] = Field(default_factory=list)
     stage: list[str] = Field(default_factory=list)
     pageSize: int = Field(15, ge=1, le=50)
-    max_pages: int = Field(5, ge=1, le=200)
+    max_pages: int = Field(5, ge=1, le=10)
     start_page: int = Field(1, ge=1)
     page_interval: float = Field(1.0, ge=0, le=30)
     use_search: bool = True

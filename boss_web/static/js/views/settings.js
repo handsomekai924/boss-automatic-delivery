@@ -158,7 +158,7 @@ async function renderCollection(root, markDirty) {
     </div>
     <div class="settings-scroll">
       <div class="row-4">
-        <div class="field"><label>最大页数</label><input class="input" id="c-max-pages" type="number" min="1" max="200"></div>
+        <div class="field"><label>最大页数</label><input class="input" id="c-max-pages" type="number" min="1" max="10"></div>
         <div class="field"><label>起始页</label><input class="input" id="c-start-page" type="number" min="1"></div>
         <div class="field"><label>页间隔（秒）</label><input class="input" id="c-page-interval" type="number" min="0" max="30" step="0.1"></div>
         <div class="field"><label>详情间隔（秒）</label><input class="input" id="c-detail-interval" type="number" min="0" max="30" step="0.1"></div>
@@ -218,6 +218,11 @@ async function renderCollection(root, markDirty) {
   const fields = ["c-max-pages", "c-start-page", "c-page-interval", "c-detail-interval", "s-query", "s-pageSize",
                   "c-tmp-position", "c-tmp-type", "c-tmp-low", "c-tmp-high"];
   fields.forEach((id) => $(id).addEventListener("input", () => markDirty(true)));
+  $("c-max-pages").addEventListener("blur", () => {
+    const val = Number($("c-max-pages").value);
+    if (val > 10) $("c-max-pages").value = 10;
+    if (val < 1) $("c-max-pages").value = 1;
+  });
   ["c-fetch-details", "c-store-blacklisted"].forEach((id) => $(id).addEventListener("change", () => markDirty(true)));
   ["s-jobType", "s-salary", "c-expect"].forEach((id) => $(id).addEventListener("change", () => { updateSourceUI(); markDirty(true); }));
   root.querySelectorAll('input[name="c-source"]').forEach((el) => {

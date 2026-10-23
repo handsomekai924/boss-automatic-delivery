@@ -76,7 +76,7 @@ class CollectionConfig:
             logger.warning("旧「推荐页」配置已移除，改用关键词搜索")
             use_search = True
         return CollectionConfig(
-            max_pages=max(1, min(200, max_pages)),
+            max_pages=max(1, min(10, max_pages)),
             start_page=max(1, start_page),
             page_interval=max(0.0, min(30.0, page_interval)),
             use_search=use_search,
