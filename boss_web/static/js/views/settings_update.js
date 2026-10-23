@@ -100,7 +100,7 @@ export async function renderSettingsUpdate(root) {
       return;
     }
     box.innerHTML = `
-      <div class="banner bad mb-12">
+      <div class="banner bad mb-12 column">
         <div class="mb-8"><strong>当前版本 v${escapeHtml(d.current || "?")} · ${escapeHtml(d.install_mode_label || "未知环境")}</strong></div>
         <div class="mb-8">${escapeHtml(reason)}</div>
         <div class="muted">完整日志见下方；方便的话点「复制诊断信息」把内容发给开发者。</div>

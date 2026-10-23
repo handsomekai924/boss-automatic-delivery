@@ -22,7 +22,48 @@ from typing import Any
 
 import boss_db
 
+from ..runtime import app_data_dir
+
 logger = logging.getLogger(__name__)
+
+
+REVISION_EXPORT_DIR_NAME = "resume_revisions"
+
+
+def revisions_export_dir() -> Path:
+    """简历优化导出根目录（`app_data_dir()/exports/resume_revisions`），自动创建。
+
+    Returns:
+        可写的导出目录。
+    """
+    folder = app_data_dir() / "exports" / REVISION_EXPORT_DIR_NAME
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _safe_filename(raw: str) -> str:
+    """把标题收成安全的文件名字段（与 `_source_name` 同规避字符）。"""
+    return re.sub(r"[^\w.\-]+", "_", str(raw or "").strip())[:60] or "resume"
+
+
+def revision_path(title: str, suffix: str, *, stamp: str) -> Path:
+    """排一个不重名的导出文件路径。
+
+    Args:
+        title: 底稿标题（用于文件名字段）。
+        suffix: 扩展名（`.md` / `.txt`）。
+        stamp: 时间戳串（`%Y%m%d-%H%M`）。
+
+    Returns:
+        唯一存在的目标路径，重名自动追加 `-2`。
+    """
+    base = revisions_export_dir() / f"{_safe_filename(title)}-定向-{stamp}"
+    path = base.with_suffix(suffix)
+    n = 2
+    while path.exists():
+        path = base.with_name(f"{base.name}-{n}{suffix}")
+        n += 1
+    return path
 
 
 @dataclass
@@ -473,4 +514,213 @@ def delete_analysis(analysis_id: str) -> bool:
     conn = boss_db.acquire()
     with conn:
         cur = conn.execute("DELETE FROM analysis WHERE analysis_id = ?", (analysis_id,))
+    return cur.rowcount > 0
+
+
+REVISION_RUNNING = "running"
+REVISION_DRAFT = "draft"
+REVISION_SAVED = "saved"
+REVISION_DISCARDED = "discarded"
+REVISION_ERROR = "error"
+REVISION_CANCELLED = "cancelled"
+
+_REVISION_COLUMNS = (
+    "revision_id", "resume_id", "resume_title", "created_at", "updated_at",
+    "status", "target_kind", "target_json", "crawl_task_id", "job_count",
+    "original_md", "revised_md", "change_json", "model", "export_format",
+    "saved_path", "saved_resume_id", "error",
+)
+
+
+def _revision_dict(row: Any, *, full: bool = False) -> dict[str, Any]:
+    """`resume_revisions` 行 → dict；`full=True` 时带原文 / 修改稿全文。"""
+    data = {
+        "revision_id": str(row["revision_id"]),
+        "resume_id": str(row["resume_id"]),
+        "resume_title": str(row["resume_title"] or ""),
+        "created_at": float(row["created_at"] or 0.0),
+        "updated_at": float(row["updated_at"] or 0.0),
+        "status": str(row["status"] or ""),
+        "target_kind": str(row["target_kind"] or "jobs"),
+        "crawl_task_id": str(row["crawl_task_id"] or ""),
+        "job_count": int(row["job_count"] or 0),
+        "model": str(row["model"] or ""),
+        "export_format": str(row["export_format"] or "md"),
+        "saved_path": str(row["saved_path"] or ""),
+        "saved_resume_id": str(row["saved_resume_id"] or ""),
+        "error": str(row["error"] or ""),
+    }
+    if full:
+        data.update(
+            {
+                "original_md": str(row["original_md"] or ""),
+                "revised_md": str(row["revised_md"] or ""),
+                "changes": _load_change_json(str(row["change_json"] or "")),
+                "target": _load_target_json(str(row["target_json"] or "")),
+            }
+        )
+    return data
+
+
+def _load_change_json(raw: str) -> list[dict[str, Any]]:
+    """`change_json` 文本 → 列表；坏 JSON 回空列表。"""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _load_target_json(raw: str) -> dict[str, Any]:
+    """`target_json` 文本 → dict；坏 JSON 回空 dict。"""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def create_revision(
+    *,
+    revision_id: str,
+    resume_id: str,
+    resume_title: str,
+    target_kind: str,
+    target_json: dict[str, Any],
+    crawl_task_id: str,
+    job_count: int,
+    original_md: str,
+) -> str:
+    """新插一条简历优化草稿（status = running），返回 revision_id。
+
+    `original_md` 在生成时刻落死——底稿简历随后被删，对比与追溯仍成立。
+    """
+    now = time.time()
+    conn = boss_db.acquire()
+    with conn:
+        conn.execute(
+            "INSERT INTO resume_revisions (revision_id, resume_id, resume_title, "
+            "created_at, updated_at, status, target_kind, target_json, crawl_task_id, "
+            "job_count, original_md) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                revision_id,
+                resume_id,
+                resume_title or "",
+                now,
+                now,
+                REVISION_RUNNING,
+                target_kind or "jobs",
+                json.dumps(target_json or {}, ensure_ascii=False),
+                crawl_task_id or "",
+                int(job_count or 0),
+                original_md or "",
+            ),
+        )
+    return revision_id
+
+
+def load_revision(revision_id: str) -> dict[str, Any]:
+    """读一条简历优化（全文）；不存在抛 `FileNotFoundError`。"""
+    conn = boss_db.acquire()
+    row = conn.execute(
+        "SELECT * FROM resume_revisions WHERE revision_id = ?", (revision_id,)
+    ).fetchone()
+    if row is None:
+        raise FileNotFoundError(revision_id)
+    return _revision_dict(row, full=True)
+
+
+def list_revisions(*, limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
+    """简历优化记录列表（摘要）；返回 `(items, total)`，最近的在前。"""
+    conn = boss_db.acquire()
+    total_row = conn.execute("SELECT COUNT(*) AS n FROM resume_revisions").fetchone()
+    total = int(total_row["n"] or 0)
+    rows = conn.execute(
+        "SELECT * FROM resume_revisions ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    return [_revision_dict(row) for row in rows], total
+
+
+def update_revision_result(
+    revision_id: str,
+    *,
+    revised_md: str,
+    changes: list[dict[str, Any]],
+    model: str,
+    status: str = REVISION_DRAFT,
+    error: str = "",
+) -> bool:
+    """把一次生成结果原地写回草稿行（只改不增）；返回是否真的更新到。"""
+    conn = boss_db.acquire()
+    with conn:
+        cur = conn.execute(
+            "UPDATE resume_revisions SET updated_at = ?, status = ?, revised_md = ?, "
+            "change_json = ?, model = ?, error = ? WHERE revision_id = ?",
+            (
+                time.time(),
+                status,
+                revised_md or "",
+                json.dumps(changes or [], ensure_ascii=False),
+                model or "",
+                error or "",
+                revision_id,
+            ),
+        )
+    return cur.rowcount > 0
+
+
+def mark_revision_status(revision_id: str, status: str, *, error: str = "") -> bool:
+    """只改状态（取消 / 丢弃 / 出错）；返回是否真的更新到。
+
+    Args:
+        revision_id: 修改记录 id。
+        status: 目标状态。
+        error: 可选错误文案。
+
+    Returns:
+        有没有真的更新到行。
+    """
+    conn = boss_db.acquire()
+    with conn:
+        cur = conn.execute(
+            "UPDATE resume_revisions SET updated_at = ?, status = ?, error = ? "
+            "WHERE revision_id = ?",
+            (time.time(), status, error or "", revision_id),
+        )
+    return cur.rowcount > 0
+
+
+def mark_revision_saved(
+    revision_id: str,
+    *,
+    saved_path: str,
+    saved_resume_id: str,
+    export_format: str,
+) -> bool:
+    """确认保存成功后，把状态置 `saved` 并记写盘路径 / 新简历 id。"""
+    conn = boss_db.acquire()
+    with conn:
+        cur = conn.execute(
+            "UPDATE resume_revisions SET updated_at = ?, status = ?, saved_path = ?, "
+            "saved_resume_id = ?, export_format = ? WHERE revision_id = ?",
+            (
+                time.time(),
+                REVISION_SAVED,
+                saved_path or "",
+                saved_resume_id or "",
+                export_format or "md",
+                revision_id,
+            ),
+        )
+    return cur.rowcount > 0
+
+
+def delete_revision(revision_id: str) -> bool:
+    """删一条修改记录（只删库内记录，不删已写盘文件）；返回是否删到。"""
+    conn = boss_db.acquire()
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM resume_revisions WHERE revision_id = ?", (revision_id,)
+        )
     return cur.rowcount > 0

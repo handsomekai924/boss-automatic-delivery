@@ -344,7 +344,7 @@ def test_match_one_has_pros_and_cons():
         {"max_tokens": C.LLM_MATCH_MAX_TOKENS},
     ]
     prompt = llm.messages[0][1]["content"]
-    assert "100 到 150 个字" in prompt
+    assert "100–150 字" in prompt
     assert "60 字以内" not in prompt
     assert "负责后端开发" in _job_desc_block(job)
 

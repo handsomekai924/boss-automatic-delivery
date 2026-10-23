@@ -16,6 +16,8 @@ Attributes:
     LLM_RESUME_PARSE_MAX_TOKENS: 简历结构化解析单次回复 token 上限。
     LLM_RESUME_PARSE_RETRY_MAX_TOKENS: 简历输出被截断时唯一一次重试的 token 上限。
     LLM_MATCH_MAX_TOKENS: 人岗匹配单次回复 token 上限。
+    LLM_REVISE_MAX_TOKENS: 简历优化单次回复 token 上限（输出是整份简历）。
+    LLM_REVISE_RETRY_MAX_TOKENS: 简历优化输出被截断时唯一一次重试的 token 上限。
     LLM_TIMEOUT: 单次请求超时（秒）。
 """
 
@@ -47,4 +49,6 @@ LLM_MAX_TOKENS = 2048
 LLM_RESUME_PARSE_MAX_TOKENS = 8192
 LLM_RESUME_PARSE_RETRY_MAX_TOKENS = 16384
 LLM_MATCH_MAX_TOKENS = 4096
+LLM_REVISE_MAX_TOKENS = 16384
+LLM_REVISE_RETRY_MAX_TOKENS = 32768
 LLM_TIMEOUT = 120.0

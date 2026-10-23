@@ -2174,3 +2174,108 @@ details.acc .acc-body {
   border-radius: var(--r-m);
   border: 1px solid var(--stroke);
 }
+
+/* ---------- 21b. 简历定向修改向导 ---------- */
+
+.revise { display: flex; flex-direction: column; gap: var(--sp-4); }
+.rv-top {
+  display: flex;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  width: 100%;
+  margin-bottom: var(--sp-4);
+}
+.revise-track {
+  margin: 0;
+  flex: 1;
+}
+
+.rv-card { padding: var(--sp-5); }
+.rv-label { font-size: var(--fs-14); font-weight: 650; color: var(--text-1); margin-bottom: var(--sp-3); }
+
+.rv-raw {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-m);
+  padding: 10px 12px;
+  margin-top: var(--sp-3);
+  background: var(--bg-soft, transparent);
+}
+.rv-jrow {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--stroke);
+  gap: 10px;
+}
+.rv-jrow.is-nojd { opacity: 0.82; }
+.rv-detail-btn { flex: none; }
+.rv-joblist { max-height: 320px; overflow: auto; border: 1px solid var(--stroke); border-radius: var(--r-m); padding: 4px 12px; }
+
+.rv-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-4);
+}
+.rv-diffview {
+  font-family: var(--mono);
+  font-size: var(--fs-13);
+  line-height: 1.7;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-m);
+  padding: 10px 12px;
+}
+.rv-diffview .d-row { display: flex; gap: 8px; align-items: flex-start; }
+.rv-diffview .d-marker { width: 20px; flex: none; text-align: center; user-select: none; color: var(--text-3); }
+.rv-diffview .d-del { background: rgba(220, 60, 60, 0.12); color: var(--text-1); }
+.rv-diffview .d-del .d-marker { color: #c33; }
+.rv-diffview .d-ins { background: rgba(40, 160, 90, 0.12); color: var(--text-1); }
+.rv-diffview .d-ins .d-marker { color: #2a7f4f; }
+.rv-diffview .d-same { opacity: 0.55; }
+.rv-diffview .d-text { flex: 1; white-space: pre-wrap; word-break: break-word; }
+.rv-pane { border: 1px solid var(--stroke); border-radius: var(--r-m); overflow: hidden; display: flex; flex-direction: column; }
+.rv-pane-head {
+  padding: 8px 12px;
+  font-size: var(--fs-12);
+  font-weight: 650;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--stroke);
+  background: var(--bg-soft, transparent);
+}
+.rv-pane .rs-raw { padding: 10px 12px; max-height: 420px; overflow: auto; flex: 1; }
+
+.rv-changes { margin-top: var(--sp-4); display: flex; flex-direction: column; gap: 8px; }
+.rv-change {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--fs-13);
+  padding: 8px 10px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-m);
+}
+
+.rv-history { margin-top: var(--sp-4); }
+.rv-rec {
+  padding: 10px 12px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-m);
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rv-save-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.rv-save-row .input { flex: 1; }
+
+@media (max-width: 760px) {
+  .rv-compare { grid-template-columns: 1fr; } /* 窄屏上下排 */
+  .rv-pane .rs-raw { max-height: 320px; }
+}

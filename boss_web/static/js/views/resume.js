@@ -111,6 +111,7 @@ export async function renderResume(root) {
       <div class="rs-lib" id="rs-lib"></div>
       <div class="rs-bar-act">
         <span class="rs-fresh" id="rs-fresh"></span>
+        <button class="btn" id="btn-revise">定向修改</button>
         <button class="btn" id="btn-upload">${ICO_UPLOAD}上传简历</button>
         <button class="btn primary" id="btn-parse">重新解析</button>
         <button class="btn danger" id="btn-del">删除</button>
@@ -815,6 +816,12 @@ export async function renderResume(root) {
     runParse(current.resume_id);
   });
   $("btn-del").addEventListener("click", remove);
+  $("btn-revise").addEventListener("click", () => {
+    if (!current) return toast("先上传或载入一份简历", "warn");
+    import("./resume_revise.js").then(({ renderRevise }) => {
+      renderRevise(root, { resumeId: current.resume_id });
+    });
+  });
 
   ["dragenter", "dragover"].forEach((ev) =>
     bar.addEventListener(ev, (e) => {
@@ -848,5 +855,6 @@ export async function renderResume(root) {
 
   return () => {
     if (spyFrame) cancelAnimationFrame(spyFrame);
+    window.__reviseCleanup = null;
   };
 }

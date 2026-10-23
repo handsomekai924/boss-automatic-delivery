@@ -141,7 +141,7 @@ def get_task(task_id: str) -> dict[str, Any]:
 @router.get("/tasks/{task_id}/jobs")
 def list_task_jobs(
     task_id: str,
-    limit: int = Query(20, ge=1, le=200),
+    limit: int = Query(20, ge=1, le=5000),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
     """本批职位分页。`missing=true` 的行是已从库里删掉的归属记录。"""

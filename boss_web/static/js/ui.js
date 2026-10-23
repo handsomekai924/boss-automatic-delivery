@@ -659,7 +659,7 @@ export const TASK_STATUS = {
 export function taskStateOf(status) {
   const s = String(status || "").toLowerCase();
   if (["running", "pending", "sending_sms", "sending", "need_code", "need_slider", "logging_in", "working", "process"].includes(s)) return "running";
-  if (["done", "ok", "success", "finished"].includes(s)) return "done";
+  if (["done", "ok", "success", "finished", "draft"].includes(s)) return "done";
   if (["error", "failed", "fail"].includes(s)) return "error";
   if (["cancelled", "canceled", "stopped", "cancel"].includes(s)) return "cancelled";
   if (["idle", "none", ""].includes(s)) return "idle";
@@ -837,6 +837,9 @@ function formatEventLabel(name, f) {
   if (n === "stopped") return `⛔ ${f.reason || "已停"}`;
   if (n === "job_start") return `→ 开始匹配 ${who}`;
   if (n === "job_done") return `✓ ${who}${f.score != null ? ` · 评分 ${f.score}` : ""}`;
+  if (n === "revise_start") return `→ 开始定向修改（${f.job_count ?? "?"} 个岗位）`;
+  if (n === "revise_llm") return `→ 正在调用 LLM 生成…`;
+  if (n === "revise_done") return `✓ 生成完成，可对比`;
   if (n === "send_start") return `→ 发送 ${who || f.encrypt_job_id || ""}`;
   if (n === "sent") return `✓ 已发送 ${who || f.encrypt_job_id || ""}`;
   if (n === "skipped") return `– 跳过 ${who || f.encrypt_job_id || ""}（${f.reason || "已发送"}）`;

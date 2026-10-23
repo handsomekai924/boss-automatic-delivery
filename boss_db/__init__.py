@@ -221,6 +221,32 @@ CREATE TABLE IF NOT EXISTS crawl_task_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_crawl_task_jobs_job ON crawl_task_jobs(encrypt_job_id);
+
+-- 简历定向修改：一次「按目标岗位改一版」的完整生命周期（草稿 / 已保存 / 丢弃 / 出错）。
+-- 一行 = 一次修改意图；原简历永不覆盖，确认保存才产生新的 resume 行。
+CREATE TABLE IF NOT EXISTS resume_revisions (
+    revision_id      TEXT PRIMARY KEY,           -- rv_ + uuid hex[:10]
+    resume_id        TEXT NOT NULL,              -- 底稿简历 id
+    resume_title     TEXT NOT NULL DEFAULT '',   -- 底稿标题快照
+    created_at       REAL NOT NULL,
+    updated_at       REAL NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'running',  -- running | draft | saved | discarded | error
+    target_kind      TEXT NOT NULL DEFAULT 'jobs',     -- jobs | crawl_task
+    target_json      TEXT NOT NULL DEFAULT '{}',       -- 目标岗位快照（自包含）
+    crawl_task_id    TEXT NOT NULL DEFAULT '',
+    job_count        INTEGER NOT NULL DEFAULT 0,
+    original_md      TEXT NOT NULL DEFAULT '',    -- 生成时刻的原文快照
+    revised_md       TEXT NOT NULL DEFAULT '',    -- 修改稿全文（草稿 / 已保存都有）
+    change_json      TEXT NOT NULL DEFAULT '[]',  -- LLM 变更点清单
+    model            TEXT NOT NULL DEFAULT '',
+    export_format    TEXT NOT NULL DEFAULT 'md',  -- md | txt
+    saved_path       TEXT NOT NULL DEFAULT '',    -- 写盘绝对路径
+    saved_resume_id  TEXT NOT NULL DEFAULT '',    -- 入库后的新简历 id
+    error            TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_resume_revisions_created ON resume_revisions(created_at);
+CREATE INDEX IF NOT EXISTS idx_resume_revisions_resume ON resume_revisions(resume_id);
 """
 
 
