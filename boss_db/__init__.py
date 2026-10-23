@@ -242,7 +242,10 @@ CREATE TABLE IF NOT EXISTS resume_revisions (
     export_format    TEXT NOT NULL DEFAULT 'md',  -- md | txt
     saved_path       TEXT NOT NULL DEFAULT '',    -- 写盘绝对路径
     saved_resume_id  TEXT NOT NULL DEFAULT '',    -- 入库后的新简历 id
-    error            TEXT NOT NULL DEFAULT ''
+    error            TEXT NOT NULL DEFAULT '',
+    mode             TEXT NOT NULL DEFAULT 'targeted',  -- targeted | free
+    selected_sections TEXT NOT NULL DEFAULT '[]',       -- 自由优化选中的节 id 列表
+    optimization_prompt TEXT NOT NULL DEFAULT ''        -- 自由优化的用户提示词
 );
 
 CREATE INDEX IF NOT EXISTS idx_resume_revisions_created ON resume_revisions(created_at);
@@ -362,6 +365,11 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "fetch_pages": {
         "task_id": "TEXT NOT NULL DEFAULT ''",
+    },
+    "resume_revisions": {
+        "mode": "TEXT NOT NULL DEFAULT 'targeted'",
+        "selected_sections": "TEXT NOT NULL DEFAULT '[]'",
+        "optimization_prompt": "TEXT NOT NULL DEFAULT ''",
     },
 }
 

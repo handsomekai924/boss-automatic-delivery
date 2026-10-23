@@ -26,7 +26,12 @@ from ..services.llm_config_store import load_config
 from ..services.resume_analyzer import analyze_tasks
 from ..services.resume_parser import ResumeParseError, parse_and_stamp
 from ..services.resume_revision import build_diff, markdown_to_text
+from ..services.resume_revision_free import (
+    get_preset_categories,
+    get_presets_by_category,
+)
 from ..services.resume_revision_task import revision_tasks
+from ..services.resume_section_parser import extract_sections
 from ..services.resume_store import (
     REVISION_SAVED,
     delete_analysis,
@@ -63,7 +68,7 @@ class AnalyzeBody(BaseModel):
 
 
 class ReviseStartBody(BaseModel):
-    """简历优化
+    """简历优化（定向模式）
 
     Attributes:
         resume_id: 底稿简历 id。
@@ -76,6 +81,20 @@ class ReviseStartBody(BaseModel):
     job_ids: list[str] = Field(default_factory=list)
     crawl_task_id: str = ""
     all_repo: bool = False
+
+
+class ReviseFreeStartBody(BaseModel):
+    """简历优化（自由模式）
+
+    Attributes:
+        resume_id: 底稿简历 id。
+        selected_sections: 需要优化的章节列表（空 = 全部）。
+        optimization_prompt: 优化提示词（预设或自定义）。
+    """
+
+    resume_id: str
+    selected_sections: list[str] = Field(default_factory=list)
+    optimization_prompt: str
 
 
 class ReviseSaveBody(BaseModel):
@@ -281,7 +300,7 @@ def remove_analysis(analysis_id: str) -> dict[str, Any]:
 
 @router.post("/revise/start")
 def revise_start(body: ReviseStartBody) -> dict[str, Any]:
-    """启动一次简历优化（长任务）。"""
+    """启动一次简历优化（定向模式）。"""
     jobs, target_kind, target = _pick_target_jobs(
         body.job_ids, body.crawl_task_id, all_repo=body.all_repo
     )
@@ -304,8 +323,60 @@ def revise_start(body: ReviseStartBody) -> dict[str, Any]:
         target_kind=target_kind,
         target_json=target,
         crawl_task_id=body.crawl_task_id,
+        mode="targeted",
     )
     return task.snapshot()
+
+
+@router.post("/revise/free-start")
+def revise_free_start(body: ReviseFreeStartBody) -> dict[str, Any]:
+    """启动一次简历优化（自由模式）。"""
+    try:
+        resume = load_resume(body.resume_id)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"简历不存在：{body.resume_id}") from exc
+
+    llm_cfg = load_config()
+    if not llm_cfg.configured:
+        raise ValidationWebError(
+            "LLM 还没配置，请先到「模型」页填好 API Key / Base URL / 模型名"
+        )
+
+    if not body.optimization_prompt.strip():
+        raise ValidationWebError("优化提示词不能为空")
+
+    task = revision_tasks.start(
+        resume_id=body.resume_id,
+        resume_title=resume.title,
+        jobs=[],
+        target_kind="free",
+        target_json={},
+        crawl_task_id="",
+        mode="free",
+        selected_sections=body.selected_sections,
+        optimization_prompt=body.optimization_prompt.strip(),
+    )
+    return task.snapshot()
+
+
+@router.get("/item/{resume_id}/sections")
+def get_resume_sections(resume_id: str) -> dict[str, Any]:
+    """获取简历的章节列表（用于自由优化模式的章节选择）。"""
+    try:
+        resume = load_resume(resume_id)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"简历不存在：{resume_id}") from exc
+
+    sections = extract_sections(resume.raw or "")
+    return {"resume_id": resume_id, "sections": sections}
+
+
+@router.get("/revise/presets")
+def get_preset_prompts() -> dict[str, Any]:
+    """获取预设提示词库（自由优化模式）。"""
+    categories = get_preset_categories()
+    presets = {cat: get_presets_by_category(cat) for cat in categories}
+    return {"categories": categories, "presets": presets}
 
 
 @router.get("/revise/status")

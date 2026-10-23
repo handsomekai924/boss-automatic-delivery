@@ -4,6 +4,10 @@
 `/api/resume/revise/status`。生成原地写回草稿行（只改不增），停止 / 出错
 不写文件、不入库。
 
+支持两种优化模式：
+- targeted：基于目标岗位 JD 的定向优化
+- free：基于用户选择章节 + 提示词的自由优化
+
 Attributes:
     STATUS_RUNNING: 任务状态：进行中。
     STATUS_DONE: 任务状态：完成（草稿可对比）。
@@ -21,6 +25,7 @@ from typing import Any, Sequence
 
 from ..errors import ConflictError, NotFoundError
 from ..services import resume_revision as RR
+from ..services import resume_revision_free as RRF
 from ..services.resume_store import (
     REVISION_CANCELLED,
     REVISION_ERROR,
@@ -55,8 +60,17 @@ class RevisionTask:
         crawl_task_id: str,
         original_md: str,
         revision_id: str | None = None,
+        mode: str = "targeted",
+        selected_sections: list[str] | None = None,
+        optimization_prompt: str = "",
     ) -> None:
-        """初始化。"""
+        """初始化。
+
+        Args:
+            mode: 'targeted' (基于 JD) 或 'free' (自由优化)。
+            selected_sections: 自由模式选择的章节列表。
+            optimization_prompt: 自由模式的优化提示词。
+        """
         if revision_id:
             self.task_id = revision_id
         else:
@@ -69,6 +83,9 @@ class RevisionTask:
         self.target_json = target_json
         self.crawl_task_id = crawl_task_id
         self.original_md = original_md
+        self.mode = mode or "targeted"
+        self.selected_sections = list(selected_sections or [])
+        self.optimization_prompt = optimization_prompt or ""
         self.status = STATUS_RUNNING
         self.created_at = time.time()
         self.ended_at: float | None = None
@@ -92,6 +109,7 @@ class RevisionTask:
                 "revision_id": self.revision_id,
                 "status": self.status,
                 "resume_id": self.resume_id,
+                "mode": self.mode,
                 "crawl_task_id": self.crawl_task_id,
                 "job_count": self.job_count,
                 "current": self.current,
@@ -135,6 +153,9 @@ class RevisionTaskManager:
         target_json: dict[str, Any],
         crawl_task_id: str,
         revision_id: str | None = None,
+        mode: str = "targeted",
+        selected_sections: list[str] | None = None,
+        optimization_prompt: str = "",
     ) -> RevisionTask:
         """启动一次简历优化并起后台线程；已有任务在跑时抛 `ConflictError`。
 
@@ -147,6 +168,9 @@ class RevisionTaskManager:
             crawl_task_id: 非空时来源是某个抓取批次。
             revision_id: 复用既有草稿行的 id（重新生成用，原稿取已快照的
                 `original_md`）；省略则新建。
+            mode: 'targeted' (基于 JD) 或 'free' (自由优化)。
+            selected_sections: 自由模式选择的章节列表。
+            optimization_prompt: 自由模式的优化提示词。
 
         Returns:
             新建的任务。
@@ -168,6 +192,9 @@ class RevisionTaskManager:
                 crawl_task_id=crawl_task_id,
                 original_md=rev.get("original_md") or "",
                 revision_id=revision_id,
+                mode=rev.get("mode") or mode,
+                selected_sections=rev.get("selected_sections") or selected_sections or [],
+                optimization_prompt=rev.get("optimization_prompt") or optimization_prompt,
             )
         else:
             from .resume_store import load_resume
@@ -184,6 +211,9 @@ class RevisionTaskManager:
                 target_json=target_json,
                 crawl_task_id=crawl_task_id,
                 original_md=seed.raw or "",
+                mode=mode,
+                selected_sections=selected_sections or [],
+                optimization_prompt=optimization_prompt,
             )
 
         with self._lock:
@@ -199,6 +229,9 @@ class RevisionTaskManager:
                     crawl_task_id=crawl_task_id,
                     job_count=len(jobs),
                     original_md=task.original_md,
+                    mode=mode,
+                    selected_sections=selected_sections,
+                    optimization_prompt=optimization_prompt,
                 )
             self._task = task
 
@@ -216,16 +249,28 @@ class RevisionTaskManager:
 
     def _run(self, task: RevisionTask, jobs: Sequence[Any]) -> None:
         """线程体：装配画像 → LLM 生成 → 写草稿 → done。"""
-        task.push("revise_start", {"job_count": len(jobs)})
+        task.push("revise_start", {"job_count": len(jobs), "mode": task.mode})
         try:
             if task.cancel_flag:
                 raise _CancelledError()
-            with task.lock:
-                task.current = "装配岗位画像、调用 LLM 生成…"
-            task.push("revise_llm", {})
-            result = RR.generate_revision(
-                resume_id=task.resume_id, jobs=jobs, target_json=task.target_json
-            )
+
+            if task.mode == "free":
+                with task.lock:
+                    task.current = "按选定章节调用 LLM 优化…"
+                task.push("revise_llm", {})
+                result = RRF.generate_free_revision(
+                    resume_id=task.resume_id,
+                    selected_sections=task.selected_sections,
+                    optimization_prompt=task.optimization_prompt,
+                )
+            else:
+                with task.lock:
+                    task.current = "装配岗位画像、调用 LLM 生成…"
+                task.push("revise_llm", {})
+                result = RR.generate_revision(
+                    resume_id=task.resume_id, jobs=jobs, target_json=task.target_json
+                )
+
             if task.cancel_flag:
                 raise _CancelledError()
             updated = update_revision_result(

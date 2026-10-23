@@ -37,10 +37,12 @@ export function renderRevise(root, ctx = {}) {
   /**
    * 向导内保留的选择。
    *
+   * @property {string} mode 优化模式：`targeted` | `free`
    * @property {string} targetKind 目标范围：`jobs` | `crawl_task` | `all`
    * @property {?string} taskId    任务 id，同时也是 revision_id
    */
   const state = {
+    mode: ctx.mode || "targeted",
     resumeId: ctx.resumeId || "",
     resumeTitle: "",
     resumeRaw: "",
@@ -53,6 +55,10 @@ export function renderRevise(root, ctx = {}) {
     revision: null,
     timer: 0,
     completed: false,
+    sections: [],
+    selectedSections: new Set(),
+    presets: null,
+    optimizationPrompt: "",
   };
 
   const panel = taskPanel({ title: "简历优化", stopLabel: "停止" });
@@ -73,10 +79,12 @@ export function renderRevise(root, ctx = {}) {
   }
 
   /** 每个阶段卡片的公共头部（header）：返回 / 步骤轨 / 修改记录。 */
-  function header(step = 1) {
-    const state = (s) => step > s ? "done" : step === s ? "on" : "";
-    const _step = ['选简历', '选岗位', '生成','对比保存']
-    const node = _step.map((s, i) => `<div class="node ${state(i+1)}" data-step="${i + 1}"><i></i><span>${s}</span></div>`).join("")
+  function header(step = 1, mode = "targeted") {
+    const stateClass = (s) => step > s ? "done" : step === s ? "on" : "";
+    const steps = mode === "free"
+      ? ['选简历', '选章节', '生成', '对比保存']
+      : ['选简历', '选岗位', '生成', '对比保存'];
+    const node = steps.map((s, i) => `<div class="node ${stateClass(i+1)}" data-step="${i + 1}"><i></i><span>${s}</span></div>`).join("")
     return `
       <div class="rv-top column">
         <div class="button-row">
@@ -99,19 +107,40 @@ export function renderRevise(root, ctx = {}) {
     }
   }
 
-  /** 第 1 步：选简历，展示原文并允许换底稿。 */
+  /** 第 1 步：选简历和优化模式。 */
   function renderStage1() {
     const stage = $("revise-stage");
     stage.innerHTML = `
       <div class="card rv-card">
-        <div class="rv-top">${header(1)}</div>
-        <div class="rv-label">第 1 步 · 选简历</div>
+        <div class="rv-top">${header(1, state.mode)}</div>
+        <div class="rv-label">第 1 步 · 选简历与优化模式</div>
+        <div class="flex center gap-8 mb-12">
+          <span class="muted">优化模式</span>
+          <label class="flex center gap-4"><input type="radio" name="rv-mode" value="targeted" ${state.mode === "targeted" ? "checked" : ""}><span>定向优化（基于目标岗位）</span></label>
+          <label class="flex center gap-4"><input type="radio" name="rv-mode" value="free" ${state.mode === "free" ? "checked" : ""}><span>自由优化（选择章节）</span></label>
+        </div>
         <select class="select" id="rv-resume" style="width:320px"></select>
         <div class="rv-raw"><pre class="rs-raw" id="rv-raw-text">…</pre></div>
         <div class="muted" style="font-size:12.5px">修改以这份【原文】为底稿，不是解析结果。原简历永不覆盖。</div>
-        <div class="btn-row mt-12"><button class="btn primary" id="rv-next1">下一步：选岗位</button></div>
+        <div class="btn-row mt-12"><button class="btn primary" id="rv-next1">下一步</button></div>
       </div>
     `;
+
+    root.querySelectorAll("input[name=rv-mode]").forEach((radio) => {
+      radio.addEventListener("change", () => {
+        state.mode = radio.value;
+        const btn = $("rv-next1");
+        btn.textContent = state.mode === "free" ? "下一步：选章节" : "下一步：选岗位";
+        setStep(1);
+        const track = root.querySelector("#track");
+        if (track) {
+          const steps = state.mode === "free" ? ['选简历', '选章节', '生成', '对比保存'] : ['选简历', '选岗位', '生成', '对比保存'];
+          const nodes = track.querySelectorAll(".node span");
+          nodes.forEach((n, i) => { if (steps[i]) n.textContent = steps[i]; });
+        }
+      });
+    });
+
     (async () => {
       const items = await api.get("/api/resume/list").then((r) => r.items || []).catch(() => []);
       const sel = $("rv-resume");
@@ -123,6 +152,7 @@ export function renderRevise(root, ctx = {}) {
       const pick = async () => {
         state.resumeId = sel.value;
         state.jobIds.clear();
+        state.selectedSections.clear();
         state.revision = null;
         const d = await loadResumeDetail(sel.value);
         state.resumeRaw = (d && d.raw) || "";
@@ -135,8 +165,127 @@ export function renderRevise(root, ctx = {}) {
     $("rv-next1").addEventListener("click", () => goStep(2));
   }
 
-  /** 第 2 步：勾选目标岗位（手动 / 批次 / 全库范围）。 */
+  /** 第 2 步：根据模式显示岗位选择或章节选择。 */
   function renderStage2() {
+    if (state.mode === "free") {
+      renderStage2Free();
+    } else {
+      renderStage2Targeted();
+    }
+  }
+
+  /** 第 2 步（自由模式）：选择章节和提示词。 */
+  function renderStage2Free() {
+    const stage = $("revise-stage");
+    stage.innerHTML = `
+      <div class="card rv-card">
+        <div class="rv-top">${header(2, state.mode)}</div>
+        <div class="rv-label">第 2 步 · 选择章节与优化提示词</div>
+
+        <div class="mb-12">
+          <div class="muted mb-8">选择需要优化的章节（留空 = 全部）</div>
+          <div id="rv-sections" class="scroll-y" style="max-height:200px;border:1px solid var(--border);border-radius:4px;padding:8px"></div>
+        </div>
+
+        <div class="mb-12">
+          <div class="flex between center mb-8">
+            <span class="muted">优化提示词</span>
+            <select class="select" id="rv-preset-cat" style="width:160px"><option value="">选择预设分类…</option></select>
+          </div>
+          <div id="rv-preset-list" class="mb-8" style="display:none"></div>
+          <textarea class="input" id="rv-prompt" rows="4" placeholder="输入自定义提示词或选择上方预设"></textarea>
+        </div>
+
+        <div class="btn-row mt-12">
+          <button class="btn" id="rv-back2">上一步</button>
+          <button class="btn primary" id="rv-next2">下一步：生成</button>
+        </div>
+      </div>
+    `;
+
+    // 加载章节列表
+    (async () => {
+      try {
+        const data = await api.get(`/api/resume/item/${state.resumeId}/sections`);
+        state.sections = data.sections || [];
+        const host = $("rv-sections");
+        if (!state.sections.length) {
+          host.innerHTML = `<div class="muted">未检测到章节标题</div>`;
+          return;
+        }
+        host.innerHTML = state.sections.map((s, i) => `
+          <label class="flex center gap-4" style="padding:4px 0">
+            <input type="checkbox" data-idx="${i}" ${state.selectedSections.has(s.title) ? "checked" : ""}>
+            <span style="font-size:13px">${escapeHtml(s.title)}</span>
+            <span class="muted" style="font-size:11px">H${s.level}</span>
+          </label>
+        `).join("");
+        host.querySelectorAll("input[type=checkbox]").forEach(cb => {
+          cb.addEventListener("change", () => {
+            const idx = Number(cb.dataset.idx);
+            const title = state.sections[idx]?.title;
+            if (cb.checked) state.selectedSections.add(title);
+            else state.selectedSections.delete(title);
+          });
+        });
+      } catch (err) {
+        $("rv-sections").innerHTML = `<div class="muted">加载章节失败</div>`;
+      }
+    })();
+
+    // 加载预设提示词
+    (async () => {
+      try {
+        const data = await api.get("/api/resume/revise/presets");
+        state.presets = data.presets || {};
+        const categories = data.categories || [];
+        const catSel = $("rv-preset-cat");
+        catSel.innerHTML = `<option value="">选择预设分类…</option>` +
+          categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+
+        catSel.addEventListener("change", () => {
+          const cat = catSel.value;
+          const list = $("rv-preset-list");
+          if (!cat) {
+            list.style.display = "none";
+            return;
+          }
+          const items = state.presets[cat] || [];
+          list.style.display = "block";
+          list.innerHTML = items.map((p, i) => `
+            <button class="btn sm ghost" data-cat="${escapeHtml(cat)}" data-idx="${i}" style="margin:2px">
+              ${escapeHtml(p.name)}
+            </button>
+          `).join("");
+          list.querySelectorAll("button").forEach(btn => {
+            btn.addEventListener("click", () => {
+              const idx = Number(btn.dataset.idx);
+              const prompt = state.presets[btn.dataset.cat][idx]?.prompt || "";
+              $("rv-prompt").value = prompt;
+              state.optimizationPrompt = prompt;
+            });
+          });
+        });
+      } catch (err) {
+        toast("加载预设失败", "warn");
+      }
+    })();
+
+    $("rv-prompt").addEventListener("input", (e) => {
+      state.optimizationPrompt = e.target.value;
+    });
+
+    $("rv-back2").addEventListener("click", () => goStep(1));
+    $("rv-next2").addEventListener("click", () => {
+      if (!state.optimizationPrompt.trim()) {
+        return toast("请输入或选择优化提示词", "warn");
+      }
+      goStep(3);
+    });
+  }
+
+  /** 第 2 步（定向模式）：勾选目标岗位（手动 / 批次 / 全库范围）。 */
+  function renderStage2Targeted() {
     const stage = $("revise-stage");
     stage.innerHTML = `
       <div class="card rv-card">
@@ -320,10 +469,13 @@ export function renderRevise(root, ctx = {}) {
   /** 第 3 步：启动简历优化长任务并轮询进度。 */
   function renderStage3() {
     const stage = $("revise-stage");
+    const labelText = state.mode === "free"
+      ? "第 3 步 · 生成优化修改"
+      : `第 3 步 · 生成针对性修改（${state.jobIds.size} 个岗位）`;
     stage.innerHTML = `
       <div class="card rv-card">
-        <div class="rv-top">${header(3)}</div>
-        <div class="rv-label">第 3 步 · 生成针对性修改（${state.jobIds.size} 个岗位）</div>
+        <div class="rv-top">${header(3, state.mode)}</div>
+        <div class="rv-label">${labelText}</div>
         <div id="rv-task"></div>
       </div>
     `;
@@ -333,12 +485,21 @@ export function renderRevise(root, ctx = {}) {
     const start = async () => {
       panel.update({ status: "running", percent: 0, current: "启动…" });
       try {
-        const r = await api.post("/api/resume/revise/start", {
-          resume_id: state.resumeId,
-          job_ids: [...state.jobIds],
-          crawl_task_id: state.targetKind === "crawl_task" ? state.crawlTaskId : "",
-          all_repo: state.targetKind === "all",
-        });
+        let r;
+        if (state.mode === "free") {
+          r = await api.post("/api/resume/revise/free-start", {
+            resume_id: state.resumeId,
+            selected_sections: [...state.selectedSections],
+            optimization_prompt: state.optimizationPrompt,
+          });
+        } else {
+          r = await api.post("/api/resume/revise/start", {
+            resume_id: state.resumeId,
+            job_ids: [...state.jobIds],
+            crawl_task_id: state.targetKind === "crawl_task" ? state.crawlTaskId : "",
+            all_repo: state.targetKind === "all",
+          });
+        }
         state.taskId = r.task_id;
         toast("已启动，正在生成…", "ok");
         poll();

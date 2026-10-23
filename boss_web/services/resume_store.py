@@ -534,6 +534,13 @@ _REVISION_COLUMNS = (
 
 def _revision_dict(row: Any, *, full: bool = False) -> dict[str, Any]:
     """`resume_revisions` 行 → dict；`full=True` 时带原文 / 修改稿全文。"""
+    def _safe_get(key: str, default: Any = "") -> Any:
+        """安全访问 Row 列，列不存在时返回默认值。"""
+        try:
+            return row[key] if row[key] is not None else default
+        except (KeyError, IndexError):
+            return default
+
     data = {
         "revision_id": str(row["revision_id"]),
         "resume_id": str(row["resume_id"]),
@@ -541,6 +548,7 @@ def _revision_dict(row: Any, *, full: bool = False) -> dict[str, Any]:
         "created_at": float(row["created_at"] or 0.0),
         "updated_at": float(row["updated_at"] or 0.0),
         "status": str(row["status"] or ""),
+        "mode": str(_safe_get("mode", "targeted")),
         "target_kind": str(row["target_kind"] or "jobs"),
         "crawl_task_id": str(row["crawl_task_id"] or ""),
         "job_count": int(row["job_count"] or 0),
@@ -557,6 +565,8 @@ def _revision_dict(row: Any, *, full: bool = False) -> dict[str, Any]:
                 "revised_md": str(row["revised_md"] or ""),
                 "changes": _load_change_json(str(row["change_json"] or "")),
                 "target": _load_target_json(str(row["target_json"] or "")),
+                "selected_sections": _load_selected_sections(str(_safe_get("selected_sections", "[]"))),
+                "optimization_prompt": str(_safe_get("optimization_prompt", "")),
             }
         )
     return data
@@ -580,6 +590,15 @@ def _load_target_json(raw: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _load_selected_sections(raw: str) -> list[str]:
+    """`selected_sections` 文本 → 列表；坏 JSON 回空列表。"""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
 def create_revision(
     *,
     revision_id: str,
@@ -590,18 +609,27 @@ def create_revision(
     crawl_task_id: str,
     job_count: int,
     original_md: str,
+    mode: str = "targeted",
+    selected_sections: list[str] | None = None,
+    optimization_prompt: str = "",
 ) -> str:
     """新插一条简历优化草稿（status = running），返回 revision_id。
 
     `original_md` 在生成时刻落死——底稿简历随后被删，对比与追溯仍成立。
+
+    Args:
+        mode: 优化模式，'targeted' 或 'free'。
+        selected_sections: 自由模式选择的章节列表（targeted 模式可为空）。
+        optimization_prompt: 自由模式的优化提示词（targeted 模式可为空）。
     """
     now = time.time()
     conn = boss_db.acquire()
     with conn:
         conn.execute(
             "INSERT INTO resume_revisions (revision_id, resume_id, resume_title, "
-            "created_at, updated_at, status, target_kind, target_json, crawl_task_id, "
-            "job_count, original_md) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, updated_at, status, mode, target_kind, target_json, crawl_task_id, "
+            "job_count, original_md, selected_sections, optimization_prompt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 revision_id,
                 resume_id,
@@ -609,11 +637,14 @@ def create_revision(
                 now,
                 now,
                 REVISION_RUNNING,
+                mode or "targeted",
                 target_kind or "jobs",
                 json.dumps(target_json or {}, ensure_ascii=False),
                 crawl_task_id or "",
                 int(job_count or 0),
                 original_md or "",
+                json.dumps(selected_sections or [], ensure_ascii=False),
+                optimization_prompt or "",
             ),
         )
     return revision_id
