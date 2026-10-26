@@ -250,6 +250,26 @@ CREATE TABLE IF NOT EXISTS resume_revisions (
 
 CREATE INDEX IF NOT EXISTS idx_resume_revisions_created ON resume_revisions(created_at);
 CREATE INDEX IF NOT EXISTS idx_resume_revisions_resume ON resume_revisions(resume_id);
+
+-- 面试题：按岗位生成的面试准备题目，关联到 analysis 表（见 docs/interview-question-generation.md）。
+CREATE TABLE IF NOT EXISTS interview_questions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    analysis_id       TEXT NOT NULL,
+    site              TEXT NOT NULL DEFAULT 'boss',
+    encrypt_job_id    TEXT NOT NULL,
+    question_text     TEXT NOT NULL,
+    question_type     TEXT NOT NULL,
+    difficulty        TEXT NOT NULL,
+    is_frequent       INTEGER NOT NULL DEFAULT 0,
+    answer_hints      TEXT NOT NULL DEFAULT '{}',
+    user_prepared     INTEGER NOT NULL DEFAULT 0,
+    created_at        REAL NOT NULL,
+    updated_at        REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_interview_questions_analysis ON interview_questions(analysis_id);
+CREATE INDEX IF NOT EXISTS idx_interview_questions_job ON interview_questions(encrypt_job_id);
+CREATE INDEX IF NOT EXISTS idx_interview_questions_created ON interview_questions(created_at);
 """
 
 

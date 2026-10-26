@@ -8,6 +8,7 @@ import { renderLogin } from "./views/login.js";
 import { renderJobs } from "./views/jobs.js";
 import { renderResume } from "./views/resume.js";
 import { renderMatch } from "./views/match.js";
+import { renderInterview } from "./views/interview.js";
 import { renderSettings } from "./views/settings.js";
 
 /** hash 路径 → 视图渲染函数。 */
@@ -18,6 +19,7 @@ const routes = {
   "/jobs": renderJobs,
   "/resume": renderResume,
   "/match": renderMatch,
+  "/interview": renderInterview,
   "/settings": renderSettings,
   "/llm": renderSettings,
 };
@@ -37,6 +39,7 @@ function stageOf(path) {
   if (path.startsWith("/jobs")) return "jobs";
   if (path.startsWith("/resume")) return "resume";
   if (path.startsWith("/match")) return "match";
+  if (path.startsWith("/interview")) return "interview";
   if (path.startsWith("/settings") || path.startsWith("/llm")) return "settings";
   return "";
 }

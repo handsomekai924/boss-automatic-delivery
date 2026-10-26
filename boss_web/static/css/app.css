@@ -1337,6 +1337,200 @@ html[data-theme="light"] .theme-toggle .icon-moon { display: block; }
   background: var(--accent);
   border-color: var(--accent);
 }
+.job-card .btn-interview {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+}
+
+/* ---------- 16b. 面试准备 ---------- */
+
+.ip-q-text {
+  font-size: var(--fs-15);
+  line-height: 1.7;
+  color: var(--text-1);
+  white-space: pre-wrap;
+  font-weight: 550;
+}
+.ip-hints {
+  border-top: 1px solid var(--stroke);
+  padding-top: var(--sp-3);
+  font-size: var(--fs-13);
+  line-height: 1.65;
+  color: var(--text-2);
+}
+.ip-points {
+  margin: 0;
+  padding-left: 1.2em;
+  color: var(--text-2);
+}
+.ip-points li { margin: 2px 0; }
+
+/* ---------- 16c. 面试题生成页（独立页） ---------- */
+
+.iv-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.iv-task-row {
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-s);
+  padding: 10px 12px;
+}
+.data-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-m);
+}
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-13);
+}
+.data-table th,
+.data-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--stroke);
+  vertical-align: middle;
+}
+.data-table th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: var(--fs-12);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+.data-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.data-table tbody tr:hover td {
+  background: var(--surface-2);
+}
+.data-table .col-check {
+  width: 36px;
+}
+.data-table .col-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+.iv-title {
+  font-weight: 550;
+  color: var(--text-1);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 题目详情弹窗：左类型目录 / 右单题 */
+.iqd-wrap {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: var(--sp-4);
+  align-items: start;
+}
+.iqd-nav {
+  border-right: 1px solid var(--stroke);
+  padding-right: var(--sp-3);
+  max-height: 52vh;
+  overflow-y: auto;
+}
+.iqd-type {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--r-s);
+  padding: 8px 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-13);
+  text-align: left;
+}
+.iqd-type:hover,
+.iqd-type.active {
+  color: var(--text-1);
+  background: var(--surface-2);
+}
+.iqd-type-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.iqd-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: 10px;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.iqd-caret.open { transform: rotate(90deg); }
+.iqd-caret:hover { color: var(--text-1); }
+.iqd-caret-spacer {
+  display: inline-block;
+  width: 14px;
+  flex-shrink: 0;
+}
+.iqd-n {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.iqd-l1 {
+  display: flex;
+  flex-direction: column;
+}
+.iqd-group {
+  margin: 2px 0 8px;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.iqd-q {
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  border-radius: var(--r-s);
+  padding: 5px 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.iqd-q:hover,
+.iqd-q.active {
+  color: var(--text-1);
+  background: var(--surface-2);
+}
+.iqd-detail {
+  min-width: 0;
+}
+@media (max-width: 760px) {
+  .iqd-wrap { grid-template-columns: 1fr; }
+  .iqd-nav {
+    border-right: 0;
+    border-bottom: 1px solid var(--stroke);
+    padding-right: 0;
+    padding-bottom: var(--sp-3);
+    max-height: 200px;
+  }
+}
 
 /* ---------- 17. 拖放上传 ---------- */
 

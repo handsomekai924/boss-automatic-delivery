@@ -56,7 +56,7 @@ def test_connect_建出全部表(tmp_path):
     finally:
         conn.close()
     assert {"doc", "resume", "analysis", "jobs", "fetch_pages", "crawl_tasks",
-            "crawl_task_jobs", "resume_revisions"} <= names
+            "crawl_task_jobs", "resume_revisions", "interview_questions"} <= names
 
 
 def test_doc_往返(tmp_path):

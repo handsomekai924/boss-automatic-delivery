@@ -2,6 +2,7 @@
 
 import { api } from "../api.js";
 import { toast, modal, escapeHtml, scoreRing, fmtTime, taskPanel, renderEvents } from "../ui.js";
+import { openInterviewPrep } from "../interview_prep.js";
 import { renderWorkbench } from "./match_workbench.js";
 import { renderDeliver } from "./match_deliver.js";
 import { renderCrawls } from "./match_crawls.js";
@@ -816,6 +817,7 @@ export async function renderMatch(root) {
             <button class="btn sm btn-regen-greet">重新生成</button>
             <button class="btn sm ghost btn-save-greet">保存招呼语</button>
             <button class="btn sm primary btn-send-one" ${sendDisabled}>发送</button>
+            <button class="btn sm ghost btn-interview-prep">面试准备</button>
             <span class="muted send-status" style="font-size:11.5px">${escapeHtml(helpers.deliverLabel(m))}</span>
           </div>
           ${coolNote}
@@ -891,6 +893,17 @@ export async function renderMatch(root) {
       dlg.box.querySelector(".btn-send-one").addEventListener("click", () => {
         const cur = state.matches.find((x) => x.encrypt_job_id === jid);
         if (cur) helpers.confirmAndSend([cur], "单条手动发送需要单独确认；后端仍会按匹配时快照校验", { mode: "manual" });
+      });
+
+      dlg.box.querySelector(".btn-interview-prep").addEventListener("click", () => {
+        if (!state.analysisId) return toast("先跑一次匹配再准备面试题", "warn");
+        openInterviewPrep({
+          analysisId: state.analysisId,
+          encryptJobId: jid,
+          jobName: m.job_name || "",
+          brandName: m.brand_name || "",
+          matchScore: m.match_score || 0,
+        });
       });
 
       const rematchBtn = dlg.box.querySelector(".btn-rematch");

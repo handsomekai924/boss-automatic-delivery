@@ -3,6 +3,7 @@
 import { api } from "../api.js";
 import { toast, modal, escapeHtml, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
 import { openJobDetail } from "../job_detail.js";
+import { openInterviewPrep } from "../interview_prep.js";
 
 /**
  * 渲染找工作页：采集入口、筛选、职位卡片流、补全描述。
@@ -99,6 +100,7 @@ export async function renderJobs(root) {
   let collectionConfig = { collection: {}, search: {} };
   let category = "";
   let jdStatus = "";
+  let interviewSummary = {};
   const PHASE_LABELS = {
     prepare: "准备中",
     client: "连接中",
@@ -300,9 +302,30 @@ export async function renderJobs(root) {
       const nextBtn = $("btn-next");
       if (prevBtn) prevBtn.disabled = offset <= 0;
       if (nextBtn) nextBtn.disabled = offset + limit >= totalJobs;
-      renderGrid(data.items || []);
+      const items = data.items || [];
+      interviewSummary = await loadInterviewSummary(items);
+      renderGrid(items);
     } catch (err) {
       toast("读职位失败：" + err.message, "bad");
+    }
+  }
+
+  /**
+   * 拉本页岗位的面试题状态（卡片徽章 / 按钮文案用）。
+   *
+   * @param {Array<Object<string, any>>} items 当页职位
+   * @returns {Promise<Object<string, any>>} 职位 ID → {question_count}
+   */
+  async function loadInterviewSummary(items) {
+    const ids = items.map((j) => j.encrypt_job_id).filter(Boolean);
+    if (!ids.length) return {};
+    try {
+      const data = await api.get(
+        "/api/interview/summary?encrypt_job_ids=" + encodeURIComponent(ids.join(","))
+      );
+      return data.items || {};
+    } catch {
+      return {};
     }
   }
 
@@ -333,6 +356,10 @@ export async function renderJobs(root) {
           }[j.jd_status] || `JD ${j.jd_status}`) : "",
         ].filter(Boolean);
         const statusHtml = statusLabels.map((label) => `<span class="pill ${label.includes("黑名单") || label.includes("失败") ? "warn" : "static"}">${escapeHtml(label)}</span>`).join("");
+        const iq = interviewSummary[j.encrypt_job_id] || { question_count: 0 };
+        const interviewBadge = iq.question_count
+          ? `<span class="pill accent">面试题 ${iq.question_count}</span>`
+          : "";
         return `
         <div class="card job-card lift ${sel}" data-id="${escapeHtml(j.encrypt_job_id)}">
           <div class="job-check"></div>
@@ -345,8 +372,11 @@ export async function renderJobs(root) {
             <span class="pill static">${escapeHtml(j.job_degree || "—")}</span>
           </div>
           <div class="job-meta">${labels}</div>
-          <div class="job-meta">${statusHtml}</div>
+          <div class="job-meta">${statusHtml}${interviewBadge}</div>
           <div class="muted" style="font-size:11px">${escapeHtml(j.brand_industry || "")} ${escapeHtml(j.brand_scale_name || "")}</div>
+          <button class="btn sm ghost btn-interview" data-id="${escapeHtml(j.encrypt_job_id)}">${
+            iq.question_count ? "查看面试题" : "面试准备"
+          }</button>
         </div>`;
       })
       .join("");
@@ -360,9 +390,38 @@ export async function renderJobs(root) {
           card.classList.toggle("selected");
           return;
         }
+        if (e.target.closest(".btn-interview")) {
+          openInterviewFor(id);
+          return;
+        }
         openDetail(id);
       });
     });
+  }
+
+  /**
+   * 面试题入口：已有题就开详情弹窗；还没题就去「面试题生成」页出题。
+   *
+   * @param {string} id 加密职位 ID
+   */
+  async function openInterviewFor(id) {
+    try {
+      const ctx = await api.get("/api/interview/context?encrypt_job_id=" + encodeURIComponent(id));
+      if (ctx.question_count) {
+        openInterviewPrep({
+          analysisId: ctx.analysis_id,
+          encryptJobId: id,
+          jobName: ctx.job_name,
+          brandName: ctx.brand_name,
+          matchScore: ctx.match_score,
+          onChanged: () => loadJobs(),
+        });
+        return;
+      }
+      location.hash = "#/interview";
+    } catch (err) {
+      toast(err.message, "bad");
+    }
   }
 
   /**
