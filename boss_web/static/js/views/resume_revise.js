@@ -450,7 +450,7 @@ export function renderRevise(root, ctx = {}) {
           await loadMore();
         });
       } catch {
-        sel.innerHTML = `<option value="__all__">全部职位（从库中所有岗位里挑选）</option><option value="">不限批次（手动挑选，最多 ${MAX_TARGET} 个）</option>`;
+        sel.innerHTML = `<option value="__all__">全部职位</option>`;
       }
     })();
 
