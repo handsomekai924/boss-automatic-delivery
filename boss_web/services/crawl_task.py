@@ -8,6 +8,7 @@ Attributes:
     ST_DONE: 任务状态：完成。
     ST_ERROR: 任务状态：失败。
     ST_CANCELLED: 任务状态：已取消。
+    PHASE_TEXT: `CrawlTask.phase` 内部阶段代号 → 人话（任务中心「当前」列、页面小标共用）。
     BLANK_SEARCH_MSG: 搜索流条件全空时的报错。
 """
 
@@ -27,6 +28,7 @@ from .. import config as C
 from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
 from .blacklist import RuleMatch, evaluate_company, evaluate_jd, save_hit
 from .collection_config_store import CollectionSnapshot, load_snapshot
+from .task_runtime import POLICY_GLOBAL_SINGLE, TaskTypeSpec, hub
 from .troubleshoot import humanize
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,24 @@ ST_RUNNING = "running"
 ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
+
+PHASE_TEXT = {
+    "prepare": "准备中",
+    "client": "连接中",
+    "filter": "按条件筛选",
+    "stoken": "验证身份",
+    "crawl": "翻页搜索",
+}
+
+hub.register(
+    TaskTypeSpec(
+        "crawl",
+        title="职位爬取",
+        policy=POLICY_GLOBAL_SINGLE,
+        mutual_group="fetch",
+        title_fn=lambda req: "职位爬取",
+    )
+)
 
 BLANK_SEARCH_MSG = (
     "采集条件是空的：到「系统配置 → 采集配置」填关键词或筛选维度，或改用求职期望"
@@ -210,7 +230,7 @@ class CrawlTask:
         }
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
         self.cancel_flag = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     def push(self, payload: dict[str, Any]) -> None:
         """记一条事件并按事件类型累进计数。
@@ -252,14 +272,20 @@ class CrawlTask:
     def snapshot(self) -> dict[str, Any]:
         """当前状态副本。
 
+        `current` / `done` / `total` 是任务中心卡片直接读的三件套：阶段给
+        人话，进度按页数算（详情补抓阶段页数已满，进度条停在 100% 继续跑）。
+
         Returns:
-            含 task_id / status / progress / 最近事件的 dict。
+            含 task_id / status / current / done / total / progress / 最近事件的 dict。
         """
         with self.lock:
             return {
                 "task_id": self.task_id,
                 "status": self.status,
                 "phase": self.phase,
+                "current": PHASE_TEXT.get(self.phase, self.phase),
+                "done": int(self.progress.get("pages") or 0),
+                "total": int(self.params.get("max_pages") or 0),
                 "params": self.params,
                 "created_at": self.created_at,
                 "ended_at": self.ended_at,
@@ -358,6 +384,7 @@ class CrawlTaskManager:
             if _search_filter_from(config_snapshot.search).is_blank:
                 raise ValidationWebError(BLANK_SEARCH_MSG)
         source = "expect" if str(saved.get("expect_kind") or "").strip() else "search"
+        hub.occupy("crawl", request=params)
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有抓取任务在跑，等它结束或先取消")
@@ -374,6 +401,19 @@ class CrawlTaskManager:
                 "jd_rules": sum(1 for r in config_snapshot.rules if r.get("rule_type") == "jd_keyword"),
             })
             self._task = task
+        hub.track(
+            task,
+            task_type="crawl",
+            request=params,
+            retry_fn=lambda: self.start(
+                max_pages=params.get("max_pages"),
+                interval=params.get("interval"),
+                start_page=params.get("start_page"),
+                fetch_details=params.get("fetch_details"),
+                detail_interval=params.get("detail_interval"),
+                store_blacklisted=params.get("store_blacklisted"),
+            ),
+        )
 
         _archive_start(task.task_id, source=source, created_at=task.created_at, params=params)
 
@@ -525,6 +565,8 @@ class CrawlTaskManager:
                 task.ended_at = time.time()
             task.push({"event": "error", "message": task.error})
             _archive_finish(task, status=ST_ERROR, error=task.error or "")
+        finally:
+            hub.release(task.task_id)
 
 
 crawl_tasks = CrawlTaskManager()

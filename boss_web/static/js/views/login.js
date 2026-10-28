@@ -3,6 +3,8 @@
 import { api } from "../api.js";
 import { toast, modal, el, escapeHtml } from "../ui.js";
 import { refreshBridge } from "../app.js";
+import { watchTask } from "../task_watch.js";
+import * as ws from "../ws.js";
 
 /**
  * 模块级状态：整页刷新/新开标签会重新求值为 `false`，页内路由来回切保持 `true`。
@@ -16,7 +18,7 @@ let bootstrapped = false;
  * 已有进行中的任务时：整页刷新视为放弃并清残留；页内切回则接上原任务。
  *
  * @param {HTMLElement} root 挂载容器
- * @returns {() => void} 离开页面时的清理（停轮询、关滑块）
+ * @returns {() => void} 离开页面时的清理（停任务观察、关滑块）
  */
 export async function renderLogin(root) {
   const freshPageLoad = !bootstrapped;
@@ -147,7 +149,10 @@ export async function renderLogin(root) {
 
   const $ = (id) => root.querySelector("#" + id);
   let taskId = null;
-  let pollTimer = null;
+  /** @type {?() => void} 登录任务观察器的 stop()。 */
+  let stopWatch = null;
+  /** 上次拉任务状态的时刻，auth.* 显式驱动防重复拉用。 */
+  let lastFetchAt = 0;
   let sliderModal = null;
   let sliderAutoClose = false;
   let currentTask = null;
@@ -338,7 +343,7 @@ export async function renderLogin(root) {
   }
 
   /**
-   * 放弃当前登录流：停轮询、关滑块、把本条流的界面归位，并通知后端取消任务。
+   * 放弃当前登录流：停任务观察、关滑块、把本条流的界面归位，并通知后端取消任务。
    *
    * @param {string} [message] 放弃原因，非空则弹 toast
    */
@@ -346,10 +351,7 @@ export async function renderLogin(root) {
     const id = taskId;
     const wasQr = currentTask?.kind === "qr";
     taskId = null;
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
+    stopTaskWatch();
     closeSlider();
     if (wasQr) {
       showQrPane("qr-idle");
@@ -428,7 +430,8 @@ export async function renderLogin(root) {
 
   /**
    * APP 扫码登录：只推进扫码那几块面板，绝不碰短信的步骤条，也绝不切页签。
-   * 轮询每 900ms 一发，这里若调过 `setMode`，用户点页签会在一秒内被拽回来。
+   * 状态刷新是 WS 事件驱动的、比原来 900ms 轮询更密，这里若调过 `setMode`，
+   * 用户点页签会立刻被拽回来。
    *
    * @param {Object} task 任务快照
    */
@@ -457,19 +460,54 @@ export async function renderLogin(root) {
     }
   }
 
-  /** 拉一次任务状态并分派；终态（done/error/cancelled）时停掉轮询。 */
-  async function poll() {
-    if (!taskId) return;
-    try {
-      const task = await api.get(`/api/auth/tasks/${taskId}`);
-      applyTask(task);
-      if (["done", "error", "cancelled"].includes(task.status)) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
-    } catch (err) {
-      console.warn(err);
+  /** 停掉任务观察（放弃 / 换流 / 离开页面）。 */
+  function stopTaskWatch() {
+    if (stopWatch) {
+      stopWatch();
+      stopWatch = null;
     }
+  }
+
+  /**
+   * 开始观察当前登录任务：统一 WS 事件驱动拉状态（task_watch 内部节流，
+   * 断线回落 5s 轮询），取代原来的 900ms setInterval。喂料渲染不动，只换刷新时机。
+   */
+  function startWatch() {
+    stopTaskWatch();
+    if (!taskId) return;
+    const id = taskId;
+    stopWatch = watchTask(
+      id,
+      () => {
+        lastFetchAt = Date.now();
+        return api.get(`/api/auth/tasks/${id}`);
+      },
+      {
+        taskType: "login",
+        onStatus: (task) => {
+          applyTask(task);
+          if (["done", "error", "cancelled"].includes(task.status)) stopWatch = null;
+        },
+        isDone: (task) => ["done", "error", "cancelled"].includes(task.status),
+      }
+    );
+  }
+
+  /**
+   * auth.* 显式驱动：登录喂料事件和 task.progress 同帧发出，这里只「补一刷」——
+   * 距上次拉取 500ms 内直接跳过，别和 watchTask 的触发重复打接口。
+   */
+  function onAuthEvent(m) {
+    const id = m.task_id || (m.data && m.data.task_id) || "";
+    if (id && taskId && id !== taskId) return;
+    if (!taskId || Date.now() - lastFetchAt < 500) return;
+    lastFetchAt = Date.now();
+    api.get(`/api/auth/tasks/${taskId}`)
+      .then((task) => {
+        applyTask(task);
+        if (["done", "error", "cancelled"].includes(task.status)) stopTaskWatch();
+      })
+      .catch((err) => console.warn(err));
   }
 
   $("btn-send").addEventListener("click", async () => {
@@ -480,16 +518,14 @@ export async function renderLogin(root) {
       lastStatus = null;
       goStep(2);
       applyTask(task);
-      clearInterval(pollTimer);
-      pollTimer = setInterval(poll, 900);
-      poll();
+      startWatch();
       toast("已发起发送短信", "ok");
     } catch (err) {
       toast(err.message || "发送失败", "bad");
     }
   });
 
-  /** 请求生成二维码，切到扫码页签并开始轮询。 */
+  /** 请求生成二维码，切到扫码页签并开始观察任务状态。 */
   async function startQr() {
     try {
       qrRevision = -1;
@@ -498,9 +534,7 @@ export async function renderLogin(root) {
       lastStatus = null;
       setMode("qr");
       applyTask(task);
-      clearInterval(pollTimer);
-      pollTimer = setInterval(poll, 900);
-      poll();
+      startWatch();
     } catch (err) {
       toast(err.message || "生成二维码失败", "bad");
     }
@@ -517,17 +551,14 @@ export async function renderLogin(root) {
   });
 
   /**
-   * 放弃扫码登录：停轮询、回 idle、通知后端取消。
+   * 放弃扫码登录：停任务观察、回 idle、通知后端取消。
    *
    * @param {string} [message] 放弃原因，非空则弹 toast
    */
   async function cancelQr(message) {
     const id = taskId;
     taskId = null;
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
+    stopTaskWatch();
     showQrPane("qr-idle");
     if (id) {
       try {
@@ -565,7 +596,7 @@ export async function renderLogin(root) {
     try {
       const task = await api.post("/api/auth/login", { task_id: taskId, code: $("code").value.trim() });
       applyTask(task);
-      if (!pollTimer) pollTimer = setInterval(poll, 900);
+      if (!stopWatch) startWatch();
     } catch (err) {
       toast(err.message || "登录失败", "bad");
     }
@@ -605,6 +636,14 @@ export async function renderLogin(root) {
     });
   }
 
+  const wsOffs = [
+    ws.on("auth.need_code", onAuthEvent),
+    ws.on("auth.need_slider", onAuthEvent),
+    ws.on("auth.need_scan", onAuthEvent),
+    ws.on("auth.state", onAuthEvent),
+  ];
+  ws.connect();
+
   refreshSession();
 
   try {
@@ -617,13 +656,14 @@ export async function renderLogin(root) {
       } else {
         applyTask(st.task);
         setMode(st.task.kind === "qr" ? "qr" : "sms");
-        pollTimer = setInterval(poll, 900);
+        startWatch();
       }
     }
   } catch { }
 
   return () => {
-    clearInterval(pollTimer);
+    stopTaskWatch();
     closeSlider();
+    wsOffs.forEach((off) => off());
   };
 }

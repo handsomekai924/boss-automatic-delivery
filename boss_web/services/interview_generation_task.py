@@ -30,6 +30,7 @@ from . import interview_generator as IG
 from .llm_client import LLMClient
 from .llm_config_store import load_config
 from .resume_store import load_analysis, load_resume
+from .task_runtime import POLICY_PER_KEY_SINGLE, TaskTypeSpec, hub
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,16 @@ STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 
 SITE = "boss"
+
+hub.register(
+    TaskTypeSpec(
+        "interview",
+        title="面试题生成",
+        policy=POLICY_PER_KEY_SINGLE,
+        key_fn=lambda req: [str(j) for j in (req.get("job_ids") or []) if str(j).strip()],
+        title_fn=lambda req: f"面试题（{len(req.get('job_ids') or [])}个岗位）",
+    )
+)
 
 
 class InterviewGenerationTask:
@@ -88,7 +99,7 @@ class InterviewGenerationTask:
         self.question_total = 0
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.cancel_flag = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.result: dict[str, Any] | None = None
 
     def push(self, name: str, payload: dict[str, Any] | None = None) -> None:
@@ -122,9 +133,11 @@ class InterviewTaskManager:
     """面试题生成任务管理：可并行跑多个，同一岗位不能重复提交。
 
     跑完的任务保留在内存里一小段时间（最近 50 条），方便查进度。
+
+    Attributes:
+        KEEP: 最多保留的历史任务数（含在跑的）。
     """
 
-    #: 最多保留的历史任务数（含在跑的）。
     KEEP = 50
 
     def __init__(self) -> None:
@@ -170,11 +183,14 @@ class InterviewTaskManager:
         return task.snapshot()
 
     def list_snapshots(self) -> dict[str, Any]:
-        """全部任务快照 + 在跑数 + 被占用的岗位（页面顶部 / 任务中心用）。"""
+        """全部任务快照 + 在跑数 + 被占用的岗位（页面顶部 / 任务中心用）。
+
+        占用口径只算 `running`：失败任务不占岗位，可以直接重提。
+        """
         tasks = self.all()
         busy: dict[str, str] = {}
         for t in tasks:
-            if t.status in (STATUS_RUNNING, STATUS_ERROR):
+            if t.status == STATUS_RUNNING:
                 for jid in t.job_ids:
                     busy[jid] = t.task_id
         return {
@@ -267,16 +283,14 @@ class InterviewTaskManager:
         resolved_set = set(resolved_ids)
 
         with self._lock:
-            # 整批岗位和某个在跑任务完全一样 → 幂等返回那个任务
             for t in self._tasks.values():
                 if t.status != STATUS_RUNNING:
                     continue
                 if set(t.job_ids) == resolved_set:
                     return t
-            # 有岗位在任务列表里（在跑 / 失败）→ 不能重复提交
             busy: dict[str, str] = {}
             for t in self._tasks.values():
-                if t.status not in (STATUS_RUNNING, STATUS_ERROR):
+                if t.status != STATUS_RUNNING:
                     continue
                 for jid in t.job_ids:
                     if jid in resolved_set:
@@ -303,6 +317,15 @@ class InterviewTaskManager:
             task.total = len(targets)
             self._tasks[task.task_id] = task
             self._prune_locked()
+        hub.track(
+            task,
+            task_type="interview",
+            request=task.request,
+            keys=resolved_ids,
+            retry_fn=lambda: self.start(**{
+                k: v for k, v in task.request.items() if v
+            }),
+        )
 
         thread = threading.Thread(
             target=self._run, args=(task, targets), daemon=True, name=task.task_id
@@ -336,7 +359,6 @@ class InterviewTaskManager:
         if len(self._tasks) <= self.KEEP:
             return
         finished = [tid for tid, t in self._tasks.items() if t.status != STATUS_RUNNING]
-        # 按插入序（旧→新）淘汰
         for tid in finished[: max(0, len(self._tasks) - self.KEEP)]:
             self._tasks.pop(tid, None)
 
@@ -348,6 +370,18 @@ class InterviewTaskManager:
         """线程体：逐岗位出题 → 落库 → done。"""
         task.push("generate_start", {"total": len(targets)})
         resume_cache: dict[str, str | None] = {}
+        try:
+            self._run_inner(task, targets, resume_cache)
+        finally:
+            hub.release(task.task_id)
+
+    def _run_inner(
+        self,
+        task: InterviewGenerationTask,
+        targets: Sequence[dict[str, Any]],
+        resume_cache: dict[str, str | None],
+    ) -> None:
+        """实际出题循环；异常在此消化成任务状态。"""
         try:
             llm = LLMClient(load_config())
 
@@ -415,7 +449,6 @@ class InterviewTaskManager:
                     analysis_id=str(item.get("analysis_id") or ""),
                     encrypt_job_id=job_id,
                     questions=questions,
-                    # 补题只追加；整套出题原地替换（只改不增）
                     replace=not task.question_type,
                 )
                 with task.lock:

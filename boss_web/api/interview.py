@@ -74,7 +74,6 @@ def _row_to_item(row: Any) -> dict[str, Any]:
         hints = {}
     if not isinstance(hints, dict):
         hints = {}
-    # 旧数据字段名兼容：reference_outline → reference_answer。
     if "reference_answer" not in hints and "reference_outline" in hints:
         hints = {**hints, "reference_answer": hints.get("reference_outline")}
         hints.pop("reference_outline", None)
@@ -446,7 +445,6 @@ def list_questions(
     ).fetchall()
     items = [_row_to_item(r) for r in rows]
 
-    # 统计口径不带题目筛选条件，只看归属范围——题量按整个岗位/分析算。
     stat_where: list[str] = []
     stat_args: list[Any] = []
     if analysis_id.strip():

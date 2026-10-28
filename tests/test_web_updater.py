@@ -483,7 +483,7 @@ def test_读日志_读失败不抛且回原因(tmp_path, monkeypatch):
 
 
 def test_peek_progress_不许吃掉_done_json(tmp_path, monkeypatch):
-    """看一眼诊断不该把「更新完成」的回执吞掉——那是 snapshot_progress 的活。"""
+    """看一眼诊断不该把「更新完成」的回执吞掉——回执归状态接口一次性取用。"""
     monkeypatch.setattr(updater, "work_dir", lambda: tmp_path)
     monkeypatch.setattr(updater, "done_marker_path", lambda: tmp_path / "done.json")
     (tmp_path / "done.json").write_text(

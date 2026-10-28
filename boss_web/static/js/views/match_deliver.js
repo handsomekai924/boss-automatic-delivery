@@ -1,12 +1,13 @@
-/** 批量发送：上下文条 + 发送工具条 + 投递任务面板 + 发送清单 */
+/** 批量发送：上下文条 + 发送工具条 + 发送清单 */
 
-import { api } from "../api.js";
-import { toast, escapeHtml, fmtTime } from "../ui.js";
+import { toast, escapeHtml } from "../ui.js";
 
 const MIN_SCORE_DEFAULT = 70;
 
 /**
- * 渲染批量发送目录：发送工具条、投递任务面板、发送清单。
+ * 渲染批量发送目录：发送工具条、发送清单。
+ *
+ * 发送进度不在这画，统一在任务中心看（停止 / 重试也去那）。
  *
  * @param {HTMLElement} pane   内容容器
  * @param {Object}     state   页面级状态（matches / analysisId / selected 等）
@@ -14,8 +15,6 @@ const MIN_SCORE_DEFAULT = 70;
  */
 export function renderDeliver(pane, state, helpers) {
   const { matches, analysisId, selected, resumeTitle } = state;
-  const { deliverPanelHost, sendRestriction, sendAllTargets, updateSendCounts,
-          confirmAndSend, paintDeliver, deliverLabel, startDeliverPoll } = helpers;
 
   const hasAnalysis = !!analysisId && matches.length > 0;
   const ctxLabel = hasAnalysis
@@ -48,7 +47,6 @@ export function renderDeliver(pane, state, helpers) {
         </label>
         <span class="muted" id="send-excluded" style="font-size:12px"></span>
       </div>
-      <div id="deliver-task"></div>
     </div>
     <div class="card">
       <div class="card-head">
@@ -66,8 +64,6 @@ export function renderDeliver(pane, state, helpers) {
     $("btn-goto-workbench")?.addEventListener("click", () => helpers.switchTab("workbench"));
     return;
   }
-
-  if (deliverPanelHost) $("deliver-task").appendChild(deliverPanelHost);
 
   const minInput = $("send-min-score");
   helpers.loadMinScore(minInput);

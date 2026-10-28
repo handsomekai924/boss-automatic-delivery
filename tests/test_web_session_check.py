@@ -305,3 +305,38 @@ def test_api_responses_are_not_cached():
     client = TestClient(create_app())
     resp = client.get("/api/auth/status")
     assert resp.headers.get("Cache-Control") == "no-store"
+
+
+def test_自检落定广播_session_changed(tmp_path, monkeypatch):
+    """自检完要推一帧 session.changed，信号球不用谁再来问。"""
+    from boss_web.services import task_runtime
+
+    sent: list[tuple[str, dict]] = []
+
+    def spy(msg_type, data, *, task_type="", task_id=""):
+        """记下广播的消息。"""
+        sent.append((msg_type, data))
+
+    monkeypatch.setattr(task_runtime.hub, "broadcast", spy)
+    session_check.check_now(session_path=tmp_path / "boss.db")
+
+    assert [m for m, _ in sent] == ["session.changed"]
+    assert sent[0][1]["logged_in"] is False
+
+
+def test_登出会广播_session_changed(monkeypatch):
+    """登出清完本地登录态要推一帧 session.changed，会话卡跟着变离线。"""
+    from fastapi.testclient import TestClient
+
+    from boss_web.app import create_app
+    from boss_web.services import task_runtime
+
+    sent: list[str] = []
+    monkeypatch.setattr(task_runtime.hub, "broadcast", lambda m, d, **k: sent.append(m))
+
+    client = TestClient(create_app())
+    resp = client.post("/api/auth/logout")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"logged_in": False}
+    assert "session.changed" in sent

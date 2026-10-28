@@ -650,7 +650,7 @@ def test_cached_snapshot_只读缓存(monkeypatch):
 
 
 def test_周期检测_force_每轮真打一次(monkeypatch):
-    """周期线程用 `force`，每个 tick 都真打一次接口，不依赖缓存。"""
+    """验 `force` 检测每轮真打一次接口，不依赖缓存。"""
     calls: list[int] = []
 
     def fake():
@@ -662,11 +662,11 @@ def test_周期检测_force_每轮真打一次(monkeypatch):
 
     update_check.refresh(force=True)
     update_check.refresh(force=True)
-    assert len(calls) == 2, "周期检测每轮都要真测一次，不许吃缓存"
+    assert len(calls) == 2, "force 每轮都要真测一次，不许吃缓存"
 
 
-def test_周期检测_起的是守护线程(monkeypatch):
-    """验周期检测起的是守护线程。"""
+def test_启动预热_起的是守护线程(monkeypatch):
+    """验启动预热起的是守护线程。"""
     import threading
 
     seen = {}
@@ -678,6 +678,59 @@ def test_周期检测_起的是守护线程(monkeypatch):
         return real_thread(target=lambda: None, daemon=True)
 
     monkeypatch.setattr(threading, "Thread", spy)
-    update_check.schedule_periodic_check(interval=0.01)
-    assert seen.get("name") == "update-check-periodic"
+    update_check.schedule_startup_check()
+    assert seen.get("name") == "update-check"
     assert seen.get("daemon") is True
+
+
+def test_有新版就广播_update_available_且每版只播一次(monkeypatch):
+    """测到没忽略的新版推一帧 update.available；同一版不许重复推。"""
+    from boss_web.services import task_runtime
+
+    sent: list[tuple[str, dict]] = []
+
+    def spy(msg_type, data, *, task_type="", task_id=""):
+        """记下广播的消息。"""
+        sent.append((msg_type, data))
+
+    monkeypatch.setattr(task_runtime.hub, "broadcast", spy)
+    _fake_gitee(monkeypatch, [_release("v9.9.9")])
+
+    status = update_check.build_status(force=True)
+    assert status["should_prompt"] is True
+    assert [m for m, _ in sent] == ["update.available"]
+    assert sent[0][1]["latest"] == "9.9.9"
+
+    update_check.build_status(force=True)
+    assert len(sent) == 1, "同一版只播一次，别拿推送轰炸挂机页"
+
+
+def test_没新版或已忽略都不广播(monkeypatch):
+    """should_prompt 为假就不推 update.available。"""
+    from boss_web.services import task_runtime
+
+    sent: list[str] = []
+    monkeypatch.setattr(task_runtime.hub, "broadcast", lambda m, d, **k: sent.append(m))
+
+    _fake_gitee(monkeypatch, [_release(f"v{APP_VERSION}")])
+    update_check.build_status(force=True)
+    assert sent == []
+
+    update_check.save_ignored_version("9.9.9")
+    _fake_gitee(monkeypatch, [_release("v9.9.9")])
+    update_check.build_status(force=True)
+    assert sent == []
+
+
+def test_旧_更新进度_ws_已下线():
+    """独立的 `/api/system/update/ws` 已删；进度只走统一 WS `/api/ws`。
+
+    SPA 兜底会把没匹配的 HTTP GET 变成 200，删没删只能看子 router 的路由表。
+    """
+    from boss_web.api import system, tasks
+
+    system_paths = {getattr(r, "path", "") for r in system.router.routes}
+    assert "/update/ws" not in system_paths
+
+    tasks_paths = {getattr(r, "path", "") for r in tasks.router.routes}
+    assert "/ws" in tasks_paths, "统一 WS 得挂在任务路由上"

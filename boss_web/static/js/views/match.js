@@ -1,7 +1,9 @@
 /** 职位匹配：目录壳 + 页面级状态 + 四个子目录（工作台 / 批量发送 / 抓取任务 / 分析历史） */
 
 import { api } from "../api.js";
-import { toast, modal, escapeHtml, scoreRing, fmtTime, taskPanel, renderEvents } from "../ui.js";
+import { toast, modal, escapeHtml, scoreRing } from "../ui.js";
+import * as ws from "../ws.js";
+import { watchTask } from "../task_watch.js";
 import { openInterviewPrep } from "../interview_prep.js";
 import { renderWorkbench } from "./match_workbench.js";
 import { renderDeliver } from "./match_deliver.js";
@@ -13,10 +15,11 @@ const MIN_SCORE_DEFAULT = 70;
 const GREET_COOLDOWN_DAYS = 30;
 
 /**
- * 渲染职位匹配目录壳：页面级状态、任务面板、四个子目录切换。
+ * 渲染职位匹配目录壳：页面级状态、四个子目录切换。
+ * 匹配 / 投递进度都不在本页画，统一到任务中心看。
  *
  * @param {HTMLElement} root 挂载容器
- * @returns {() => void} 卸载时清掉匹配 / 投递轮询定时器
+ * @returns {() => void} 卸载时停掉匹配 / 投递的任务观察器
  */
 export async function renderMatch(root) {
   root.innerHTML = `
@@ -52,38 +55,13 @@ export async function renderMatch(root) {
     deliverTaskId: null,
     greetDrafts: new Map(),
     detailApi: null,
-    pollTimer: null,
-    deliverTimer: null,
+    /** @type {Map<string, () => void>} 在跑匹配任务的观察器 stop 句柄（多任务并发，key = task_id） */
+    matchWatches: new Map(),
+    /** @type {?() => void} 投递任务观察器 stop 句柄 */
+    deliverWatch: null,
   };
 
-  const matchPanel = taskPanel({ title: "批量匹配", stopLabel: "停止匹配" });
-  const deliverPanel = taskPanel({ title: "批量投递", stopLabel: "停止投递" });
-  matchPanel.update({ status: "idle", percent: 0 });
-  deliverPanel.update({ status: "idle", percent: 0 });
-
-  matchPanel.onStop(async () => {
-    if (!state.matchTaskId) return;
-    try {
-      await api.post(`/api/match/analyze/${state.matchTaskId}/cancel`);
-      toast("已请求停止匹配", "warn");
-    } catch (err) {
-      toast(err.message || "停止失败", "bad");
-    }
-  });
-  deliverPanel.onStop(async () => {
-    if (!state.deliverTaskId) return;
-    try {
-      await api.post(`/api/deliver/${state.deliverTaskId}/cancel`);
-      toast("已请求停止投递", "warn");
-    } catch (err) {
-      toast(err.message || "停止失败", "bad");
-    }
-  });
-
   const helpers = {
-    matchPanelHost: matchPanel.el,
-    deliverPanelHost: deliverPanel.el,
-
     /** 切到指定目录。 */
     switchTab(name) {
       const tab = root.querySelector(`.settings-tab[data-tab="${name}"]`);
@@ -404,68 +382,7 @@ export async function renderMatch(root) {
     },
 
     /**
-     * 把匹配任务状态画进任务面板。
-     *
-     * @param {?Object} s 任务状态；空则回到 idle
-     */
-    paintMatch(s) {
-      if (!s) {
-        matchPanel.update({ status: "idle", percent: 0 });
-        return;
-      }
-      const done = s.done || 0;
-      const total = s.total || 0;
-      const running = s.status === "running";
-      matchPanel.update({
-        status: s.status,
-        percent: total ? Math.round((done / total) * 100) : (s.status === "done" ? 100 : undefined),
-        current: running ? (s.current_job || "匹配中") : (s.error || ""),
-        counts: [
-          ["完成", `${done}${total ? " / " + total : ""}`],
-          ["结果", `${(s.matches || []).length} 条`],
-        ],
-        error: s.status === "error" ? s.error : undefined,
-        log: renderEvents(s.events, { limit: 20 }),
-      });
-    },
-
-    /**
-     * 把投递任务状态画进任务面板。
-     *
-     * @param {?Object} s 任务状态；无 task_id 时回到 idle
-     */
-    paintDeliver(s) {
-      if (!s || !s.task_id) {
-        deliverPanel.update({ status: "idle", percent: 0 });
-        return;
-      }
-      const total = s.total || 0;
-      const done = s.done || 0;
-      const running = s.status === "running";
-      deliverPanel.update({
-        status: s.status,
-        percent: total ? Math.round((done / total) * 100) : (s.status === "done" ? 100 : undefined),
-        current: running ? (s.current || "发送中") : (s.error || ""),
-        counts: [
-          ["进度", `${done}${total ? " / " + total : ""}`],
-          ["成功", String(s.ok || 0)],
-          ["失败", String(s.failed || 0)],
-          ["跳过", String(s.skipped || 0)],
-        ],
-        error: s.status === "error" ? s.error : undefined,
-        log: renderEvents(s.events, { limit: 20 }),
-      });
-    },
-
-    /** 运行中隐藏「匹配全部 / 匹配选中」按钮。 */
-    setMatchButtons(running) {
-      const pane = root.querySelector("#match-pane");
-      pane?.querySelector("#btn-match-all")?.classList.toggle("hidden", running);
-      pane?.querySelector("#btn-match-sel")?.classList.toggle("hidden", running);
-    },
-
-    /**
-     * 启动批量匹配任务并开始轮询。
+     * 启动一个批量匹配任务并开始观察（后端已允许并发，可同时跑多个）。
      *
      * @param {Array<string>} [jobIds] 要匹配的职位 ID；抓取范围模式下忽略
      */
@@ -485,12 +402,10 @@ export async function renderMatch(root) {
         state.matchTaskId = task.task_id;
         state.analysisId = task.analysis_id;
         state.matches = [];
-        helpers.setMatchButtons(true);
         const anSub = root.querySelector("#match-pane")?.querySelector("#an-sub");
         if (anSub) anSub.textContent = "匹配中…";
         toast(`匹配已开始（共 ${task.total || "?"} 个职位，AI 会逐个比对）`, "ok");
-        helpers.paintMatch({ ...task, status: "running" });
-        helpers.startPoll();
+        helpers.watchMatch(task.task_id);
       } catch (err) {
         toast(err.message, "bad");
       }
@@ -511,41 +426,69 @@ export async function renderMatch(root) {
       toast("已设为匹配范围，可点击「一键匹配当前范围」开始匹配", "ok");
     },
 
-    /** 开始轮询匹配任务状态，结束后刷新结果与岗位列表。 */
-    startPoll() {
-      clearInterval(state.pollTimer);
-      state.pollTimer = setInterval(async () => {
-        if (!state.matchTaskId) return;
-        try {
-          const s = await api.get(`/api/match/analyze/${state.matchTaskId}`);
-          helpers.paintMatch(s);
-          if (s.matches && s.matches.length) {
-            state.matches = s.matches;
-            helpers.renderMatches();
-          }
-          if (["done", "error", "cancelled"].includes(s.status)) {
-            clearInterval(state.pollTimer);
-            state.pollTimer = null;
-            state.matchTaskId = null;
-            helpers.setMatchButtons(false);
-            const anSub = root.querySelector("#match-pane")?.querySelector("#an-sub");
-            if (s.status === "done") {
-              if (anSub) anSub.textContent = `完成 · ${state.matches.length} 条`;
-              toast("匹配完成", "ok");
-            } else if (s.status === "error") {
-              if (anSub) anSub.textContent = "失败";
-              toast(s.error || "匹配失败", "bad");
-            } else {
-              if (anSub) anSub.textContent = `已停止 · ${state.matches.length} 条`;
-            }
-            helpers.renderMatches();
-            helpers.renderJobs();
-          }
-        } catch {}
-      }, 1200);
+    /**
+     * 用统一 WS 事件观察一个匹配任务（替代原 1.2s setInterval 轮询）。
+     * 进度不在本页画，统一到任务中心看；这里只跟到结束好收结果。
+     * 结果区只聚焦最近一个任务（state.matchTaskId），互不抢写。
+     *
+     * @param {string} taskId 任务 id（提交响应里的 task_id）
+     */
+    watchMatch(taskId) {
+      if (!taskId || state.matchWatches.has(taskId)) return;
+      const stop = watchTask(taskId, () => api.get(`/api/match/analyze/${taskId}`), {
+        taskType: "match",
+        onStatus: (s) => helpers.onMatchStatus(taskId, s),
+        isDone: (s) => ["done", "error", "cancelled"].includes(s.status),
+      });
+      state.matchWatches.set(taskId, () => {
+        stop();
+        state.matchWatches.delete(taskId);
+      });
     },
 
-    /** 页面加载时接上服务端仍在跑的匹配任务，或恢复上次结果。 */
+    /**
+     * 一次匹配状态回来后：聚焦任务写结果区；终态收观察器并提示。
+     *
+     * @param {string} taskId 任务 id
+     * @param {Object}   s     业务快照（与原轮询拿到的同形状）
+     */
+    onMatchStatus(taskId, s) {
+      const focused = taskId === state.matchTaskId;
+      if (focused) {
+        if (s.matches && s.matches.length) {
+          state.matches = s.matches;
+          helpers.renderMatches();
+        }
+      }
+      if (!["done", "error", "cancelled"].includes(s.status)) return;
+
+      const stopOne = state.matchWatches.get(taskId);
+      if (stopOne) stopOne();
+
+      if (!focused) {
+        if (s.status === "done") toast(`后台匹配任务完成 · ${(s.matches || []).length} 条`, "ok");
+        else if (s.status === "error") toast(s.error || "后台匹配任务失败", "bad");
+        return;
+      }
+      state.matchTaskId = null;
+      const anSub = root.querySelector("#match-pane")?.querySelector("#an-sub");
+      if (s.status === "done") {
+        if (anSub) anSub.textContent = `完成 · ${state.matches.length} 条`;
+        toast("匹配完成", "ok");
+      } else if (s.status === "error") {
+        if (anSub) anSub.textContent = "失败";
+        toast(s.error || "匹配失败", "bad");
+      } else {
+        if (anSub) anSub.textContent = `已停止 · ${state.matches.length} 条`;
+      }
+      helpers.renderMatches();
+      helpers.renderJobs();
+    },
+
+    /**
+     * 页面加载时恢复最近一次匹配的结果区（明细带冷却状态，走原单快照）；
+     * 任务还在跑就接上观察。进度去任务中心看。
+     */
     async restoreTask() {
       let s = null;
       try {
@@ -563,23 +506,20 @@ export async function renderMatch(root) {
       }
 
       if (s.status === "running") {
-        helpers.setMatchButtons(true);
-        helpers.paintMatch(s);
         helpers.renderMatches();
         helpers.renderJobs();
-        helpers.startPoll();
+        helpers.watchMatch(s.task_id);
         toast("已接上进行中的匹配任务", "ok");
         return;
       }
       if (state.matches.length) {
-        helpers.paintMatch(s);
         helpers.renderMatches();
         helpers.renderJobs();
       }
     },
 
     /**
-     * 启动批量投递任务并开始轮询。
+     * 启动批量投递任务并开始观察。
      *
      * @param {Array<Object>} targets 要发送的匹配结果项
      * @param {{mode?: string, confirmed?: boolean, confirmationToken?: string}} [opts]
@@ -599,8 +539,7 @@ export async function renderMatch(root) {
         state.deliverTaskId = s.task_id;
         toast(`开始发送 · 待发 ${s.total || 0} 条，跳过 ${s.skipped || 0} 条`, "ok");
         helpers.applyDeliverSnapshot(s);
-        helpers.paintDeliver(s);
-        helpers.startDeliverPoll();
+        helpers.watchDeliver(s.task_id);
       } catch (err) {
         toast(err.message || "发送启动失败", "bad");
       }
@@ -625,38 +564,48 @@ export async function renderMatch(root) {
       }
     },
 
-    /** 开始轮询投递任务状态，结束后弹出成功 / 失败 / 取消提示。 */
-    startDeliverPoll() {
-      clearInterval(state.deliverTimer);
-      state.deliverTimer = setInterval(async () => {
-        let s = null;
-        try {
-          s = await api.get("/api/deliver/status");
-        } catch {
-          return;
+    /**
+     * 用统一 WS 事件观察投递任务（替代原 1s setInterval 轮询）。
+     * 投递全局串行，同一时刻只有一个任务。
+     *
+     * @param {string} taskId 任务 id
+     */
+    watchDeliver(taskId) {
+      if (state.deliverWatch) state.deliverWatch();
+      const stop = watchTask(taskId, () => api.get("/api/deliver/status"), {
+        taskType: "deliver",
+        onStatus: (s) => helpers.onDeliverStatus(s),
+        isDone: (s) => !s || !s.task_id || ["done", "error", "cancelled"].includes(s.status),
+      });
+      state.deliverWatch = () => {
+        stop();
+        state.deliverWatch = null;
+      };
+    },
+
+    /**
+     * 投递状态回来后：写回发送快照，结束后弹出成功 / 失败 / 取消提示。
+     * 进度条不在这画——统一在任务中心看。
+     *
+     * @param {?Object} s 投递快照（与原轮询拿到的同形状）
+     */
+    onDeliverStatus(s) {
+      if (!s || !s.task_id) {
+        state.deliverTaskId = null;
+        return;
+      }
+      state.deliverTaskId = s.task_id;
+      helpers.applyDeliverSnapshot(s);
+      if (["done", "error", "cancelled"].includes(s.status)) {
+        state.deliverTaskId = null;
+        if (s.status === "done") {
+          toast(`发送完成 · 成功 ${s.ok || 0} / 失败 ${s.failed || 0} / 跳过 ${s.skipped || 0}`, "ok");
+        } else if (s.status === "error") {
+          toast(s.error || "发送中断", "bad");
+        } else {
+          toast("发送已取消", "warn");
         }
-        if (!s || !s.task_id) {
-          clearInterval(state.deliverTimer);
-          state.deliverTimer = null;
-          state.deliverTaskId = null;
-          return;
-        }
-        state.deliverTaskId = s.task_id;
-        helpers.applyDeliverSnapshot(s);
-        helpers.paintDeliver(s);
-        if (["done", "error", "cancelled"].includes(s.status)) {
-          clearInterval(state.deliverTimer);
-          state.deliverTimer = null;
-          state.deliverTaskId = null;
-          if (s.status === "done") {
-            toast(`发送完成 · 成功 ${s.ok || 0} / 失败 ${s.failed || 0} / 跳过 ${s.skipped || 0}`, "ok");
-          } else if (s.status === "error") {
-            toast(s.error || "发送中断", "bad");
-          } else {
-            toast("发送已取消", "warn");
-          }
-        }
-      }, 1000);
+      }
     },
 
     /** 页面加载时接上服务端仍在跑的投递任务。 */
@@ -669,10 +618,9 @@ export async function renderMatch(root) {
       }
       if (!s || !s.task_id) return;
       helpers.applyDeliverSnapshot(s);
-      helpers.paintDeliver(s);
       if (s.status === "running") {
         state.deliverTaskId = s.task_id;
-        helpers.startDeliverPoll();
+        helpers.watchDeliver(s.task_id);
         toast("已接上进行中的发送任务", "ok");
       }
     },
@@ -824,6 +772,7 @@ export async function renderMatch(root) {
           <div class="muted draft-hint mt-8" style="font-size:11px;display:none">草稿未保存，满意后点「保存招呼语」；可反复点「重新生成」换一版</div>
           ${failed ? `<div class="banner bad mt-8">${escapeHtml(m.error)}</div>` : ""}
         `,
+        /** 弹窗关闭时若还挂着本条详情句柄，就清掉。 */
         onClose: () => {
           if (state.detailApi && state.detailApi.jid === jid) state.detailApi = null;
         },
@@ -1068,9 +1017,17 @@ export async function renderMatch(root) {
   await helpers.restoreDeliver();
   await show("workbench");
 
-  /** 卸载时清掉匹配 / 投递轮询定时器。 */
+  const offWsMatch = ws.on("task.progress", (m) => {
+    if (m.task_type !== "match" || !m.task_id) return;
+    if (state.matchWatches.has(m.task_id)) return;
+    helpers.watchMatch(m.task_id);
+  });
+
+  /** 卸载时停掉匹配 / 投递的任务观察器。 */
   return () => {
-    clearInterval(state.pollTimer);
-    clearInterval(state.deliverTimer);
+    offWsMatch();
+    [...state.matchWatches.values()].forEach((stop) => stop());
+    state.matchWatches.clear();
+    if (state.deliverWatch) state.deliverWatch();
   };
 }

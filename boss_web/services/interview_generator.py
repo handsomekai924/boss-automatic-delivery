@@ -13,6 +13,7 @@ Attributes:
     USER_TEMPLATE: 用户提示词模板（装 JD / 简历 / 匹配分析）。
     _RESUME_INPUT_LIMIT: 简历原文参与生成的字数上限，超出截尾。
     _JD_INPUT_LIMIT: JD 参与生成的字数上限。
+    _DUP_DICE: 归一后字符 Dice 超过这个值当同一道题。
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from .llm_config_store import LLMConfig, load_config
 
 QUESTION_TYPES: tuple[str, ...] = ("技术深度", "项目经历", "场景", "软技能")
 DIFFICULTIES: tuple[str, ...] = ("基础", "中级", "高级")
-#: 补题单次上限。
 SUPPLEMENT_MAX = 10
 
 _RESUME_INPUT_LIMIT = 8000
@@ -247,13 +247,11 @@ def _normalize_question(raw: Any) -> InterviewQuestion | None:
         return None
     qtype = str(raw.get("question_type") or "").strip()
     if qtype not in QUESTION_TYPES:
-        # LLM 偶尔写近义词，收不进四类的丢掉而不是瞎归类。
         return None
     difficulty = str(raw.get("difficulty") or "").strip()
     if difficulty not in DIFFICULTIES:
         return None
     hints = _normalize_hints(raw.get("answer_hints"))
-    # tags 允许放在顶层，也允许放在 answer_hints 里。
     if not hints.get("tags") and isinstance(raw.get("tags"), list):
         hints["tags"] = [str(t).strip() for t in raw.get("tags")][:6]
     return InterviewQuestion(
@@ -291,7 +289,6 @@ def _char_dice(a: str, b: str) -> float:
     return 2.0 * len(sa & sb) / (len(sa) + len(sb))
 
 
-#: 归一后字符 Dice 超过这个值当同一道题。
 _DUP_DICE = 0.75
 
 
@@ -314,7 +311,6 @@ def is_duplicate_question(text: str, existing: Sequence[str]) -> bool:
             continue
         if key == o:
             return True
-        # 短的一边嵌在长的一边里 → 同一题的换皮/缩写
         if len(key) >= 6 and len(o) >= 6 and (key in o or o in key):
             return True
         if _char_dice(key, o) >= _DUP_DICE:
@@ -425,7 +421,6 @@ def generate_questions(
 
     questions = parse_questions(data)
     if question_type:
-        # 补题：只要指定题型，再和已有题（含本批内部）去重。
         questions = [q for q in questions if q.question_type == question_type]
         questions = filter_new_questions(questions, existing=existing_questions)
     if not questions:

@@ -160,4 +160,16 @@ def logout() -> dict[str, Any]:
         clear_session()
     except Exception:  # noqa: BLE001
         pass
+    _broadcast_session_changed()
     return {"logged_in": False}
+
+
+def _broadcast_session_changed() -> None:
+    """登出后推一帧 `session.changed`，信号球 / 首页会话卡立刻跟着刷。"""
+    try:
+        from ..services.login_task import login_tasks
+        from ..services.task_runtime import hub
+
+        hub.broadcast("session.changed", login_tasks.status_payload())
+    except Exception:  # noqa: BLE001 - 会话推送失败不影响登出本身
+        pass

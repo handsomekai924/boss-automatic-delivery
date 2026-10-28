@@ -1,8 +1,9 @@
 """版本更新检测：对着 Gitee 发行版比一版号，有新的就提示用户去下。
 
 只查 Gitee；GitHub 只提供下载入口，不参与版本判断。忽略版本记的是「水位线」
-——比水位新的版本会重新弹出提示。检测触发时机：启动时后台预热一次、
-用户在网页里手动刷新。
+——比水位新的版本会重新弹出提示。检测触发时机：启动时后台预热一次、用户在
+网页里手动刷新。发现没忽略的新版就广播一帧 `update.available`（每版只播一次），
+前端挂机提示吃推送，不再定时轮询。
 
 Attributes:
     GITEE_RELEASES_PAGE: 提示框上「去下载」按钮的落点。
@@ -10,6 +11,7 @@ Attributes:
     CACHE_TTL: 同一次运行内结果的有效期（秒）。
     NOTES_LIMIT: 发行说明带进弹窗的最大字符数。
     _cache: 最近一次检测结果（含失败），`checked_at` 为 0 表示还没测过。
+    _announced: 已经广播过 `update.available` 的版本号（每版只播一次）。
 """
 
 from __future__ import annotations
@@ -219,12 +221,14 @@ _cache: dict[str, Any] = {
     "release": None,
     "error": None,
 }
+_announced: set[str] = set()
 
 
 def reset_cache() -> None:
     """清掉缓存。给测试用。"""
     with _lock:
         _cache.update(checked_at=0.0, release=None, error=None)
+        _announced.clear()
 
 
 def _fresh(seconds: float | None = None) -> bool:
@@ -367,6 +371,9 @@ def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
     `can_self_update` 决定「立即更新」按钮露不露；`update_done` 是自更新
     跑完后新进程给重连页面的一次性回执。
 
+    有没忽略的新版时顺手广播一帧 `update.available`（每版只播一次），
+    挂机的页面吃推送，不用定时来问。
+
     Args:
         path: 状态库路径，用来读忽略版本水位线。
         force: 为真则忽略缓存强制重测。
@@ -387,7 +394,7 @@ def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - 回执读不出来不该把状态接口搞挂
         update_done = None
 
-    return {
+    result = {
         "ok": True,
         "current": current,
         "latest": latest,
@@ -404,6 +411,31 @@ def build_status(*, path: Any = None, force: bool = False) -> dict[str, Any]:
         "checked_at": snap["checked_at"],
         "error": snap["error"],
     }
+    _announce(result)
+    return result
+
+
+def _announce(status: dict[str, Any]) -> None:
+    """发现没提醒过的新版就广播一帧 `update.available`；每版只播一次。
+
+    Args:
+        status: `build_status` 的结果。
+    """
+    if not status.get("should_prompt"):
+        return
+    version = str(status.get("latest") or "")
+    if not version:
+        return
+    with _lock:
+        if version in _announced:
+            return
+        _announced.add(version)
+    try:
+        from .task_runtime import hub
+
+        hub.broadcast("update.available", status)
+    except Exception:  # noqa: BLE001 - 推送失败不影响检测本身
+        logger.debug("update.available 广播失败", exc_info=True)
 
 
 def _load_done_marker() -> dict[str, Any] | None:

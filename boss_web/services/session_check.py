@@ -88,11 +88,36 @@ def check_now(
 ) -> dict[str, Any]:
     """查一次库里的登录态还作不作数；结果写进模块缓存，并按需改库。
 
+    查完广播一帧 `session.changed`：自检可能刚把失效的登录态清掉、或刷过
+    用户名，顶栏信号球 / 首页会话卡要跟着变，不用谁再来问。
+
     Args:
         session_path: 状态库路径；省略 = 默认库。
         client_factory: 造客户端的钩子（测试注入假客户端）。默认
             `boss_login.create_client`。
     """
+    result = _run_check(session_path=session_path, client_factory=client_factory)
+    _announce_session_changed()
+    return result
+
+
+def _announce_session_changed() -> None:
+    """自检落定后推一帧 `session.changed`（与登录终态推送同形状）。"""
+    try:
+        from .login_task import login_tasks
+        from .task_runtime import hub
+
+        hub.broadcast("session.changed", login_tasks.status_payload())
+    except Exception:  # noqa: BLE001 - 会话推送失败不影响自检本身
+        logger.debug("session.changed 广播失败", exc_info=True)
+
+
+def _run_check(
+    *,
+    session_path: Any = None,
+    client_factory: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """`check_now` 的实现体：只管查库测真伪，不发广播。"""
     from boss_login.errors import BossLoginError
     from boss_login.session import clear_session, load_session, save_session
 

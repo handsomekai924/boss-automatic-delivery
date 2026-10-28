@@ -3,12 +3,14 @@
 import { api } from "./api.js";
 import { toast, bindThemeToggle, initTheme } from "./ui.js";
 import { maybePromptUpdate, startUpdateWatcher } from "./update.js";
+import * as ws from "./ws.js";
 import { renderHome } from "./views/home.js";
 import { renderLogin } from "./views/login.js";
 import { renderJobs } from "./views/jobs.js";
 import { renderResume } from "./views/resume.js";
 import { renderMatch } from "./views/match.js";
 import { renderInterview } from "./views/interview.js";
+import { renderTasks } from "./views/tasks.js";
 import { renderSettings } from "./views/settings.js";
 
 /** hash 路径 → 视图渲染函数。 */
@@ -20,6 +22,7 @@ const routes = {
   "/resume": renderResume,
   "/match": renderMatch,
   "/interview": renderInterview,
+  "/tasks": renderTasks,
   "/settings": renderSettings,
   "/llm": renderSettings,
 };
@@ -40,6 +43,7 @@ function stageOf(path) {
   if (path.startsWith("/resume")) return "resume";
   if (path.startsWith("/match")) return "match";
   if (path.startsWith("/interview")) return "interview";
+  if (path.startsWith("/tasks")) return "tasks";
   if (path.startsWith("/settings") || path.startsWith("/llm")) return "settings";
   return "";
 }
@@ -72,27 +76,114 @@ export async function navigate() {
   window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
 }
 
-/** 刷新舰桥会话信号球，并广播 `boss:session` 给首页卡片。 */
+/** 刷新舰桥会话信号球，并广播 `boss:session` 给首页卡片（首屏 / WS 降级用）。 */
 export async function refreshBridge() {
-  const dot = document.getElementById("signal-session");
-  const label = document.getElementById("signal-session-label");
   try {
     const st = await api.get("/api/auth/status");
     window.dispatchEvent(new CustomEvent("boss:session", { detail: st }));
-    if (st.logged_in) {
-      dot.className = "signal ok";
-      label.textContent = st.phone_masked || "已登录";
-    } else {
-      dot.className = "signal warn";
-      label.textContent = "未登录";
-    }
-    if (st.task && ["pending", "sending_sms", "need_code", "need_slider", "logging_in"].includes(st.task.status)) {
-      dot.className = "signal busy";
-      label.textContent = "登录进行中";
-    }
+    paintSession(st);
   } catch {
-    dot.className = "signal bad";
-    label.textContent = "离线";
+    const dot = document.getElementById("signal-session");
+    const label = document.getElementById("signal-session-label");
+    if (dot) dot.className = "signal bad";
+    if (label) label.textContent = "离线";
+  }
+}
+
+/** 顶栏任务角标：task_id → 是否未结束（WS 事件维护）。 */
+const liveTasks = new Map();
+
+/** 未结束状态集合，与后端 `task_runtime.UNFINISHED` 对齐。 */
+const UNFINISHED = new Set([
+  "pending", "running", "waiting_human", "sending_sms",
+  "need_code", "need_slider", "logging_in", "need_scan",
+]);
+
+/** 按 `liveTasks` 重画顶栏在跑角标。 */
+function paintTaskBadge() {
+  const badge = document.getElementById("bridge-tasks-badge");
+  if (!badge) return;
+  let n = 0;
+  for (const st of liveTasks.values()) if (UNFINISHED.has(st)) n += 1;
+  badge.textContent = String(n);
+  badge.classList.toggle("hidden", n === 0);
+}
+
+/** 合入一条任务快照（hello / task.* 通用）。 */
+function ingestTask(snap) {
+  if (!snap || !snap.task_id) return;
+  liveTasks.set(snap.task_id, snap.status || "running");
+  paintTaskBadge();
+}
+
+/** 建统一 WS：会话信号球、顶栏角标都吃它的推送。 */
+function startUnifiedWs() {
+  ws.on("hello", (m) => {
+    const tasks = (m.data && m.data.tasks && m.data.tasks.tasks) || [];
+    liveTasks.clear();
+    tasks.forEach(ingestTask);
+    const session = (m.data && m.data.session) || {};
+    window.dispatchEvent(new CustomEvent("boss:session", { detail: session }));
+    paintSession(session);
+  });
+  ws.on("task.snapshot", (m) => {
+    const tasks = (m.data && m.data.tasks && m.data.tasks.tasks) || m.data?.tasks || [];
+    liveTasks.clear();
+    (Array.isArray(tasks) ? tasks : []).forEach(ingestTask);
+  });
+  ws.on("task.progress", (m) => ingestTask(m.data));
+  ws.on("task.finished", (m) => ingestTask(m.data));
+  ws.on("task.removed", (m) => {
+    if (m.task_id) {
+      liveTasks.delete(m.task_id);
+      paintTaskBadge();
+    }
+  });
+  ws.on("session.changed", (m) => {
+    const session = (m.data && m.data.session) || m.data || {};
+    window.dispatchEvent(new CustomEvent("boss:session", { detail: session }));
+    paintSession(session);
+  });
+  ws.on("ws.status", () => syncBridgeFallback());
+  ws.connect();
+}
+
+/** 按会话摘要画信号球（WS 推送与 HTTP 兜底共用一套画法）。 */
+function paintSession(st) {
+  const dot = document.getElementById("signal-session");
+  const label = document.getElementById("signal-session-label");
+  if (!dot || !label) return;
+  if (st && st.logged_in) {
+    dot.className = "signal ok";
+    label.textContent = st.phone_masked || "已登录";
+  } else {
+    dot.className = "signal warn";
+    label.textContent = "未登录";
+  }
+  if (st && st.task && ["pending", "sending_sms", "need_code", "need_slider", "logging_in"].includes(st.task.status)) {
+    dot.className = "signal busy";
+    label.textContent = "登录进行中";
+  }
+}
+
+/** WS 断线时的会话兜底轮询定时器（连上就停）。 */
+let bridgeFallbackTimer = null;
+
+/** WS 断线才起 60s 慢轮询拉会话；正常全靠 hello / `session.changed` 推送。 */
+function syncBridgeFallback() {
+  if (bridgeFallbackTimer) {
+    clearInterval(bridgeFallbackTimer);
+    bridgeFallbackTimer = null;
+  }
+  if (ws.getStatus() !== "open") {
+    bridgeFallbackTimer = setInterval(() => {
+      if (ws.getStatus() === "open") {
+        clearInterval(bridgeFallbackTimer);
+        bridgeFallbackTimer = null;
+        return;
+      }
+      refreshBridge();
+    }, 60000);
   }
 }
 
@@ -102,7 +193,8 @@ window.addEventListener("load", () => {
   bindThemeToggle(document.getElementById("theme-toggle"));
   navigate();
   refreshBridge();
-  setInterval(refreshBridge, 8000);
+  startUnifiedWs();
+  syncBridgeFallback();
   maybePromptUpdate().catch(() => { });
   startUpdateWatcher();
 });

@@ -1,7 +1,8 @@
 /** 简历页：一份简历两副面孔——原文与结构化解析，共用同一套章节脊柱。 */
 
 import { api } from "../api.js";
-import { toast, escapeHtml, fmtTime, taskPanel } from "../ui.js";
+import { toast, escapeHtml, fmtTime } from "../ui.js";
+import { watchTask } from "../task_watch.js";
 
 /** 固定模板八段（与 boss_web/services/resume_parser.py 的 TEMPLATE_FIELDS 对齐）。 */
 const SECTIONS = [
@@ -119,8 +120,6 @@ export async function renderResume(root) {
       <input type="file" id="file" accept=".docx,.pdf,.md,.markdown,.txt" hidden>
     </section>
 
-    <div id="rs-task" class="mb-16"></div>
-
     <div class="rs-bench" id="rs-bench">
       <aside class="rs-rail" id="rs-rail" aria-label="章节目录">
         <div class="rs-rail-head mono" id="rs-rail-head"></div>
@@ -149,30 +148,20 @@ export async function renderResume(root) {
   let current = null;
   let llmCfg = null;
   let face = "parsed";
-  let parsing = false;
+  /**
+   * 在跑的解析任务：resume_id → { taskId, stop }。
+   * 解析是异步任务，多份简历可以同时解析（同名重复提交由后端 409 挡）；
+   * 进度不再在本页画板块，统一到任务中心看，这里只跟到结束好收结果。
+   */
+  const parseTasks = new Map();
   let activeSec = SECTIONS[0].sec;
   let rawHas = new Set();
   const scrollTops = { parsed: 0, source: 0 };
   let spyFrame = 0;
 
-  const parsePanel = taskPanel({ title: "LLM 解析", stopLabel: "" });
-  $("rs-task").appendChild(parsePanel.el);
-  parsePanel.update({ status: "idle", percent: 0 });
-
-  /**
-   * 刷 LLM 解析进度面板。
-   *
-   * @param {string} state 面板状态（idle / running / done / error）
-   * @param {string} detail 当前说明文案
-   * @param {number} percent 进度百分比
-   */
-  function paintParse(state, detail, percent) {
-    parsePanel.update({
-      status: state,
-      percent,
-      current: detail,
-      counts: [],
-    });
+  /** 某份简历是否正在解析。 */
+  function isParsing(id) {
+    return parseTasks.has(id);
   }
 
   /** 秒级时间戳 → 「刚刚 / N 分钟前 / …」；无值显示「—」。 */
@@ -553,8 +542,8 @@ export async function renderResume(root) {
       html = renderEmptyState();
     } else if (face === "source") {
       html = renderSourceFace();
-    } else if (parsing) {
-      html = renderSkeleton("正在调用 LLM 解析，单次调用，十几秒…");
+    } else if (isParsing(current.resume_id)) {
+      html = renderSkeleton("解析任务进行中，结果出来会自动换上…");
     } else if (current.llm && current.llm.data) {
       html = renderParsedFace(current.llm.data);
     } else {
@@ -649,9 +638,10 @@ export async function renderResume(root) {
         .map((it) => {
           const parsed = !!(it.llm && it.llm.has_data);
           const on = it.resume_id === (current && current.resume_id);
+          const busy = isParsing(it.resume_id);
           return `<button class="rs-chip${on ? " is-on" : ""}" data-id="${escapeHtml(it.resume_id)}"
                           title="${escapeHtml(it.title || it.resume_id)}">
-                    <i class="rs-dot" data-state="${parsed ? "on" : "off"}"></i>
+                    <i class="rs-dot" data-state="${busy ? "run" : parsed ? "on" : "off"}"></i>
                     <span class="rs-chip-t">${escapeHtml(it.title || it.resume_id)}</span>
                   </button>`;
         })
@@ -678,10 +668,11 @@ export async function renderResume(root) {
       f.innerHTML = "";
     }
 
-    $("btn-upload").disabled = parsing;
-    $("btn-parse").disabled = !hasCur || parsing;
-    $("btn-parse").textContent = parsing ? "解析中…" : "重新解析";
-    $("btn-del").disabled = !hasCur || parsing;
+    const busyNow = hasCur && isParsing(current.resume_id);
+    $("btn-upload").disabled = false;
+    $("btn-parse").disabled = !hasCur || busyNow;
+    $("btn-parse").textContent = busyNow ? "解析中…" : "重新解析";
+    $("btn-del").disabled = !hasCur || busyNow;
   }
 
   /** 读 LLM 配置（失败置空，不弹错）。 */
@@ -705,12 +696,11 @@ export async function renderResume(root) {
   }
 
   /**
-   * 切换到指定简历并重画。
+   * 切换到指定简历并重画。解析是多简历并发的，切换不再被拦。
    *
    * @param {string} id 简历 ID
    */
   async function selectResume(id) {
-    if (parsing) return toast("解析中，等它跑完再切", "warn");
     if (current && current.resume_id === id) return;
     try {
       current = await api.get("/api/resume/item/" + id);
@@ -718,18 +708,18 @@ export async function renderResume(root) {
       scrollTops.parsed = 0;
       scrollTops.source = 0;
       renderBody();
+      renderBar();
     } catch (err) {
       toast(err.message || "载入失败", "bad");
     }
   }
 
   /**
-   * 上传简历文件，成功后自动开始解析。
+   * 上传简历文件，成功后自动开始解析（解析是异步任务，多份可并行）。
    *
    * @param {File} file 选中或拖入的文件
    */
   async function upload(file) {
-    if (parsing) return toast("解析中，等它跑完再传", "warn");
     const fd = new FormData();
     fd.append("file", file);
     try {
@@ -747,46 +737,99 @@ export async function renderResume(root) {
   }
 
   /**
-   * 调后端 LLM 解析这份简历；失败时屏上保留旧解析结果。
+   * 提交 LLM 解析任务并跟到结束；失败时屏上保留旧解析结果。
+   *
+   * 解析是任务中心的异步任务：提交即返回 task_id，进度走统一 WS
+   * （`task_watch` 在断线时自己回落轮询），多份简历可以同时解析。
    *
    * @param {string} resumeId 简历 ID
    */
   async function runParse(resumeId) {
-    if (parsing) return;
-    const prev = current && current.llm;
-    parsing = true;
+    if (isParsing(resumeId)) return toast("这份简历正在解析中", "warn");
+    const prev = current && current.resume_id === resumeId ? current.llm : null;
     face = "parsed";
     renderBody();
-    paintParse("running", "正在调用 LLM 解析，单次调用，十几秒…", 40);
+    let taskId;
     try {
       const r = await api.post(`/api/resume/item/${resumeId}/parse`);
-      if (current && current.resume_id === resumeId) {
-        current.llm = r.llm;
-      }
-      parsing = false;
-      paintParse("done", "解析完成", 100);
-      renderBody(true);
-      toast("解析完成", "ok");
-      await loadList();
+      taskId = r && r.task_id;
     } catch (err) {
-      parsing = false;
-      paintParse("error", err.message || "解析失败", 100);
       renderBody();
-      const banner = `
-        <div class="banner bad">
-          <div><strong>解析失败：</strong>${escapeHtml(err.message || "未知错误")}</div>
-          ${
-            prev
-              ? `<div class="muted mt-8" style="font-size:12px">下面是上一次的解析结果（${escapeHtml(
-                  relTime(prev.parsed_at)
-                )} · ${escapeHtml(prev.model || "—")}），没有被覆盖。</div>`
-              : `<div class="muted mt-8" style="font-size:12px">检查「模型」页的 Key / Base URL / 模型名是否可用。</div>`
-          }
-        </div>`;
-      body.insertAdjacentHTML("afterbegin", banner);
-      body.scrollTop = 0;
-      toast(err.message || "解析失败", "bad");
+      showParseErrorBanner(err, prev);
+      return;
     }
+    if (!taskId) return;
+
+    /** 任务结束：读库里的解析结果，回到正常阅读态。 */
+    const finish = async (ok) => {
+      parseTasks.delete(resumeId);
+      renderBar();
+      try {
+        const r = await api.get(`/api/resume/item/${resumeId}/parse`);
+        if (current && current.resume_id === resumeId && r && r.llm) {
+          current.llm = r.llm;
+          renderBody(true);
+        }
+      } catch {
+      }
+      await loadList();
+      if (ok) toast("解析完成", "ok");
+    };
+
+    const entry = { taskId, stop: null };
+    parseTasks.set(resumeId, entry);
+    renderBar();
+    entry.stop = watchTask(
+      taskId,
+      () => api.get(`/api/tasks/${encodeURIComponent(taskId)}`),
+      {
+        taskType: "parse",
+        /** 任务快照回调：done 收尾、error 出横幅、cancelled 清理。 */
+        onStatus: (snap) => {
+          const status = String(snap.status || "");
+          if (status === "done") {
+            finish(true);
+            return;
+          }
+          if (status === "error") {
+            renderBody();
+            showParseErrorBanner({ message: snap.error || "解析失败" }, prev);
+            finish(false);
+            return;
+          }
+          if (status === "cancelled") {
+            parseTasks.delete(resumeId);
+            renderBar();
+            toast("解析已取消", "warn");
+            return;
+          }
+        },
+        isDone: (snap) => ["done", "error", "cancelled"].includes(String(snap.status || "")),
+      },
+    );
+  }
+
+  /**
+   * 解析失败的横幅：留下旧结果的说明。
+   *
+   * @param {{message?: string}} err 错误
+   * @param {?Object} prev 上一次解析结果
+   */
+  function showParseErrorBanner(err, prev) {
+    const banner = `
+      <div class="banner bad">
+        <div><strong>解析失败：</strong>${escapeHtml(err.message || "未知错误")}</div>
+        ${
+          prev
+            ? `<div class="muted mt-8" style="font-size:12px">下面是上一次的解析结果（${escapeHtml(
+                relTime(prev.parsed_at)
+              )} · ${escapeHtml(prev.model || "—")}），没有被覆盖。</div>`
+            : `<div class="muted mt-8" style="font-size:12px">检查「模型」页的 Key / Base URL / 模型名是否可用。</div>`
+        }
+      </div>`;
+    body.insertAdjacentHTML("afterbegin", banner);
+    body.scrollTop = 0;
+    toast(err.message || "解析失败", "bad");
   }
 
   /** 删除当前简历（先确认）。 */
@@ -853,8 +896,16 @@ export async function renderResume(root) {
     renderBody();
   }
 
+  /** 卸载时停掉解析任务的观察器；解析任务本身交给任务中心继续跑。 */
   return () => {
     if (spyFrame) cancelAnimationFrame(spyFrame);
+    for (const entry of parseTasks.values()) {
+      try {
+        entry.stop && entry.stop();
+      } catch {
+      }
+    }
+    parseTasks.clear();
     window.__reviseCleanup = null;
   };
 }

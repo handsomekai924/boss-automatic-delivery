@@ -1,6 +1,7 @@
 """匹配任务：简历 vs 全库/勾选岗位，并行调 LLM，出匹配度 + 优缺点 + 招呼语。
 
-与 `boss_web.services.resume_analyzer` 共用输出模板；差异与 C4/C6 设计
+输出模板（pros / cons / greeting）是本模块的唯一实现（原遗留分析器
+`resume_analyzer` 已随 `/api/resume/analyze*` 一并下线）；差异与 C4/C6 设计
 见 `notes/boss_web/services/match_task.md`。
 
 Attributes:
@@ -39,6 +40,7 @@ from .resume_store import (
     save_analysis,
     update_match_result,
 )
+from .task_runtime import POLICY_UNLIMITED, TaskTypeSpec, hub
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,15 @@ STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
+
+hub.register(
+    TaskTypeSpec(
+        "match",
+        title="简历匹配",
+        policy=POLICY_UNLIMITED,
+        title_fn=lambda req: f"简历匹配（{req.get('resume_id') or ''}）",
+    )
+)
 
 GREETING_SYSTEM_PROMPT = (
     "你是资深互联网猎头，擅长写求职打招呼私信。"
@@ -155,7 +166,7 @@ class MatchTask:
         self.matches: list[dict[str, Any]] = []
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.cancel_flag = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.analysis_id = self.task_id
 
     def push(self, name: str, payload: dict[str, Any] | None = None) -> None:
@@ -210,45 +221,76 @@ class MatchTask:
 
 
 class MatchTaskManager:
-    """同一时刻只跑一个匹配任务。
+    """多任务并发匹配：可同时跑多个匹配任务，按 id 查进度。
 
     Attributes:
-        _lock: 任务槽锁。
-        _task: 当前任务。
+        KEEP: 最多保留的历史任务数（含在跑的）。
+        _lock: 任务表锁。
+        _tasks: 任务表（保留最近若干条）。
     """
+
+    KEEP = 50
 
     def __init__(self) -> None:
         """初始化。"""
         self._lock = threading.Lock()
-        self._task: MatchTask | None = None
+        self._tasks: dict[str, MatchTask] = {}
 
     def current(self) -> MatchTask | None:
-        """当前任务；没有则 `None`。
+        """最近一个任务；没有则 `None`。
 
         Returns:
-            当前任务或 `None`。
+            最近任务或 `None`。
         """
         with self._lock:
-            return self._task
+            if not self._tasks:
+                return None
+            return next(reversed(self._tasks.values()))
+
+    def running(self) -> list[MatchTask]:
+        """所有在跑的匹配任务。"""
+        with self._lock:
+            return [t for t in self._tasks.values() if t.status == STATUS_RUNNING]
+
+    def all(self) -> list[MatchTask]:
+        """最近保留的全部任务，按启动时间从新到旧。"""
+        with self._lock:
+            return list(reversed(self._tasks.values()))
+
+    def get(self, task_id: str) -> MatchTask:
+        """按 id 取任务；不存在抛 `NotFoundError`。"""
+        with self._lock:
+            task = self._tasks.get(task_id)
+        if task is None:
+            raise NotFoundError(f"匹配任务不存在：{task_id}")
+        return task
 
     def snapshot(self, task_id: str | None = None) -> dict[str, Any]:
         """查询进度快照。
 
         Args:
-            task_id: 可选，校验是否就是当前任务。
+            task_id: 可选，指定任务；省略回最近一个。
 
         Returns:
             任务快照；空闲时为 idle。
 
         Raises:
-            NotFoundError: 指定 task_id 不是当前任务。
+            NotFoundError: 指定 task_id 不存在。
         """
+        if task_id:
+            return self.get(task_id).snapshot()
         task = self.current()
         if task is None:
             return {"task_id": None, "status": "idle"}
-        if task_id and task.task_id != task_id:
-            raise NotFoundError(f"匹配任务不存在：{task_id}")
         return task.snapshot()
+
+    def list_snapshots(self) -> dict[str, Any]:
+        """全部匹配任务快照（任务中心 / 匹配页面板用）。"""
+        tasks = self.all()
+        return {
+            "running_count": sum(1 for t in tasks if t.status == STATUS_RUNNING),
+            "tasks": [t.snapshot() for t in tasks],
+        }
 
     def start(
         self,
@@ -257,7 +299,7 @@ class MatchTaskManager:
         job_ids: Sequence[str] | None = None,
         crawl_task_id: str = "",
     ) -> MatchTask:
-        """启动一次匹配并起后台线程。
+        """启动一次匹配并起后台线程（可与其它匹配任务并行）。
 
         Args:
             resume_id: 简历 id。
@@ -266,15 +308,23 @@ class MatchTaskManager:
 
         Returns:
             新建的匹配任务（启动失败也返回可查询状态）。
-
-        Raises:
-            ConflictError: 已有匹配任务在跑。
         """
+        request = {
+            "resume_id": resume_id,
+            "job_ids": list(job_ids or []),
+            "crawl_task_id": crawl_task_id,
+        }
+        hub.occupy("match", request=request)
+        task = MatchTask(resume_id, job_ids or [], crawl_task_id=crawl_task_id)
         with self._lock:
-            if self._task is not None and self._task.status == STATUS_RUNNING:
-                raise ConflictError("已有匹配任务在跑")
-            task = MatchTask(resume_id, job_ids or [], crawl_task_id=crawl_task_id)
-            self._task = task
+            self._tasks[task.task_id] = task
+            self._prune_locked()
+        hub.track(
+            task,
+            task_type="match",
+            request=request,
+            retry_fn=lambda: self.start(**request),
+        )
 
         try:
             jobs = _pick_jobs(task)
@@ -283,6 +333,7 @@ class MatchTaskManager:
                 task.status = STATUS_ERROR
                 task.error = f"读取职位失败：{exc}"
                 task.ended_at = time.time()
+            hub.release(task.task_id)
             return task
 
         with task.lock:
@@ -294,6 +345,7 @@ class MatchTaskManager:
                 else:
                     task.error = "没有可匹配的职位，请先抓取或指定 job_ids"
                 task.ended_at = time.time()
+                hub.release(task.task_id)
                 return task
 
         thread = threading.Thread(target=self._run, args=(task, jobs), daemon=True, name=task.task_id)
@@ -301,22 +353,34 @@ class MatchTaskManager:
         return task
 
     def cancel(self, task_id: str | None = None) -> MatchTask:
-        """请求取消当前任务。
+        """请求取消某个任务；不给 id 则取消最近一个。
 
         Args:
-            task_id: 可选，校验是否就是当前任务。
+            task_id: 可选任务 id。
 
         Returns:
             被取消的任务。
 
         Raises:
-            NotFoundError: 没有在跑的匹配任务。
+            NotFoundError: 找不到任务。
         """
-        task = self.current()
-        if task is None or (task_id and task.task_id != task_id):
-            raise NotFoundError("没有在跑的匹配任务")
+        if task_id:
+            task = self.get(task_id)
+        else:
+            task = self.current()
+            if task is None:
+                raise NotFoundError("没有在跑的匹配任务")
         task.cancel_flag = True
+        hub.notify(task.task_id)
         return task
+
+    def _prune_locked(self) -> None:
+        """历史裁到 `KEEP`，只裁已结束的。"""
+        if len(self._tasks) <= self.KEEP:
+            return
+        finished = [tid for tid, t in self._tasks.items() if t.status != STATUS_RUNNING]
+        while len(self._tasks) > self.KEEP and finished:
+            self._tasks.pop(finished.pop(0), None)
 
     def _run(self, task: MatchTask, jobs: list[Job]) -> None:
         """线程体：并行匹配并落盘。
@@ -326,29 +390,39 @@ class MatchTaskManager:
             jobs: 本批职位。
         """
         try:
-            resume = load_resume(task.resume_id)
-        except FileNotFoundError:
-            task.status = STATUS_ERROR
-            task.error = f"简历不存在：{task.resume_id}"
-            task.ended_at = time.time()
-            return
+            try:
+                resume = load_resume(task.resume_id)
+            except FileNotFoundError:
+                task.status = STATUS_ERROR
+                task.error = f"简历不存在：{task.resume_id}"
+                task.ended_at = time.time()
+                return
 
-        cfg = load_config()
-        if not cfg.configured:
-            task.status = STATUS_ERROR
-            task.error = "LLM 还没配置，请先到「模型」页填好 API Key / Base URL / 模型名"
-            task.ended_at = time.time()
-            return
+            cfg = load_config()
+            if not cfg.configured:
+                task.status = STATUS_ERROR
+                task.error = "LLM 还没配置，请先到「模型」页填好 API Key / Base URL / 模型名"
+                task.ended_at = time.time()
+                return
 
-        try:
-            llm_parse = load_llm_parse(task.resume_id)
-        except FileNotFoundError:
-            llm_parse = None
-        resume_brief = _resume_brief(resume, llm_parse)
+            try:
+                llm_parse = load_llm_parse(task.resume_id)
+            except FileNotFoundError:
+                llm_parse = None
+            resume_brief = _resume_brief(resume, llm_parse)
 
-        llm = LLMClient(cfg)
-        self._run_parallel(task, llm, resume_brief, jobs)
-        _finalize(task, resume, cfg, llm_parse)
+            llm = LLMClient(cfg)
+            self._run_parallel(task, llm, resume_brief, jobs)
+            _finalize(task, resume, cfg, llm_parse)
+        except Exception as exc:  # noqa: BLE001 - 线程里兜住，状态给前端
+            logger.exception("匹配任务 %s 失败", task.task_id)
+            with task.lock:
+                task.status = STATUS_ERROR
+                task.error = str(exc) or exc.__class__.__name__
+                task.ended_at = time.time()
+            task.push("error", {"message": task.error})
+        finally:
+            hub.release(task.task_id)
 
     def _run_parallel(
         self,

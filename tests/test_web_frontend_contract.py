@@ -438,10 +438,11 @@ def test_立即更新走_apply_接口():
 
 
 def test_更新进度走_ws():
-    """验更新进度走 WS。"""
+    """验更新进度走统一 WS；旧的独立进度 WS 已删，不许回退。"""
     update_js = _read("js/update.js")
-    assert "/api/system/update/ws" in update_js
-    assert "WebSocket" in update_js
+    assert "update.progress" in update_js
+    assert "/api/system/update/ws" not in update_js
+    assert "legacyProgressSocket" not in update_js
 
 
 def test_更新完成后只刷新不关标签页():
@@ -590,6 +591,20 @@ def test_app启动后台轻提示(app_js: str):
     assert "startUpdateWatcher" in app_js
 
 
+def test_前端不再有常驻轮询(app_js: str):
+    """所有轮询改 WS：会话与版本检测都不许再挂常驻 setInterval。
+
+    会话由 `hello` / `session.changed` 推；版本由 `update.available` 推
+    （`hello` 的 version 字段补重连）。剩下的定时器只许是断线兜底或节流。
+    """
+    assert "setInterval(refreshBridge" not in app_js
+    assert "session.changed" in app_js
+    update_js = _read("js/update.js")
+    body = _fn_body(update_js, "startUpdateWatcher")
+    assert "setInterval" not in body
+    assert "update.available" in body
+
+
 def _fn_body(src: str, name: str) -> str:
     """抠出 `function <name>(...) { ... }` 的函数体（一层大括号配对）。"""
     marker = f"function {name}("
@@ -669,3 +684,109 @@ def test_切到短信就放弃扫码():
     assert "setMode(" in body
     assert "qr-idle" in body, "作废后二维码面板要归位，逼用户重新生成"
     assert "qrRevision" in body
+
+
+def test_简历解析进度只在任务中心():
+    """解析进度板块整块挪走：本页不画进度，只跟到结束好收结果。
+
+    留一半进度在业务页就会两处不一致：任务中心停了本页还在跑，
+    或者反过来。统一到任务中心后，本页只许留任务 id 与终态收尾。
+    """
+    resume = _read("js/views/resume.js")
+    assert "parsePanel" not in resume
+    assert "paintParse" not in resume
+    assert "rs-task" not in resume, "页面上不许再挂解析进度板块"
+    assert "watchTask" in resume, "结果还得等任务结束再收"
+
+
+def test_匹配进度只在任务中心(match_js: str):
+    """匹配的进度面板与「在跑的匹配任务」多行列表都挪走，停/看进度去任务中心。
+
+    批量投递的发送进度面板也挪走：留一半进度在业务页就会两处不一致，
+    停止/重试统一去任务中心，本页只留「结束收结果 + 终态提示」。
+    """
+    assert "matchPanel" not in match_js
+    assert "paintMatchRunning" not in match_js
+    assert "在跑的匹配任务" not in match_js
+    assert "matchPanelHost" not in match_js
+    assert "deliverPanelHost" not in match_js, "投递进度面板也挪去任务中心"
+    assert "paintDeliver" not in match_js
+    assert "watchTask" in match_js, "结果还得等任务结束再收"
+
+
+def test_面试题页内不许再开任务中心弹窗():
+    """面试题的任务中心弹窗整套删掉，入口交给顶栏，页内不再放跳转按钮。
+
+    页内弹窗只管面试题、换页即丢；独立页管全部任务，停止/重试/删除都在那。
+    """
+    iv = _read("js/views/interview.js")
+    assert "openTaskCenter" not in iv
+    assert "paintTaskCenter" not in iv
+    assert "#/tasks" not in iv, "页内不许再放任务中心跳转按钮"
+    assert "modal(" not in iv, "不许再弹页内任务中心"
+    assert "/api/tasks?task_type=interview" in iv, "在跑占用态改读统一任务中心接口"
+
+
+def test_职位采集进度只在任务中心(jobs_js: str):
+    """采集 / 补全描述的进度面板都整块挪走：本页只留开始按钮，看进度去任务中心。
+
+    和解析/匹配同一理由：留一半进度在业务页就会两处不一致。本页只跟到
+    结束好收结果（重载职位列表），进度条、日志、停止都在任务中心。
+    """
+    assert "crawlPanel" not in jobs_js
+    assert "PHASE_LABELS" not in jobs_js, "阶段文案后端快照给 current，页面不再自维护一份"
+    assert "crawl-task" not in jobs_js, "页面上不许再挂采集进度板块"
+    assert "#/tasks" not in jobs_js, "页内不许再放任务中心跳转按钮"
+    assert "watchTask" in jobs_js, "结果还得等任务结束再收"
+    assert "descPanelUi" not in jobs_js, "补全描述面板也挪去任务中心"
+    assert "renderDesc" not in jobs_js
+    assert "desc-panel" not in jobs_js
+    assert "btn-desc-hide" not in jobs_js
+
+
+def test_任务观察器收帧即画不回源():
+    """watchTask 收到 WS 任务帧直接画，不许每帧再回源打一次 HTTP status。
+
+    帧里本来就带业务快照（data.raw，和各页原 HTTP status 同形状）。事件密集
+    时每帧回源会在服务端日志里刷出一串 GET，和 1.5s 轮询没两样。HTTP 只留给
+    首帧与 WS 断线兜底；hello / task.snapshot 的全量列表里也能挑出本任务。
+    """
+    src = _read("js/task_watch.js")
+    assert "payloadOf" in src
+    assert "kick(" not in src, "事件触发的回源刷掉，帧里就有快照"
+    body = _fn_body(src, "onTaskEvent")
+    assert "fetchStatus" not in body, "任务事件不许回源打 HTTP"
+    assert "payloadOf(" in body
+    snap = _fn_body(src, "onSnapshot")
+    assert "fetchStatus" not in snap, "全量快照里挑本任务，也不回源"
+    assert "FALLBACK_POLL_MS" in src, "断线兜底轮询要留着，但只在 WS 不通时跑"
+
+
+def test_首页不再内嵌找职位进度():
+    """首页的「找职位进度」卡连同 WS 驱动的刷新全删掉，只留一句去哪看的说明。
+
+    首页本来就有顶栏在跑角标；再画一块进度就要两处状态同步，没必要。
+    """
+    home = _read("js/views/home.js")
+    assert "找职位进度" not in home
+    assert "home-crawl-task" not in home
+    assert "refreshCrawl" not in home
+    assert "kickCrawl" not in home
+    assert "#/tasks" not in home, "页内不许再放任务中心跳转按钮"
+
+
+def test_任务中心入口只在顶栏(index_html: str):
+    """任务中心只留顶栏一个入口：主导航 + 在跑角标，业务页一个跳转按钮都不许留。
+
+    入口散在各业务页就会有人从这里进、从那里进，过滤参数还得跟着到处维护；
+    统一从顶栏进，页面自己的查询参数预过滤留给书签/手输。
+    扫描跳过 `tasks.js` 自身（它的说明里会写查询参数预过滤，不算入口）。
+    """
+    assert 'href="#/tasks"' in index_html, "顶栏主导航要留任务中心入口"
+    assert 'id="bridge-tasks"' in index_html, "顶栏在跑角标也是入口"
+    views = STATIC / "js" / "views"
+    for path in sorted(views.glob("*.js")):
+        if path.name == "tasks.js":
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert "#/tasks" not in text, f"{path.name} 不许再留任务中心跳转"

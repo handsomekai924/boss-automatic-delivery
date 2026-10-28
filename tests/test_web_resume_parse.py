@@ -349,38 +349,6 @@ def test_match_one_has_pros_and_cons():
     assert "负责后端开发" in _job_desc_block(job)
 
 
-def test_legacy_analyzer_uses_match_token_limit():
-    """验证旧分析器也用匹配 token 上限。"""
-    from boss_jobs.models import Job
-    from boss_web.services.resume_analyzer import _analyze_one
-    from boss_web.services.resume_store import ResumeDraft
-    from boss_web import config as C
-
-    job = Job(
-        job_name="Python",
-        brand_name="某公司",
-        location="广州",
-        salary_desc="20-30K",
-        job_experience="3-5年",
-        job_degree="本科",
-        brand_industry="互联网",
-        brand_scale_name="100-499人",
-        encrypt_job_id="j1",
-        job_desc="负责后端开发",
-    )
-    draft = ResumeDraft("rs_x", "简历", "", 1.0, "原文")
-    response = json.dumps({"match_score": 80, "verdict": "合适"}, ensure_ascii=False)
-    llm = _FakeLLM(["非 JSON", response])
-
-    result = _analyze_one(llm, draft, job)
-
-    assert result["match_score"] == 80
-    assert llm.kwargs == [
-        {"max_tokens": C.LLM_MATCH_MAX_TOKENS},
-        {"max_tokens": C.LLM_MATCH_MAX_TOKENS},
-    ]
-
-
 def test_job_desc_fallback_when_missing():
     """验证缺 JD 时回退用标签与技能。"""
     from boss_jobs.models import Job
@@ -771,7 +739,7 @@ def test_rematch_patches_running_task_without_insert(db):
         }
     )
     with mt.match_tasks._lock:
-        mt.match_tasks._task = task
+        mt.match_tasks._tasks[task.task_id] = task
     try:
         llm = _ScriptLLM(
             [json.dumps({"match_score": 70, "verdict": "还行", "greeting": "你好"}, ensure_ascii=False)]
@@ -779,7 +747,7 @@ def test_rematch_patches_running_task_without_insert(db):
         item = mt.rematch_job(analysis_id=task.analysis_id, encrypt_job_id="j1", llm=llm)
     finally:
         with mt.match_tasks._lock:
-            mt.match_tasks._task = None
+            mt.match_tasks._tasks.pop(task.task_id, None)
 
     assert item["match_score"] == 70
     assert item["error"] == ""
@@ -924,18 +892,19 @@ def test_自定义招呼语约束两条路径都立即生效(db):
     assert "改后的约束：60 字以内" in greeter.calls[0][1]["content"]
 
 
-def test_简历解析路径也读自定义招呼语约束(db):
-    """旧的 `/api/resume/analyze` 与匹配任务共用同一段约束。"""
-    from boss_jobs.models import Job
-    from boss_web.services import app_settings_store
-    from boss_web.services.resume_analyzer import _analyze_one
-    from boss_web.services.resume_store import ResumeDraft
+def test_旧_analyze_接口已下线():
+    """遗留的 `/api/resume/analyze*` 四条路由已全部删除。
 
-    app_settings_store.apply_greeting_requirement(_CUSTOM_REQ)
-    draft = ResumeDraft("rs_x", "简历", "", 1.0, "原文")
-    llm = _FakeLLM([_MATCH_REPLY])
+    SPA 兜底会把没匹配的 GET 变成 200、POST 变成 405，所以「删没删」只能
+    看 resume 子 router 的路由表，不能靠状态码。
+    """
+    from boss_web.api import resume
 
-    _analyze_one(llm, draft, Job(**_MATCH_JOB_KWARGS))
-
-    prompt = llm.messages[0][1]["content"]
-    assert _CUSTOM_REQ in prompt
+    paths = {getattr(r, "path", "") for r in resume.router.routes}
+    for p in (
+        "/analyze",
+        "/analyze/status",
+        "/analyze/{task_id}",
+        "/analyze/{task_id}/cancel",
+    ):
+        assert p not in paths

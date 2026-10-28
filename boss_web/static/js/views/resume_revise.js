@@ -2,6 +2,7 @@
 
 import { api } from "../api.js";
 import { toast, modal, escapeHtml, fmtTime, taskPanel, taskStateOf, renderEvents } from "../ui.js";
+import { watchTask } from "../task_watch.js";
 import { openJobDetail } from "../job_detail.js";
 
 const MAX_TARGET = 5;
@@ -40,6 +41,7 @@ export function renderRevise(root, ctx = {}) {
    * @property {string} mode 优化模式：`targeted` | `free`
    * @property {string} targetKind 目标范围：`jobs` | `crawl_task` | `all`
    * @property {?string} taskId    任务 id，同时也是 revision_id
+   * @property {?() => void} stopWatch 任务观察器 stop 句柄
    */
   const state = {
     mode: ctx.mode || "targeted",
@@ -53,7 +55,7 @@ export function renderRevise(root, ctx = {}) {
     format: "md",
     taskId: null,
     revision: null,
-    timer: 0,
+    stopWatch: null,
     completed: false,
     sections: [],
     selectedSections: new Set(),
@@ -149,6 +151,7 @@ export function renderRevise(root, ctx = {}) {
         .join("");
       if (state.resumeId && items.some((x) => x.resume_id === state.resumeId)) sel.value = state.resumeId;
       else if (items.length) sel.value = items[0].resume_id;
+      /** 换选简历：清掉旧选择与草稿，并载入新简历原文。 */
       const pick = async () => {
         state.resumeId = sel.value;
         state.jobIds.clear();
@@ -203,7 +206,6 @@ export function renderRevise(root, ctx = {}) {
       </div>
     `;
 
-    // 加载章节列表
     (async () => {
       try {
         const data = await api.get(`/api/resume/item/${state.resumeId}/sections`);
@@ -233,7 +235,6 @@ export function renderRevise(root, ctx = {}) {
       }
     })();
 
-    // 加载预设提示词
     (async () => {
       try {
         const data = await api.get("/api/resume/revise/presets");
@@ -310,11 +311,13 @@ export function renderRevise(root, ctx = {}) {
     let dead = false;
     /** @type {{type: "jobs"|"crawl_task"|"all", crawl_task_id?: string}|null} 候选职位范围。 */
     let scope = null;
+    /** 刷新第 2 步标题里的「已选 N/M」计数。 */
     const setLabel = (n) => {
       const el = $("rv-label-n");
       if (el) el.textContent = `第 2 步 · 选目标岗位（${n}/${MAX_TARGET}）`;
     };
 
+    /** 按当前职位列表与已选重画候选行，并重绑勾选 / 详情事件。 */
     const renderList = () => {
       const host = $("rv-joblist");
       host.innerHTML = jobs
@@ -358,6 +361,7 @@ export function renderRevise(root, ctx = {}) {
           const id = row && row.dataset.id;
           if (!id) return;
           openJobDetail(id, {
+            /** 职位被删后从已选里摘掉并重画列表。 */
             onDeleted: () => {
               state.jobIds.delete(id);
               setLabel(state.jobIds.size);
@@ -466,7 +470,45 @@ export function renderRevise(root, ctx = {}) {
     });
   }
 
-  /** 第 3 步：启动简历优化长任务并轮询进度。 */
+  /**
+   * 开始观察简历优化任务：统一 WS 事件驱动（替代原 1.2s setInterval 轮询）。
+   * 优化全局单任务，状态走「当前任务」快照，按 task_id 校验归属，终态自动停。
+   */
+  function watchRevision() {
+    if (state.stopWatch) state.stopWatch();
+    state.stopWatch = watchTask(state.taskId, () => api.get("/api/resume/revise/status"), {
+      taskType: "revision",
+      /** 任务快照回来后刷新面板；终态载入草稿或退回第 3 步。 */
+      onStatus: (s) => {
+        if (s.task_id && s.task_id !== state.taskId) {
+          panel.update({ status: "idle", error: "有另一个简历优化任务在跑", current: "" });
+          return;
+        }
+        if (!s.task_id) return;
+        const st = taskStateOf(s.status);
+        panel.update({
+          status: st,
+          percent: s.done ? 100 : undefined,
+          current: s.current || "",
+          error: s.error || undefined,
+          counts: [["岗位", String(s.job_count ?? "")]],
+          log: logHtml(s.events),
+        });
+        if (s.done || s.status === "done") {
+          loadRevisionResult();
+        } else if (/error|cancelled/.test(s.status)) {
+          setStep(3);
+        }
+      },
+      /** 停表条件：任务消失 / 换了任务 / 到终态。 */
+      isDone: (s) => {
+        if (!s.task_id || s.task_id !== state.taskId) return true;
+        return !!s.done || s.status === "done" || /error|cancelled/.test(String(s.status || ""));
+      },
+    });
+  }
+
+  /** 第 3 步：启动简历优化长任务并观察进度。 */
   function renderStage3() {
     const stage = $("revise-stage");
     const labelText = state.mode === "free"
@@ -482,6 +524,7 @@ export function renderRevise(root, ctx = {}) {
     $("rv-task").appendChild(panel.el);
     panel.update({ status: "idle", percent: 0 });
 
+    /** 提交优化任务并接上进度观察。 */
     const start = async () => {
       panel.update({ status: "running", percent: 0, current: "启动…" });
       try {
@@ -502,42 +545,11 @@ export function renderRevise(root, ctx = {}) {
         }
         state.taskId = r.task_id;
         toast("已启动，正在生成…", "ok");
-        poll();
+        watchRevision();
       } catch (err) {
         panel.update({ status: "error", error: err.message || "启动失败" });
         toast(err.message || "启动失败", "bad");
       }
-    };
-
-    const poll = async () => {
-      clearInterval(state.timer);
-      state.timer = setInterval(async () => {
-        if (!state.taskId) return clearInterval(state.timer);
-        try {
-          const s = await api.get("/api/resume/revise/status");
-          if (s.task_id && s.task_id !== state.taskId) {
-            panel.update({ status: "idle", error: "有另一个简历优化任务在跑", current: "" });
-            return clearInterval(state.timer);
-          }
-          if (!s.task_id) return clearInterval(state.timer);
-          const st = taskStateOf(s.status);
-          panel.update({
-            status: st,
-            percent: s.done ? 100 : undefined,
-            current: s.current || "",
-            error: s.error || undefined,
-            counts: [["岗位", String(s.job_count ?? "")]],
-            log: logHtml(s.events),
-          });
-          if (s.done || s.status === "done") {
-            clearInterval(state.timer);
-            loadRevisionResult();
-          } else if (/error|cancelled/.test(s.status)) {
-            clearInterval(state.timer);
-            setStep(3);
-          }
-        } catch {}
-      }, 1200);
     };
 
     panel.onStop(async () => {
@@ -550,8 +562,7 @@ export function renderRevise(root, ctx = {}) {
       }
     });
 
-    // 自动开始生成
-    start();
+    if (!state.taskId) start();
   }
 
   /** 载入草稿详情进对比。 */
@@ -625,9 +636,9 @@ export function renderRevise(root, ctx = {}) {
           const r = await api.post(`/api/resume/revisions/${state.taskId}/regenerate`);
           state.taskId = r.task_id;
           toast("已重新生成，正在处理…", "ok");
+          state.completed = false;
           goStep(3);
-          renderStage3();
-          await poll();
+          watchRevision();
         } catch (err) {
           toast(err.message || "重新生成失败", "bad");
         }
@@ -804,8 +815,9 @@ export function renderRevise(root, ctx = {}) {
 
   goStep(1);
 
+  /** 卸载时停掉任务观察器。 */
   const cleanup = () => {
-    if (state.timer) clearInterval(state.timer);
+    if (state.stopWatch) state.stopWatch();
     window.__reviseCleanup = null;
   };
   window.__reviseCleanup = cleanup;

@@ -2,13 +2,12 @@
 
 import { api } from "./api.js";
 import { modal, escapeHtml, toast } from "./ui.js";
+import * as ws from "./ws.js";
 
 /** 轮询新服务的间隔。swap 期服务在换自己，这期间一律按「还没起来」等 */
 const RECONNECT_MS = 1500;
 /** 等新服务起来的总时长上限。超过就当更新没跑完，让用户自己看日志 */
 const WAIT_LIMIT_MS = 10 * 60 * 1000;
-/** 后台轻提示的轮询间隔。检测本身是后端每 30 分钟真打一次 Gitee，这里只管读缓存 */
-const WATCHER_POLL_MS = 60 * 1000;
 /** 「更新完成」提示停留多久再刷新——够看清更新到了哪一版，又不至于干等 */
 const RELOAD_DELAY_MS = 1500;
 /** 记「这个标签页已经处理过更新回执」的键（必须跟着标签页活过刷新，所以用 sessionStorage） */
@@ -18,11 +17,11 @@ const DONE_SEEN_KEY = "boss:update-done-seen";
 let notifiedVersion = "";
 
 /**
- * 最近一次 `/api/system/update` 的结果。
+ * 最近一次版本检测的结果。
  *
  * 「版本更新」页签的圆点要一直亮着（有新版且没忽略就不灭），所以不能只靠
- * 60s 一轮的 `boss:update` 事件碰运气——关掉弹窗进设置页那会儿没事件，
- * 圆点就是灭的。状态进缓存，页面一挂载就能画上。
+ * `update.available` 推送碰运气——关掉弹窗进设置页那会儿没推送，圆点就是灭的。
+ * 状态进缓存，页面一挂载就能画上。
  */
 let lastStatus = null;
 
@@ -83,35 +82,32 @@ function markNotified(version) {
 }
 
 /**
- * 后台轻提示：每隔一阵读一次检测结果，发现没提醒过的新版就 toast 一下。
+ * 后台轻提示：吃统一 WS 的版本推送，发现没提醒过的新版就 toast 一下。
  *
  * 跟首屏弹窗的分工：弹窗只在打开页面时出现一次；挂机靠这里。绝不弹窗，
  * 也不重复 toast 同一版。忽略水位线由 `should_prompt` 天然压住——被
  * 忽略的版本连 toast 都不会有。
  *
+ * 推送源：服务端周期检测 / 手动刷新测到新版推 `update.available`；
+ * 连接建立的 `hello` 帧带 `version` 结论，断线重连漏掉的推送靠它补。
  * 每次拿到状态都会广播 `boss:update`，系统设置的「版本更新」页签跟着刷。
- *
- * @param {{intervalMs?: number}} [options] 轮询间隔毫秒，缺省 `WATCHER_POLL_MS`
  */
-export function startUpdateWatcher(options) {
-  const intervalMs = (options && options.intervalMs) || WATCHER_POLL_MS;
-  /** 拉一次状态，没提醒过的新版就 toast。 */
-  const poll = async () => {
-    let status;
-    try {
-      status = await api.get("/api/system/update");
-    } catch {
-      return;
-    }
-    if (!status) return;
+export function startUpdateWatcher() {
+  /**
+   * 一份检测结果进来：缓存 + 每版只 toast 一次（绝不弹窗）。
+   *
+   * @param {Object} status 检测结果；`checked_at` 为 0 表示还没测过，别拿空结论盖掉已知状态
+   */
+  const handle = (status) => {
+    if (!status || !status.checked_at) return;
     applyUpdateStatus(status);
     if (status.should_prompt && status.latest && status.latest !== notifiedVersion) {
       markNotified(status.latest);
       toast(`发现新版本 v${status.latest}，到「系统设置 → 版本更新」看看`, "ok", 6000);
     }
   };
-  setInterval(poll, Math.max(5000, intervalMs));
-  poll();
+  ws.on("update.available", (m) => handle(m && m.data));
+  ws.on("hello", (m) => handle(m && m.data && m.data.version));
 }
 
 /**
@@ -390,58 +386,35 @@ function rememberDone(key) {
 }
 
 /**
- * 连更新进度 WS。3 秒连不上就回 `null`，让上层走轮询兜底。
+ * 订阅更新进度。通道只有统一 WS 的 `update.progress`（`hello` 里也带一份
+ * 当前进度，swap 断线重连后靠它续看）；旧的独立进度 WS 已随接口下线。
  *
  * @param {{onEvent?: (ev: Object) => void, onDown?: () => void}} handlers
  *   `onEvent` 收进度事件；`onDown` 在连不上/断开时回调
- * @returns {Promise<?WebSocket>} 连上的 socket；失败为 `null`
+ * @returns {Promise<?{close: () => void}>} 订阅句柄；失败为 `null`
  */
-function connectProgressSocket({ onEvent, onDown }) {
-  return new Promise((resolve) => {
-    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/system/update/ws`;
-    let settled = false;
-    let socket;
-    try {
-      socket = new WebSocket(url);
-    } catch {
-      onDown && onDown();
-      resolve(null);
-      return;
-    }
-    /** 标记连接失败并通知上层。 */
-    const fail = () => {
-      if (!settled) {
-        settled = true;
-        resolve(null);
-      }
-      onDown && onDown();
-    };
-    socket.onopen = () => {
-      if (!settled) {
-        settled = true;
-        resolve(socket);
-      }
-    };
-    socket.onmessage = (msg) => {
-      let ev = null;
-      try {
-        ev = JSON.parse(msg.data);
-      } catch {
-        return;
-      }
-      onEvent && onEvent(ev);
-    };
-    socket.onerror = () => fail();
-    socket.onclose = () => fail();
-    setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        try { socket.close(); } catch {}
-        resolve(null);
-        onDown && onDown();
-      }
-    }, 3000);
-  });
+async function connectProgressSocket({ onEvent, onDown }) {
+  await ws.connect();
+  if (ws.getStatus() !== "open") {
+    onDown && onDown();
+    return null;
+  }
+  const offs = [
+    ws.on("update.progress", (m) => onEvent && onEvent(m.data)),
+    ws.on("hello", (m) => {
+      const cur = m.data && m.data.update;
+      if (cur && (cur.stage || cur.percent != null)) onEvent && onEvent(cur);
+    }),
+    ws.on("ws.status", (m) => {
+      if (m.data && m.data.status !== "open") onDown && onDown();
+    }),
+  ];
+  return {
+    /** 退订全部进度事件。 */
+    close() {
+      offs.forEach((off) => off());
+    },
+  };
 }
 
 /** 毫秒级 sleep。 */

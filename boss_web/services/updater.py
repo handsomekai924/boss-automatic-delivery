@@ -12,14 +12,12 @@ Attributes:
     STAGE_ZH: bat 的 stage → 界面中文。
     LOG_TAIL_BYTES: 诊断页默认读的尾部字节数。
     LOG_FILE_NAMES: 要展示的过程日志文件名。
-    _subscribers: `(loop, queue)` 订阅表。
     _last_event: 最近一次进度。
     _done_cache: 新进程的「更新完成」回执缓存。
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -90,39 +88,15 @@ STAGE_ZH: dict[str, str] = {
 }
 
 _lock = threading.RLock()
-_subscribers: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
 _last_event: ProgressEvent = ProgressEvent(stage="idle", percent=0, text="")
 _done_cache: dict[str, Any] | None = None
 _done_loaded = False
 
 
-def subscribe(loop: asyncio.AbstractEventLoop) -> asyncio.Queue:
-    """订阅进度事件。
-
-    Args:
-        loop: 订阅方所在的事件循环。
-
-    Returns:
-        新建的进度队列，断开时用 `unsubscribe` 摘掉。
-    """
-    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
-    with _lock:
-        _subscribers.append((loop, queue))
-    return queue
-
-
-def unsubscribe(queue: asyncio.Queue) -> None:
-    """摘掉订阅。
-
-    Args:
-        queue: `subscribe` 返回的队列。
-    """
-    with _lock:
-        _subscribers[:] = [(lp, q) for lp, q in _subscribers if q is not queue]
-
-
 def publish(event: ProgressEvent) -> None:
-    """线程安全广播一帧进度；更新工作线程里调，WS 在事件循环里收。
+    """线程安全广播一帧进度；更新工作线程里调，统一 WS 在事件循环里收。
+
+    走统一任务中心广播（`update.progress`），前端一条 WS 就能看全。
 
     Args:
         event: 要广播的进度事件。
@@ -130,27 +104,12 @@ def publish(event: ProgressEvent) -> None:
     global _last_event
     with _lock:
         _last_event = event
-        targets = list(_subscribers)
-    for loop, queue in targets:
-        def _put(q: asyncio.Queue = queue, ev: ProgressEvent = event) -> None:
-            """把一帧塞进订阅队列；满了直接丢。"""
-            try:
-                q.put_nowait(ev)
-            except asyncio.QueueFull:  # pragma: no cover - 64 帧够宽
-                pass
+    try:
+        from .task_runtime import hub
 
-        try:
-            loop.call_soon_threadsafe(_put)
-        except RuntimeError:  # pragma: no cover - loop 已关
-            pass
-
-
-def snapshot_progress() -> dict[str, Any]:
-    """最近一次进度 + 一次性消费 `done.json` 回执。"""
-    with _lock:
-        payload = _last_event.to_payload()
-    payload["update_done"] = consume_done_marker()
-    return payload
+        hub.broadcast("update.progress", event.to_payload(), task_type="update")
+    except Exception:  # noqa: BLE001 - 广播失败不影响更新本身
+        logger.debug("更新进度广播失败", exc_info=True)
 
 
 def peek_progress() -> dict[str, Any]:

@@ -1,7 +1,6 @@
 /** 匹配工作台：简历选择 + 范围条 + 匹配按钮 + 双栏（岗位列表｜匹配结果）+ 详情弹窗 */
 
-import { api } from "../api.js";
-import { toast, modal, escapeHtml, scoreRing, taskPanel, renderEvents } from "../ui.js";
+import { toast, escapeHtml } from "../ui.js";
 
 const PAGE_SIZE = 20;
 
@@ -18,9 +17,8 @@ export function renderWorkbench(pane, state, helpers) {
     matches, analysisId, scope,
   } = state;
   const {
-    setMatchButtons, paintMatch, renderMatches, renderJobs, updateSelCount,
+    setMatchButtons, renderMatches, renderJobs, updateSelCount,
     startMatch, openMatchDetail, deliverLabel, loadResumes, updateLlmBadge,
-    matchPanelHost,
   } = helpers;
 
   pane.innerHTML = `
@@ -35,7 +33,6 @@ export function renderWorkbench(pane, state, helpers) {
       </div>
     </div>
     <div id="scope-bar" class="flex center gap-8 wrap mb-12"></div>
-    <div id="match-task" class="mb-16"></div>
     <div class="bento">
       <div class="card span-5 panel-col">
         <div class="card-head">
@@ -72,8 +69,6 @@ export function renderWorkbench(pane, state, helpers) {
   `;
 
   const $ = (id) => pane.querySelector("#" + id);
-
-  if (matchPanelHost) $("match-task").appendChild(matchPanelHost);
 
   const sel = $("resume-select");
   sel.innerHTML =

@@ -33,11 +33,21 @@ from ..services.resume_store import (
     mark_revision_status,
     update_revision_result,
 )
+from .task_runtime import POLICY_GLOBAL_SINGLE, TaskTypeSpec, hub
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
+
+hub.register(
+    TaskTypeSpec(
+        "revision",
+        title="简历优化",
+        policy=POLICY_GLOBAL_SINGLE,
+        title_fn=lambda req: f"简历优化（{req.get('resume_title') or req.get('resume_id') or ''}）",
+    )
+)
 
 
 class RevisionTask:
@@ -93,7 +103,7 @@ class RevisionTask:
         self.current = ""
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.cancel_flag = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.result: dict[str, Any] | None = None
 
     def push(self, name: str, payload: dict[str, Any] | None = None) -> None:
@@ -216,6 +226,7 @@ class RevisionTaskManager:
                 optimization_prompt=optimization_prompt,
             )
 
+        hub.occupy("revision", request={"resume_id": resume_id})
         with self._lock:
             if self._task is not None and self._task.status == STATUS_RUNNING:
                 raise ConflictError("已有简历优化任务在跑")
@@ -234,6 +245,16 @@ class RevisionTaskManager:
                     optimization_prompt=optimization_prompt,
                 )
             self._task = task
+        hub.track(
+            task,
+            task_type="revision",
+            request={
+                "resume_id": resume_id,
+                "resume_title": task.resume_title,
+                "mode": task.mode,
+                "revision_id": task.revision_id,
+            },
+        )
 
         thread = threading.Thread(target=self._run, args=(task, jobs), daemon=True, name=task.task_id)
         thread.start()
@@ -251,52 +272,55 @@ class RevisionTaskManager:
         """线程体：装配画像 → LLM 生成 → 写草稿 → done。"""
         task.push("revise_start", {"job_count": len(jobs), "mode": task.mode})
         try:
-            if task.cancel_flag:
-                raise _CancelledError()
+            try:
+                if task.cancel_flag:
+                    raise _CancelledError()
 
-            if task.mode == "free":
-                with task.lock:
-                    task.current = "按选定章节调用 LLM 优化…"
-                task.push("revise_llm", {})
-                result = RRF.generate_free_revision(
-                    resume_id=task.resume_id,
-                    selected_sections=task.selected_sections,
-                    optimization_prompt=task.optimization_prompt,
-                )
-            else:
-                with task.lock:
-                    task.current = "装配岗位画像、调用 LLM 生成…"
-                task.push("revise_llm", {})
-                result = RR.generate_revision(
-                    resume_id=task.resume_id, jobs=jobs, target_json=task.target_json
-                )
+                if task.mode == "free":
+                    with task.lock:
+                        task.current = "按选定章节调用 LLM 优化…"
+                    task.push("revise_llm", {})
+                    result = RRF.generate_free_revision(
+                        resume_id=task.resume_id,
+                        selected_sections=task.selected_sections,
+                        optimization_prompt=task.optimization_prompt,
+                    )
+                else:
+                    with task.lock:
+                        task.current = "装配岗位画像、调用 LLM 生成…"
+                    task.push("revise_llm", {})
+                    result = RR.generate_revision(
+                        resume_id=task.resume_id, jobs=jobs, target_json=task.target_json
+                    )
 
-            if task.cancel_flag:
-                raise _CancelledError()
-            updated = update_revision_result(
-                task.revision_id,
-                revised_md=result["revised_md"],
-                changes=result["changes"],
-                model=_model_name(),
-                status="draft",
-            )
-            task.result = result
-            task.push("revise_done", {"updated": updated})
+                if task.cancel_flag:
+                    raise _CancelledError()
+                updated = update_revision_result(
+                    task.revision_id,
+                    revised_md=result["revised_md"],
+                    changes=result["changes"],
+                    model=_model_name(),
+                    status="draft",
+                )
+                task.result = result
+                task.push("revise_done", {"updated": updated})
+                with task.lock:
+                    task.status = STATUS_DONE
+                    task.ended_at = time.time()
+                return
+            except _CancelledError:
+                status = REVISION_CANCELLED
+                error = ""
+            except Exception as exc:  # noqa: BLE001 - 单个任务失败不拖垮服务
+                task.error = str(exc) if str(exc) else exc.__class__.__name__
+                status = REVISION_ERROR
+                error = task.error
             with task.lock:
-                task.status = STATUS_DONE
+                task.status = STATUS_ERROR if status == REVISION_ERROR else REVISION_CANCELLED
                 task.ended_at = time.time()
-            return
-        except _CancelledError:
-            status = REVISION_CANCELLED
-            error = ""
-        except Exception as exc:  # noqa: BLE001 - 单个任务失败不拖垮服务
-            task.error = str(exc) if str(exc) else exc.__class__.__name__
-            status = REVISION_ERROR
-            error = task.error
-        with task.lock:
-            task.status = STATUS_ERROR if status == REVISION_ERROR else REVISION_CANCELLED
-            task.ended_at = time.time()
-        mark_revision_status(task.revision_id, status, error=error)
+            mark_revision_status(task.revision_id, status, error=error)
+        finally:
+            hub.release(task.task_id)
 
 
 def _model_name() -> str:

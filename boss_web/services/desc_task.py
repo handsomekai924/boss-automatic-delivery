@@ -27,6 +27,7 @@ from boss_jobs.store import JobStore
 
 from ..errors import ConflictError, NotFoundError
 from .blacklist import RuleMatch, evaluate_jd, list_enabled_rules, save_hit
+from .task_runtime import POLICY_GLOBAL_SINGLE, TaskTypeSpec, hub
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,16 @@ ST_RUNNING = "running"
 ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
+
+hub.register(
+    TaskTypeSpec(
+        "desc",
+        title="补抓JD",
+        policy=POLICY_GLOBAL_SINGLE,
+        mutual_group="fetch",
+        title_fn=lambda req: f"补抓JD（{req.get('limit') or '不限'}条）",
+    )
+)
 
 
 class DescTask:
@@ -72,7 +83,7 @@ class DescTask:
         }
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
         self.cancel_flag = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     def push(self, payload: dict[str, Any]) -> None:
         """追加一条事件（带时间戳）。
@@ -139,11 +150,19 @@ class DescTaskManager:
             interval = DETAIL_INTERVAL
         else:
             interval = max(0.2, float(interval))
+        request = {"limit": limit, "interval": interval}
+        hub.occupy("desc", request=request)
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有补抓任务在跑，等它结束或先取消")
-            task = DescTask({"limit": limit, "interval": interval})
+            task = DescTask(request)
             self._task = task
+        hub.track(
+            task,
+            task_type="desc",
+            request=request,
+            retry_fn=lambda: self.start(**request),
+        )
 
         thread = threading.Thread(
             target=self._run, args=(task,), daemon=True, name=f"desc-{task.task_id}"
@@ -356,6 +375,8 @@ class DescTaskManager:
                 task.error = f"{type(exc).__name__}: {exc}"
                 task.ended_at = time.time()
             task.push({"event": "error", "message": task.error})
+        finally:
+            hub.release(task.task_id)
 
 
 desc_tasks = DescTaskManager()

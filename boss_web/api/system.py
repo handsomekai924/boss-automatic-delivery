@@ -5,12 +5,10 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from .. import __version__ as APP_VERSION
@@ -264,25 +262,3 @@ def apply_update(body: ApplyUpdateBody) -> dict[str, Any]:
         "zip_name": zip_asset.get("name") or "",
         "message": "更新已开始，保持页面打开就能看到进度。",
     }
-
-
-@router.websocket("/update/ws")
-async def update_ws(ws: WebSocket) -> None:
-    """推送自更新进度。连接先给一帧快照，之后只出不进。
-
-    swap 阶段这个连接一定会断（服务在换自己）；前端靠同端口重连接着走。
-    """
-    await ws.accept()
-    loop = asyncio.get_running_loop()
-    queue = updater.subscribe(loop)
-    try:
-        await ws.send_text(json.dumps(updater.snapshot_progress(), ensure_ascii=False))
-        while True:
-            event = await queue.get()
-            await ws.send_text(json.dumps(event.to_payload(), ensure_ascii=False))
-    except WebSocketDisconnect:
-        pass
-    except Exception:  # noqa: BLE001 - 连接断得难看也不能把服务带崩
-        logger.debug("更新进度 WS 异常退出", exc_info=True)
-    finally:
-        updater.unsubscribe(queue)

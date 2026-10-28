@@ -43,11 +43,21 @@ from .resume_store import (
     update_delivery,
 )
 from .deliver_config_store import load_config as load_deliver_config
+from .task_runtime import POLICY_GLOBAL_SINGLE, TaskTypeSpec, hub
 from .troubleshoot import humanize
 
 logger = logging.getLogger(__name__)
 
 ST_RUNNING = "running"
+
+hub.register(
+    TaskTypeSpec(
+        "deliver",
+        title="批量发送",
+        policy=POLICY_GLOBAL_SINGLE,
+        title_fn=lambda req: f"批量发送（{len(req.get('job_ids') or [])}条）",
+    )
+)
 ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
@@ -263,7 +273,7 @@ class DeliverTask:
         self.items: list[dict[str, Any]] = []
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.cancel_flag = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     def push(self, name: str, payload: dict[str, Any] | None = None) -> None:
         """追加一条命名事件（带时间戳）。
@@ -398,6 +408,14 @@ class DeliverTaskManager:
         """
         if mode not in {"all", "selected", "manual"}:
             raise ValueError("mode 必须是 all、selected 或 manual")
+        request = {
+            "analysis_id": analysis_id,
+            "job_ids": list(job_ids),
+            "mode": mode,
+            "confirmed": confirmed,
+            "confirmation_token": confirmation_token,
+        }
+        hub.occupy("deliver", request=request)
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有发送任务在跑，等它结束或先取消")
@@ -409,6 +427,7 @@ class DeliverTaskManager:
                 confirmation_token=confirmation_token,
             )
             self._task = task
+        hub.track(task, task_type="deliver", request=request, retry_fn=lambda: self.start(**request))
 
         thread = threading.Thread(target=self._run, args=(task,), daemon=True, name=task.task_id)
         thread.start()
@@ -645,6 +664,7 @@ class DeliverTaskManager:
                 except Exception:  # noqa: BLE001 - 断连失败不该盖掉任务结果
                     logger.debug("关聊天通道失败", exc_info=True)
             store.close()
+            hub.release(task.task_id)
 
     def _on_api_error(self, task: DeliverTask, item: dict[str, Any], exc: JobApiError) -> str:
         """分类处理业务错误，回 `"stop"` / `"cooloff"` / `"continue"`。

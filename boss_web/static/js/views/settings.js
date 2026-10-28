@@ -2,6 +2,7 @@
 
 import { api } from "../api.js";
 import { toast, escapeHtml, modal, multiSelect, cascader } from "../ui.js";
+import { watchTask } from "../task_watch.js";
 import { applyUpdateStatus, peekUpdateStatus } from "../update.js";
 import { renderLLM } from "./llm.js";
 import { renderGreetingPrompt } from "./greeting_prompt.js";
@@ -91,7 +92,7 @@ export async function renderSettings(root) {
       paneDispose = await renderSettingsUpdate(pane);
       return;
     }
-    await renderCollection(pane, setDirty);
+    paneDispose = await renderCollection(pane, setDirty);
   }
 
   /**
@@ -101,8 +102,8 @@ export async function renderSettings(root) {
    * 新版比水位高时照亮，所以判断只看 `should_prompt`，不能再拿 `!ignored` 卡一道。
    *
    * 圆点要一直挂着：关掉弹窗 ≠ 忽略，只要还有没被忽略的新版就不灭。因此进页面
-   * 得先按缓存画上，不能只等 60s 一轮的 `boss:update`——关完弹窗进设置页那一分钟
-   * 里圆点会是灭的，看着就像「关掉就没提示了」。
+   * 得先按缓存画上，不能只等 WS 推送——关完弹窗进设置页那会儿正好没推送，
+   * 圆点会是灭的，看着就像「关掉就没提示了」。
    *
    * @param {Event} e `boss:update` 事件，`detail` 为检测结果
    */
@@ -136,6 +137,7 @@ export async function renderSettings(root) {
     });
   });
   await show("ai");
+  /** 卸载时移除 boss:update 监听并销毁当前面板。 */
   return () => {
     window.removeEventListener("boss:update", onUpdateDot);
     if (typeof paneDispose === "function") {
@@ -149,6 +151,7 @@ export async function renderSettings(root) {
  *
  * @param {HTMLElement}  root      挂载容器
  * @param {(v: boolean) => void} markDirty 标/清未保存修改
+ * @returns {Promise<() => void>} 卸载函数，停掉黑名单重检的任务观察器
  */
 async function renderCollection(root, markDirty) {
   root.innerHTML = `
@@ -782,19 +785,31 @@ async function renderCollection(root, markDirty) {
   $("collection-reset").addEventListener("click", async () => { if (!window.confirm("确定重置搜索条件和采集参数？")) return; try { fill(await api.post("/api/collection/config/reset")); markDirty(false); toast("已重置", "ok"); } catch (err) { toast(err.message, "bad"); } });
   $("rule-add-company").addEventListener("click", () => openRuleModal({ rule_type: "company", match_mode: "exact", scope: "" }));
   $("rule-add-jd").addEventListener("click", () => openRuleModal({ rule_type: "jd_keyword", match_mode: "contains", scope: "both" }));
+  /** @type {?() => void} 黑名单重检观察器的停止句柄（watchTask 返回），null = 没在观察。 */
+  let recheckStop = null;
   $("rules-recheck").addEventListener("click", async () => {
     try {
       const task = await api.post("/api/blacklist/recheck", {});
       $("recheck-status").textContent = `规则重检已开始：${task.task_id}`;
-      const timer = setInterval(async () => {
-        try {
-          const state = await api.get("/api/blacklist/recheck/status");
+      if (recheckStop) recheckStop();
+      recheckStop = watchTask(task.task_id, () => api.get("/api/blacklist/recheck/status"), {
+        taskType: "recheck",
+        isDone: (state) => ["done", "error", "cancelled"].includes(state.status),
+        /** 重检状态回来后刷新进度行；终态停观察并刷新规则列表。 */
+        onStatus: (state) => {
           const p = state.progress || {};
           $("recheck-status").textContent = state.task_id ? `规则重检：${state.status} · ${p.done || 0}/${p.total || 0}` : "";
-          if (["done", "error", "cancelled"].includes(state.status)) { clearInterval(timer); await loadRules(); }
-        } catch { clearInterval(timer); }
-      }, 1000);
+          if (["done", "error", "cancelled"].includes(state.status)) {
+            if (recheckStop) { recheckStop(); recheckStop = null; }
+            loadRules().catch(() => { });
+          }
+        },
+      });
     } catch (err) { toast(err.message || "重检启动失败", "bad"); }
   });
   await load();
+  /** 卸载时停掉黑名单重检观察器。 */
+  return () => {
+    if (recheckStop) { recheckStop(); recheckStop = null; }
+  };
 }

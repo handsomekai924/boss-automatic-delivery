@@ -19,11 +19,21 @@ from boss_jobs.store import JobStore
 
 from ..errors import ConflictError, NotFoundError
 from .blacklist import evaluate_company, evaluate_jd, list_enabled_rules, save_hit
+from .task_runtime import POLICY_GLOBAL_SINGLE, TaskTypeSpec, hub
 
 ST_RUNNING = "running"
 ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
+
+hub.register(
+    TaskTypeSpec(
+        "recheck",
+        title="黑名单重检",
+        policy=POLICY_GLOBAL_SINGLE,
+        title_fn=lambda req: "黑名单规则重检",
+    )
+)
 
 
 class RecheckTask:
@@ -54,7 +64,7 @@ class RecheckTask:
         self.rules_snapshot: tuple[dict[str, Any], ...] = ()
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.cancel_flag = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.logged_pairs: set[tuple[str, str]] = set()
         self.seen_jobs: set[str] = set()
 
@@ -112,12 +122,15 @@ class RecheckTaskManager:
 
     def start(self, *, job_ids: Sequence[str] = (), limit: int | None = None) -> RecheckTask:
         """启动一次重检；已有任务在跑时抛 `ConflictError`。"""
+        request = {"job_ids": list(job_ids), "limit": limit}
+        hub.occupy("recheck", request=request)
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有规则重检任务在运行")
             task = RecheckTask(job_ids=job_ids, limit=limit)
             task.rules_snapshot = tuple(list_enabled_rules())
             self._task = task
+        hub.track(task, task_type="recheck", request=request, retry_fn=lambda: self.start(**request))
 
         thread = threading.Thread(
             target=self._run,
@@ -267,6 +280,7 @@ class RecheckTaskManager:
         finally:
             if store is not None:
                 store.close()
+            hub.release(task.task_id)
 
 
 recheck_tasks = RecheckTaskManager()

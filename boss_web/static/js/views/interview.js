@@ -1,8 +1,9 @@
 /** 面试题生成页：岗位列表（批量出题）+ 生成记录（详情弹窗）。 */
 
 import { api } from "../api.js";
-import { toast, escapeHtml, fmtTime, debounce, modal } from "../ui.js";
+import { toast, escapeHtml, fmtTime, debounce } from "../ui.js";
 import { openQuestionDetail } from "../interview_prep.js";
+import * as ws from "../ws.js";
 
 const PAGE_SIZE = 20;
 
@@ -20,9 +21,6 @@ export async function renderInterview(root) {
       <div class="page-head-text">
         <h1 class="hero-title">面试题 <span class="grad">生成</span></h1>
         <p class="hero-sub">按抓取批次或职位名挑一批岗位，批量出面试准备题；生成记录里可以逐题浏览、导出。</p>
-      </div>
-      <div class="btn-row">
-        <button class="btn ghost" id="iv-task-center">任务中心<span class="pill accent hidden" id="iv-tc-badge" style="margin-left:6px"></span></button>
       </div>
     </div>
     <div class="settings-shell">
@@ -50,17 +48,16 @@ export async function renderInterview(root) {
     recordsTotal: 0,
     recordsPage: 0,
     recordTitle: "",
-    /** 在跑 / 失败任务占用的岗位 id → task_id（这些岗位不允许再点生成）。 */
+    /** 在跑任务占用的岗位 id → task_id（这些岗位不允许再点生成；失败不占坑）。 */
     busyJobIds: new Map(),
-    runningCount: 0,
     /** 上一轮在跑的任务 id，用来判断谁刚结束。 */
     knownRunning: new Set(),
   };
-  /** @type {ReturnType<typeof setTimeout>|null} */
-  let pollTimer = null;
   let disposed = false;
-  /** 任务中心弹窗开着时的重画回调；空 = 没开。 */
-  let taskCenterRender = null;
+  /** @type {?ReturnType<typeof setTimeout>} WS 事件触发刷新的节流排队。 */
+  let refreshTimer = null;
+  /** 上次刷新时刻，WS 事件节流用（500ms 内最多拉一次）。 */
+  let lastRefreshAt = 0;
 
   /** 切 tab。 */
   function show(name) {
@@ -259,6 +256,7 @@ export async function renderInterview(root) {
         state.jobs.length > 0 && state.jobs.every((j) => state.selected.has(j.encrypt_job_id));
     }
   }
+  /** Tab 2：生成记录表格。 */
   function renderRecordsTab() {
     const pageCount = Math.max(1, Math.ceil(state.recordsTotal / PAGE_SIZE));
     const rows = state.records
@@ -416,142 +414,6 @@ export async function renderInterview(root) {
   }
 
   /**
-   * 画任务中心弹窗内容：在跑 + 失败任务（进度 / 停止 / 全部停止 / 失败删除重试）。
-   *
-   * @param {HTMLElement} host 弹窗内容节点
-   * @param {Array<object>} tasks 任务快照列表
-   */
-  function paintTaskCenter(host, tasks) {
-    const rows = (tasks || []).filter(
-      (t) => t.status === "running" || t.status === "error"
-    );
-    const runningCount = rows.filter((t) => t.status === "running").length;
-    if (!rows.length) {
-      host.innerHTML = `
-        <div class="empty"><div class="empty-icon">◎</div><p>当前没有进行中或失败的任务</p></div>`;
-      return;
-    }
-    const list = rows
-      .map((t) => {
-        const pct = t.total ? Math.round(((t.done || 0) / t.total) * 100) : 0;
-        return `
-        <div class="iv-task-row" data-id="${escapeHtml(t.task_id)}">
-          <div class="flex between center gap-8">
-            <div class="card-sub" style="min-width:0">
-              ${escapeHtml(t.current || (t.status === "error" ? "生成失败" : "正在生成面试题…"))}
-              <span class="pill ${t.status === "running" ? "accent" : "bad"}">${
-                t.status === "running" ? "进行中" : "失败"
-              }</span>
-            </div>
-            <div class="btn-row">
-              ${
-                t.status === "running"
-                  ? `<button class="btn sm danger iv-tc-cancel" data-id="${escapeHtml(t.task_id)}">停止</button>`
-                  : `<button class="btn sm ghost iv-tc-del" data-id="${escapeHtml(t.task_id)}">删除</button>
-                     <button class="btn sm primary iv-tc-retry" data-id="${escapeHtml(t.task_id)}">重试</button>`
-              }
-            </div>
-          </div>
-          <div class="progress ${t.status === "error" ? "bad" : ""} mt-8"><i style="width:${pct}%"></i></div>
-          <div class="muted mt-8" style="font-size:12px">
-            ${t.done || 0} / ${t.total || 0} 个岗位 · ${(t.job_ids || []).length} 个目标
-            ${t.status === "running" ? "" : t.status === "error" && t.error ? ` · ${escapeHtml(t.error)}` : ""}
-          </div>
-        </div>`;
-      })
-      .join("");
-    host.innerHTML = `
-      <div class="flex between center mb-12">
-        <div class="card-sub">生成任务 <span class="pill accent">${runningCount} 个进行中</span></div>
-        ${
-          runningCount
-            ? '<button class="btn sm ghost" id="iv-cancel-all">全部停止</button>'
-            : ""
-        }
-      </div>
-      <div class="iv-task-list">${list}</div>`;
-  }
-
-  /** 打开任务中心弹窗：在跑任务进度 + 全部停止；失败的可删除 / 重试。弹窗开着时随轮询刷新。 */
-  function openTaskCenter() {
-    const dlg = modal({
-      title: "任务中心",
-      wide: true,
-      body: `<div class="muted">正在读取任务…</div>`,
-      onClose: () => {
-        if (taskCenterRender === myRender) taskCenterRender = null;
-      },
-    });
-    // 同一时刻只留一个任务中心；旧的关掉时别把新的回调清掉。
-    const myRender = (tasks) => paintTaskCenter(dlg.bodyEl, tasks);
-
-    /** 拉一次任务并画。 */
-    async function render() {
-      try {
-        const data = await api.get("/api/interview/tasks");
-        const tasks = data.tasks || [];
-        state.runningCount = data.running_count || 0;
-        state.busyJobIds = new Map(Object.entries(data.busy_job_ids || {}));
-        paintTaskCenter(dlg.bodyEl, tasks);
-        updateTcBadge();
-      } catch (err) {
-        dlg.bodyEl.innerHTML = `<div class="muted">读取失败：${escapeHtml(err.message)}</div>`;
-      }
-    }
-
-    dlg.bodyEl.addEventListener("click", async (e) => {
-      const cancel = e.target.closest?.(".iv-tc-cancel");
-      if (cancel) {
-        try {
-          await api.post(`/api/interview/task/${encodeURIComponent(cancel.dataset.id)}/cancel`);
-          toast("已请求停止", "warn");
-          await render();
-        } catch (err) {
-          toast(err.message, "bad");
-        }
-        return;
-      }
-      if (e.target.closest?.("#iv-cancel-all")) {
-        try {
-          await api.post("/api/interview/tasks/cancel");
-          toast("已请求停止全部", "warn");
-          await render();
-        } catch (err) {
-          toast(err.message, "bad");
-        }
-        return;
-      }
-      const del = e.target.closest?.(".iv-tc-del");
-      if (del) {
-        try {
-          await api.del(`/api/interview/task/${encodeURIComponent(del.dataset.id)}`);
-          toast("已删除", "ok");
-          await render();
-        } catch (err) {
-          toast(err.message, "bad");
-        }
-        return;
-      }
-      const retry = e.target.closest?.(".iv-tc-retry");
-      if (retry) {
-        try {
-          await api.post(
-            `/api/interview/task/${encodeURIComponent(retry.dataset.id)}/retry`
-          );
-          toast("已重新提交", "ok");
-          await render();
-        } catch (err) {
-          toast(err.message, "bad");
-        }
-      }
-    });
-
-    // 轮询拿到快照后直接重画弹窗，不再另拉接口。
-    taskCenterRender = myRender;
-    render();
-  }
-
-  /**
    * 触发生成（单个或批量，可与其它任务并行）。
    *
    * @param {string[]} ids 职位 ID 列表
@@ -570,37 +432,24 @@ export async function renderInterview(root) {
     }
   }
 
-  /** 画页头「任务中心」角标（在跑任务数）。 */
-  function updateTcBadge() {
-    const badge = root.querySelector("#iv-tc-badge");
-    if (!badge) return;
-    const n = state.runningCount || 0;
-    if (n > 0) {
-      badge.classList.remove("hidden");
-      badge.textContent = String(n);
-    } else {
-      badge.classList.add("hidden");
-    }
-  }
-
-  /** 拉全部任务并重画；有在跑的就继续轮询。 */
+  /**
+   * 拉一次任务并刷新占用态；任务从「在跑」变「结束」时提示并刷列表。
+   * 由挂载、startGenerate 与 WS 事件（queueRefresh）触发，不再自己定时轮询。
+   */
   async function refreshTasks() {
     if (disposed) return;
-    if (pollTimer) {
-      clearTimeout(pollTimer);
-      pollTimer = null;
-    }
+    lastRefreshAt = Date.now();
     try {
-      const data = await api.get("/api/interview/tasks");
+      const data = await api.get("/api/tasks?task_type=interview");
       const tasks = data.tasks || [];
-      const runningCount = data.running_count || 0;
+      const busy = new Map();
+      for (const t of tasks) {
+        if (t.status !== "running") continue;
+        for (const jid of (t.raw && t.raw.job_ids) || []) busy.set(String(jid), t.task_id);
+      }
       const prevBusy = state.busyJobIds;
-      state.runningCount = runningCount;
-      state.busyJobIds = new Map(Object.entries(data.busy_job_ids || {}));
-      updateTcBadge();
-      if (taskCenterRender) taskCenterRender(tasks);
+      state.busyJobIds = busy;
 
-      // 占用岗位变了 → 重画表格（生成按钮禁用态跟着变）
       const busyChanged =
         prevBusy.size !== state.busyJobIds.size ||
         [...state.busyJobIds.keys()].some((k) => !prevBusy.has(k));
@@ -609,7 +458,6 @@ export async function renderInterview(root) {
         else renderRecordsTab();
       }
 
-      // 刚从「在跑」变「结束」的任务：提示 + 刷列表
       const nowRunning = new Set(
         tasks.filter((t) => t.status === "running").map((t) => t.task_id)
       );
@@ -617,7 +465,8 @@ export async function renderInterview(root) {
       for (const t of tasks) {
         if (state.knownRunning.has(t.task_id) && !nowRunning.has(t.task_id)) {
           justFinished = true;
-          if (t.status === "done") toast(`生成完成：${t.question_total || 0} 道题`, "ok");
+          const raw = t.raw || {};
+          if (t.status === "done") toast(`生成完成：${raw.question_total || 0} 道题`, "ok");
           else if (t.status === "error") toast(t.error || "生成失败", "bad");
         }
       }
@@ -627,10 +476,31 @@ export async function renderInterview(root) {
         else await loadRecords();
       }
     } catch {
-      /* 拿不到就下一轮再试 */
     }
+  }
+
+  /**
+   * WS 事件触发的节流刷新：500ms 内最多拉一次。
+   * 生成任务事件很密（每个岗位一条 progress），不节流会把 /api/tasks 打爆。
+   */
+  function queueRefresh() {
     if (disposed) return;
-    pollTimer = setTimeout(refreshTasks, 1500);
+    const wait = 500 - (Date.now() - lastRefreshAt);
+    if (wait <= 0) {
+      refreshTasks();
+      return;
+    }
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      refreshTasks();
+    }, wait);
+  }
+
+  /** 统一 WS 的任务事件：只认 interview 类型，重拉一次拿全量再重画。 */
+  function onTaskEvent(m) {
+    if (m.task_type !== "interview") return;
+    queueRefresh();
   }
 
   /** 拉岗位列表。 */
@@ -671,11 +541,15 @@ export async function renderInterview(root) {
   for (const btn of root.querySelectorAll(".settings-tab")) {
     btn.addEventListener("click", () => show(btn.dataset.tab));
   }
-  root.querySelector("#iv-task-center")?.addEventListener("click", () => openTaskCenter());
   pane.addEventListener("change", onPaneChange);
   pane.addEventListener("click", onPaneClick);
 
-  // 首屏：抓取批次 + 简历 + 任务角标 + 岗位列表
+  const wsOffs = [
+    ws.on("task.progress", onTaskEvent),
+    ws.on("task.finished", onTaskEvent),
+  ];
+  ws.connect();
+
   try {
     const [ct, rs] = await Promise.all([
       api.get("/api/crawl/tasks?limit=100"),
@@ -684,16 +558,16 @@ export async function renderInterview(root) {
     state.crawlTasks = ct.items || [];
     state.resumes = rs.items || [];
   } catch {
-    /* 列表拉不到就空着，主表还能看 */
   }
   await loadJobs();
   refreshTasks();
 
   return () => {
     disposed = true;
-    if (pollTimer) {
-      clearTimeout(pollTimer);
-      pollTimer = null;
+    wsOffs.forEach((off) => off());
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
     }
   };
 }

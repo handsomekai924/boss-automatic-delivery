@@ -1,15 +1,16 @@
-/** 工作台：便当格总览 + 实时任务状态 */
+/** 工作台：便当格总览 */
 
 import { api } from "../api.js";
-import { fmtTime, taskPanel, taskStateOf, renderEvents, toast } from "../ui.js";
+import { fmtTime, toast } from "../ui.js";
 
 /**
- * 渲染工作台：会话 / 职位 / AI / 简历卡片 + 环境自检 + 搜索任务面板。
+ * 渲染工作台：会话 / 职位 / AI / 简历卡片 + 环境自检。
  *
  * 会话卡片订阅舰桥的 `boss:session` 广播，避免只在渲染时取一次状态就卡在「离线」。
+ * 采集等任务的进度不在这画，也不放跳转按钮——任务中心的唯一入口在顶栏。
  *
  * @param {HTMLElement} root 挂载容器
- * @returns {Promise<() => void>} 卸载时清定时器、退订广播
+ * @returns {Promise<() => void>} 卸载时退订广播
  */
 export async function renderHome(root) {
   root.innerHTML = `
@@ -70,10 +71,10 @@ export async function renderHome(root) {
 
       <div class="card span-7">
         <div class="card-head">
-          <h3 class="card-title">找职位进度</h3>
-          <span class="card-sub" id="crawl-phase">空闲</span>
+          <h3 class="card-title">任务中心</h3>
+          <span class="card-sub">顶栏入口</span>
         </div>
-        <div id="home-crawl-task"></div>
+        <div class="muted">采集、匹配、投递等任务的进度、当前状态、停止和重试都挪到任务中心了；跑着的任务会在顶栏「任务」角标上亮起。</div>
       </div>
 
       <div class="card span-5 lift" id="card-resume">
@@ -283,59 +284,7 @@ export async function renderHome(root) {
       .join("");
   }).catch(() => {});
 
-  /** 后端 phase 英文内部阶段名 → 页面文案。 */
-  const PHASE_LABELS = {
-    prepare: "准备中",
-    client: "连接中",
-    filter: "按条件筛选",
-    stoken: "验证身份",
-    crawl: "翻页搜索",
-  };
-
-  const crawl = taskPanel({ title: "职位搜索", stopLabel: "停止搜索" });
-  $("home-crawl-task").appendChild(crawl.el);
-  crawl.onStop(async () => {
-    try {
-      const s = await api.get("/api/crawl/status");
-      if (s.task_id) await api.post(`/api/crawl/${s.task_id}/cancel`);
-    } catch { }
-  });
-  crawl.update({ status: "idle", percent: 0 });
-
-  let timer = setInterval(async () => {
-    try {
-      const s = await api.get("/api/crawl/status");
-      $("crawl-phase").textContent = s.status && s.task_id
-        ? PHASE_LABELS[s.phase] || PHASE_LABELS[s.status] || s.phase || s.status
-        : "空闲";
-      if (!s.task_id) {
-        crawl.update({ status: "idle", percent: 0 });
-        return;
-      }
-      const p = s.progress || {};
-      const pages = p.pages || 0;
-      const maxPages = s.params?.max_pages || 0;
-      const percent = maxPages > 0 ? Math.min(100, (pages / maxPages) * 100) : (s.status === "done" ? 100 : undefined);
-      crawl.update({
-        status: s.status,
-        percent,
-        current: s.status === "running"
-          ? PHASE_LABELS[s.phase] || "进行中"
-          : (s.stopped_reason || s.error || ""),
-        counts: [
-          ["页", `${pages}${maxPages ? " / " + maxPages : ""}`],
-          ["新职位", `+${p.inserted || 0}`],
-          ["更新", `${p.updated || 0}`],
-          ["职位描述", `${p.desc_ok || 0} 成功 / ${p.desc_failed || 0} 失败`],
-        ],
-        error: s.status === "error" ? s.error : undefined,
-        log: renderEvents(s.events, { limit: 12, nameKey: "event" }),
-      });
-    } catch { }
-  }, 1500);
-
   return () => {
-    clearInterval(timer);
     window.removeEventListener("boss:session", onSession);
   };
 }

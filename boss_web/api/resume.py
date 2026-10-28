@@ -23,7 +23,6 @@ from ..services.document_text import (
     extract_text,
 )
 from ..services.llm_config_store import load_config
-from ..services.resume_analyzer import analyze_tasks
 from ..services.resume_parser import ResumeParseError, parse_and_stamp
 from ..services.resume_revision import build_diff, markdown_to_text
 from ..services.resume_revision_free import (
@@ -57,14 +56,6 @@ MAX_BYTES = 2 * 1024 * 1024
 MAX_BINARY_BYTES = 8 * 1024 * 1024
 
 _EXT_HINT = "只支持 Word（.docx）、PDF（.pdf）、Markdown（.md）或纯文本（.txt）"
-
-
-class AnalyzeBody(BaseModel):
-    """启动批量人岗分析。"""
-
-    resume_id: str
-    job_ids: list[str] = Field(default_factory=list)
-    top_k: int = Field(20, ge=1, le=50)
 
 
 class ReviseStartBody(BaseModel):
@@ -207,29 +198,16 @@ def get_resume(resume_id: str) -> dict[str, Any]:
 
 @router.post("/item/{resume_id}/parse")
 def parse_resume_item(resume_id: str) -> dict[str, Any]:
-    """LLM 固定模板解析（同步，超时按 `LLM_TIMEOUT`）；重跑会覆盖 `meta.llm`。"""
-    try:
-        draft = load_resume(resume_id)
-    except FileNotFoundError as exc:
-        raise NotFoundError(f"简历不存在：{resume_id}") from exc
+    """提交 LLM 解析任务（异步，立即返回 task_id）；同一份简历解析中不可重复提交。"""
+    from ..services.parse_task import parse_tasks
 
-    cfg = load_config()
-    if not cfg.configured:
-        raise ValidationWebError(
-            "LLM 还没配置，请先到「模型」页填好 API Key / Base URL / 模型名"
-        )
-    try:
-        llm_payload = parse_and_stamp(draft.raw, model=cfg.model, config=cfg)
-    except ResumeParseError as exc:
-        raise ValidationWebError(str(exc)) from exc
-
-    save_llm_parse(resume_id, llm_payload)
-    return {"resume_id": resume_id, "llm": llm_payload}
+    task = parse_tasks.start(resume_id=resume_id)
+    return {"resume_id": resume_id, "task_id": task.task_id, "status": task.status}
 
 
 @router.get("/item/{resume_id}/parse")
 def get_parse(resume_id: str) -> dict[str, Any]:
-    """读已保存的 LLM 解析结果。"""
+    """读已保存的 LLM 解析结果（不触发解析）。"""
     try:
         llm = load_llm_parse(resume_id)
     except FileNotFoundError as exc:
@@ -243,36 +221,6 @@ def remove_resume(resume_id: str) -> dict[str, Any]:
     if not delete_resume(resume_id):
         raise NotFoundError(f"简历不存在：{resume_id}")
     return {"deleted": True}
-
-
-@router.post("/analyze")
-def start_analyze(body: AnalyzeBody) -> dict[str, Any]:
-    """启动批量人岗分析任务。"""
-    task = analyze_tasks.start(
-        resume_id=body.resume_id,
-        job_ids=body.job_ids,
-        top_k=body.top_k,
-    )
-    return task.snapshot()
-
-
-@router.get("/analyze/status")
-def analyze_status() -> dict[str, Any]:
-    """当前分析任务快照。"""
-    return analyze_tasks.snapshot()
-
-
-@router.get("/analyze/{task_id}")
-def analyze_task(task_id: str) -> dict[str, Any]:
-    """按 id 取分析任务快照。"""
-    return analyze_tasks.snapshot(task_id)
-
-
-@router.post("/analyze/{task_id}/cancel")
-def cancel_analyze(task_id: str) -> dict[str, Any]:
-    """取消分析任务。"""
-    task = analyze_tasks.cancel(task_id)
-    return task.snapshot()
 
 
 @router.get("/analyses")

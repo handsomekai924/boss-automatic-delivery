@@ -52,6 +52,7 @@ from boss_login.verify import (
 
 from .. import config as C
 from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
+from .task_runtime import POLICY_GLOBAL_SINGLE, TaskTypeSpec, hub
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,15 @@ ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
 
 _TERMINAL = {ST_DONE, ST_ERROR, ST_CANCELLED}
+
+hub.register(
+    TaskTypeSpec(
+        "login",
+        title="登录",
+        policy=POLICY_GLOBAL_SINGLE,
+        title_fn=lambda req: f"登录（{req.get('kind') or 'sms'}）",
+    )
+)
 
 
 @dataclass
@@ -326,6 +336,7 @@ class LoginTaskManager:
         if len(digits) < 11:
             raise ValidationWebError("手机号看起来不对，请填 11 位数字")
 
+        hub.occupy("login", request={"kind": "sms"})
         with self._lock:
             if self._current is not None and not self._current.finished:
                 raise ConflictError("已有登录流程在进行中，请先完成或取消")
@@ -335,6 +346,7 @@ class LoginTaskManager:
             )
             self._tasks[task.task_id] = task
             self._current = task
+        hub.track(task, task_type="login", request={"kind": "sms", "phone": digits})
 
         thread = threading.Thread(
             target=self._run_sms_login, args=(task,), daemon=True, name=f"login-{task.task_id}"
@@ -354,6 +366,7 @@ class LoginTaskManager:
         Raises:
             ConflictError: 已有登录流程在进行中。
         """
+        hub.occupy("login", request={"kind": "qr"})
         with self._lock:
             if self._current is not None and not self._current.finished:
                 raise ConflictError("已有登录流程在进行中，请先完成或取消")
@@ -362,6 +375,7 @@ class LoginTaskManager:
             task.qr_pk = pk
             self._tasks[task.task_id] = task
             self._current = task
+        hub.track(task, task_type="login", request={"kind": "qr"})
 
         thread = threading.Thread(
             target=self._run_qr_login, args=(task,), daemon=True, name=f"qr-{task.task_id}"

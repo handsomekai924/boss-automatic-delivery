@@ -2,6 +2,7 @@
 
 import { api } from "./api.js";
 import { toast, modal, escapeHtml } from "./ui.js";
+import { watchTask } from "./task_watch.js";
 
 const TYPES = ["技术深度", "项目经历", "场景", "软技能"];
 
@@ -23,13 +24,13 @@ export function openInterviewPrep(opts) {
     wide: true,
     body: `<div class="muted">正在读取面试题…</div>`,
     onClose: () => {
-      stopPoll();
+      stopGenWatch();
       document.removeEventListener("keydown", onKey);
     },
   });
 
-  /** @type {ReturnType<typeof setTimeout>|null} */
-  let pollTimer = null;
+  /** @type {?() => void} 生成任务观察器的 stop()。 */
+  let stopWatch = null;
   /** @type {Array<object>} */
   let questions = [];
   let stats = { question_count: 0 };
@@ -45,11 +46,11 @@ export function openInterviewPrep(opts) {
 
   const body = dlg.bodyEl;
 
-  /** 停掉任务轮询。 */
-  function stopPoll() {
-    if (pollTimer) {
-      clearTimeout(pollTimer);
-      pollTimer = null;
+  /** 停掉生成任务观察（关弹窗 / 换任务前）。 */
+  function stopGenWatch() {
+    if (stopWatch) {
+      stopWatch();
+      stopWatch = null;
     }
   }
 
@@ -288,33 +289,41 @@ export function openInterviewPrep(opts) {
     if (onChanged) onChanged();
   }
 
-  /** 轮询生成任务；跑完就重拉列表。 */
-  function watchTask(taskId) {
-    stopPoll();
+  /**
+   * 观察生成任务：统一 WS 事件驱动拉状态（task_watch 内部节流，断线回落 5s 轮询），
+   * 跑完重拉列表。取代原来的 1.5s setTimeout 轮询，渲染与收尾逻辑不动。
+   *
+   * @param {string} taskId 生成任务 id
+   */
+  function watchGenTask(taskId) {
+    stopGenWatch();
     generating = true;
     renderHead();
-    const tick = async () => {
-      try {
-        const task = await api.get(`/api/interview/task/${encodeURIComponent(taskId)}`);
-        renderTask(task);
-        if (task.status === "running") {
-          pollTimer = setTimeout(tick, 1500);
-          return;
-        }
-        generating = false;
-        cursor = 0;
-        await loadList();
-        if (task.status === "done") {
-          toast(`已生成 ${task.question_total || 0} 道题`, "ok");
-          notifyChanged();
-        } else if (task.status === "error") toast(task.error || "生成失败", "bad");
-      } catch (err) {
-        generating = false;
-        renderHead();
-        toast(err.message, "bad");
+    stopWatch = watchTask(
+      taskId,
+      () => api.get(`/api/interview/task/${encodeURIComponent(taskId)}`),
+      {
+        taskType: "interview",
+        onStatus: async (task) => {
+          try {
+            renderTask(task);
+            if (task.status === "running") return;
+            generating = false;
+            cursor = 0;
+            await loadList();
+            if (task.status === "done") {
+              toast(`已生成 ${task.question_total || 0} 道题`, "ok");
+              notifyChanged();
+            } else if (task.status === "error") toast(task.error || "生成失败", "bad");
+          } catch (err) {
+            generating = false;
+            renderHead();
+            toast(err.message, "bad");
+          }
+        },
+        isDone: (task) => ["done", "error", "cancelled"].includes(task.status),
       }
-    };
-    tick();
+    );
   }
 
   /** 触发生成（只出这个岗位的题，整套替换）。 */
@@ -326,7 +335,7 @@ export function openInterviewPrep(opts) {
         encrypt_job_ids: [jobId],
       });
       renderTask(task);
-      watchTask(task.task_id);
+      watchGenTask(task.task_id);
       toast("已开始生成面试题", "ok");
     } catch (err) {
       toast(err.message, "bad");
@@ -378,7 +387,7 @@ export function openInterviewPrep(opts) {
           question_count: count,
         });
         renderTask(task);
-        watchTask(task.task_id);
+        watchGenTask(task.task_id);
         toast(`已开始补充「${type}」${count} 条`, "ok");
       } catch (err) {
         toast(err.message, "bad");
@@ -484,7 +493,6 @@ export function openInterviewPrep(opts) {
   document.addEventListener("keydown", onKey);
 
   body.addEventListener("click", async (e) => {
-    // 侧边箭头：只展开/收起二级题目，不改选中题型。
     const caret = e.target.closest?.(".iqd-caret");
     if (caret) {
       e.preventDefault();
@@ -550,15 +558,13 @@ export function openInterviewPrep(opts) {
   });
 
   (async () => {
-    // 先看有没有在跑的任务，再拉题。
     try {
       const task = await api.get("/api/interview/task/current");
       if (task && task.status === "running" && task.analysis_id === analysisId) {
         renderTask(task);
-        watchTask(task.task_id);
+        watchGenTask(task.task_id);
       }
     } catch {
-      /* 拿不到任务状态就当空闲 */
     }
     await loadList();
   })();

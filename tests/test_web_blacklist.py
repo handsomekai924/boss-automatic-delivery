@@ -448,12 +448,36 @@ def test_crawl_task_detail_done_counts_empty():
     assert task.progress["desc_done"] == 1
 
 
-def test_legacy_analyze_includes_safety_snapshot():
-    """老 /api/resume/analyze 路径仍可达，match 也必须带完整安全快照。"""
-    from boss_web.services.resume_analyzer import _safety_snapshot
+def test_crawl_task_snapshot_feeds_task_center():
+    """任务中心卡片的「当前/进度」直接读 snapshot：阶段给中文，进度按页数算。
+
+    页面上不再画采集进度条，任务中心要能自己读懂跑在哪一步——`current`
+    必须是人话（不是内部代号），`done/total` 给页数好画确定态进度条；
+    空参数建任务不炸，`total` 给 0 供前端回落不确定态。
+    """
+    from boss_web.services.crawl_task import CrawlTask
+
+    task = CrawlTask({"max_pages": 5})
+    task.phase = "crawl"
+    task.push({"event": "page", "page": 1, "inserted": 2})
+    snap = task.snapshot()
+    assert snap["current"] == "翻页搜索"
+    assert snap["done"] == 1
+    assert snap["total"] == 5
+
+    blank = CrawlTask({})
+    blank.phase = "stoken"
+    snap = blank.snapshot()
+    assert snap["current"] == "验证身份"
+    assert snap["total"] == 0
+
+
+def test_match_includes_safety_snapshot():
+    """match 结果必须带完整安全快照（安全状态字段一个不能少）。"""
+    from boss_web.services.match_task import _blacklist_snapshot
 
     job = make_job("z1", brand_name="甲公司", job_desc="写代码")
-    snap = _safety_snapshot(job)
+    snap = _blacklist_snapshot(job)
     for key in (
         "is_blacklisted",
         "company_blacklisted",

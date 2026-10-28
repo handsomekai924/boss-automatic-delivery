@@ -1,15 +1,18 @@
 /** 找工作：筛选 · 搜索 · 卡片流 · 删除 */
 
 import { api } from "../api.js";
-import { toast, modal, escapeHtml, fmtTime, taskPanel, renderEvents, fmtEta } from "../ui.js";
+import { toast, escapeHtml } from "../ui.js";
+import { watchTask } from "../task_watch.js";
 import { openJobDetail } from "../job_detail.js";
 import { openInterviewPrep } from "../interview_prep.js";
 
 /**
  * 渲染找工作页：采集入口、筛选、职位卡片流、补全描述。
  *
+ * 采集进度不在这画，统一在任务中心看（本页只跟到结束好收结果）。
+ *
  * @param {HTMLElement} root 挂载容器
- * @returns {Promise<() => void>} 卸载时清搜索 / 补全的轮询
+ * @returns {Promise<() => void>} 卸载时停掉搜索 / 补全两个任务观察器
  */
 export async function renderJobs(root) {
   root.innerHTML = `
@@ -34,7 +37,6 @@ export async function renderJobs(root) {
           <button class="btn primary" id="btn-crawl">开始采集</button>
           <button class="btn danger hidden" id="btn-stop">停止采集</button>
         </div>
-        <div id="crawl-task" class="mt-16"></div>
       </div>
     </div>
 
@@ -71,17 +73,6 @@ export async function renderJobs(root) {
       </div>
     </div>
 
-    <div class="card mb-16 hidden" id="desc-panel">
-      <div class="card-head">
-        <h3 class="card-title">补全职位描述</h3>
-        <span class="card-sub" id="desc-phase">空闲</span>
-      </div>
-      <div id="desc-task"></div>
-      <div class="btn-row mt-12">
-        <button class="btn ghost" id="btn-desc-hide">收起</button>
-      </div>
-    </div>
-
     <div class="job-grid" id="job-grid"></div>
     <div class="flex center gap-8 mt-24" style="justify-content:center">
       <button class="btn ghost" id="btn-prev">上一页</button>
@@ -95,44 +86,13 @@ export async function renderJobs(root) {
   let offset = 0;
   let totalJobs = 0;
   const limit = 24;
-  let pollTimer = null;
+  /** @type {?() => void} 搜索任务观察器的停止句柄（watchTask 返回），null = 没在观察。 */
+  let crawlStop = null;
   let crawlTaskId = null;
   let collectionConfig = { collection: {}, search: {} };
   let category = "";
   let jdStatus = "";
   let interviewSummary = {};
-  const PHASE_LABELS = {
-    prepare: "准备中",
-    client: "连接中",
-    filter: "按条件筛选",
-    stoken: "验证身份",
-    crawl: "翻页搜索",
-  };
-
-  const crawlPanel = taskPanel({ title: "职位搜索", stopLabel: "停止搜索" });
-  $("crawl-task").appendChild(crawlPanel.el);
-  crawlPanel.onStop(async () => {
-    if (!crawlTaskId) return;
-    try {
-      await api.post(`/api/crawl/${crawlTaskId}/cancel`);
-      toast("已请求停止，翻完当前页就收手", "warn");
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-  });
-  crawlPanel.update({ status: "idle", percent: 0 });
-
-  const descPanelUi = taskPanel({ title: "补全职位描述", stopLabel: "停止补全" });
-  $("desc-task").appendChild(descPanelUi.el);
-  descPanelUi.onStop(async () => {
-    try {
-      const s = await api.post("/api/jobs/fetch-descriptions/cancel");
-      renderDesc(s);
-      toast("已请求停止，取完当前这条就收手", "warn");
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-  });
 
   /**
    * 把当前采集配置拼成一行人话摘要。
@@ -232,53 +192,31 @@ export async function renderJobs(root) {
     }
   });
 
-  /** 开始轮询搜索任务进度并刷面板；结束后重载列表。 */
+  /**
+   * 观察搜索任务直到结束，结束后重载列表。
+   *
+   * 进度条 / 日志 / 停止都在任务中心看（入口在顶栏），本页只跟到
+   * 结束好收结果。原来是 1s setInterval 轮询，现在交给 watchTask：WS 有
+   * `crawl` 任务事件才拉 status（400ms 节流），断线由它内部降级轮询。
+   */
   function startPoll() {
-    clearInterval(pollTimer);
-    pollTimer = setInterval(async () => {
-      if (!crawlTaskId) return;
-      try {
-        const s = await api.get(`/api/crawl/${crawlTaskId}`);
-        const p = s.progress || {};
-        const maxPages = s.params?.max_pages || 5;
-        const pct = Math.min(100, Math.round(((p.pages || 0) / maxPages) * 100));
-        $("crawl-phase").textContent = PHASE_LABELS[s.phase] || PHASE_LABELS[s.status] || s.phase || "空闲";
-
-        const counts = [
-          ["页", `${p.pages || 0} / ${maxPages}`],
-          ["新职位", `+${p.inserted || 0}`],
-          ["更新", `${p.updated || 0}`],
-        ];
-        if (p.desc_done || p.desc_skipped) {
-          counts.push(["职位描述", `${p.desc_ok || 0}/${p.desc_done || 0} 成功`]);
-          if (p.desc_skipped) counts.push(["跳过", `${p.desc_skipped}`]);
-          if (p.desc_failed) counts.push(["失败", `${p.desc_failed}`]);
-        }
-
-        crawlPanel.update({
-          status: s.status,
-          percent: s.status === "running" ? pct : 100,
-          current: s.status === "running"
-            ? (PHASE_LABELS[s.phase] || `第 ${p.pages || 0} 页`)
-            : (s.error || s.stopped_reason || ""),
-          counts,
-          error: s.status === "error" ? s.error : undefined,
-          log: renderEvents(s.events, {
-            limit: 20,
-            nameKey: "event",
-          }),
-        });
-
+    const taskId = crawlTaskId;
+    if (!taskId) return;
+    if (crawlStop) crawlStop();
+    crawlStop = watchTask(taskId, () => api.get(`/api/crawl/${taskId}`), {
+      taskType: "crawl",
+      isDone: (s) => ["done", "error", "cancelled"].includes(s.status),
+      onStatus: (s) => {
+        $("crawl-phase").textContent = s.status === "running" ? (s.current || "进行中") : "空闲";
         if (["done", "error", "cancelled"].includes(s.status)) {
-          clearInterval(pollTimer);
-          pollTimer = null;
+          if (crawlStop) { crawlStop(); crawlStop = null; }
           $("btn-crawl").classList.remove("hidden");
           $("btn-stop").classList.add("hidden");
           loadJobs();
           toast(s.status === "error" ? "搜索出错：" + (s.error || "") : "搜索结束", s.status === "error" ? "bad" : "ok");
         }
-      } catch { }
-    }, 1000);
+      },
+    });
   }
 
   /** 按当前筛选条件拉一页职位并渲染。 */
@@ -489,61 +427,33 @@ export async function renderJobs(root) {
     }
   });
 
-  let descPollTimer = null;
+  /** @type {?string} 当前补抓任务 id——只用来对上 WS 的 `desc` 事件，status 仍读全局端点。 */
+  let descTaskId = null;
+  /** @type {?() => void} 补抓任务观察器的停止句柄（watchTask 返回），null = 没在观察。 */
+  let descStop = null;
 
-  /**
-   * 用补全描述任务状态刷进度面板；安全网关停时从事件里捞出原因。
-   *
-   * @param {Object<string, any>} s 任务状态（status / progress / events）
-   */
-  function renderDesc(s) {
-    const p = s.progress || {};
-    const total = p.total || 0;
-    const done = p.done || 0;
-    const interval = Number(p.interval || 1);
-    const running = s.status === "running";
-    const panel = $("desc-panel");
-    panel.classList.remove("hidden");
-    $("desc-phase").textContent = running ? "进行中" : "空闲";
-    $("btn-fetch-desc").disabled = running;
-    $("btn-fetch-desc").textContent = running ? `补全 ${done}/${total}` : "补全描述";
-
-    const stopEvent = (s.events || []).find((e) => e.event === "stopped");
-    const eta = running ? fmtEta((total - done) * (interval + 0.6)) : undefined;
-
-    descPanelUi.update({
-      status: s.status,
-      percent: total ? (done / total) * 100 : running ? 5 : 100,
-      current: running ? (p.current || "拉取中") : (stopEvent?.reason || s.error || ""),
-      counts: [
-        ["进度", `${done}/${total}`],
-        ["有描述", `${p.ok || 0}`],
-        ["空", `${p.skipped || 0}`],
-        ["失败", `${p.failed || 0}`],
-        ...(p.already ? [["跳过已有", `${p.already}`]] : []),
-        ["间隔", `${interval}s`],
-      ],
-      eta,
-      error: s.status === "error" ? s.error : undefined,
-      log: renderEvents(s.events, { limit: 20, nameKey: "event" }),
-    });
-  }
-
-  /** 停掉补全描述的轮询并恢复按钮。 */
+  /** 停掉补全描述的观察并恢复按钮。 */
   function stopDescPoll() {
-    clearInterval(descPollTimer);
-    descPollTimer = null;
+    if (descStop) { descStop(); descStop = null; }
     $("btn-fetch-desc").disabled = false;
     $("btn-fetch-desc").textContent = "补全描述";
   }
 
-  /** 开始轮询补全描述任务；结束后 toast 汇总并重载列表。 */
+  /**
+   * 观察补全描述任务；结束后 toast 汇总并重载列表。
+   *
+   * 进度不在这画——统一在任务中心看；这里只留「结束 → 提示 + 重载 + 按钮复位」。
+   */
   function startDescPoll() {
-    clearInterval(descPollTimer);
-    descPollTimer = setInterval(async () => {
-      try {
-        const s = await api.get("/api/jobs/fetch-descriptions/status");
-        renderDesc(s);
+    if (descStop) { descStop(); descStop = null; }
+    if (!descTaskId) return;
+    descStop = watchTask(descTaskId, () => api.get("/api/jobs/fetch-descriptions/status"), {
+      taskType: "desc",
+      isDone: (s) => ["done", "error", "cancelled"].includes(s.status),
+      onStatus: (s) => {
+        const running = s.status === "running" || s.status === "pending";
+        $("btn-fetch-desc").disabled = running;
+        $("btn-fetch-desc").textContent = running ? "补全中…" : "补全描述";
         if (["done", "error", "cancelled"].includes(s.status)) {
           stopDescPoll();
           const p = s.progress || {};
@@ -560,26 +470,23 @@ export async function renderJobs(root) {
           );
           loadJobs();
         }
-      } catch { }
-    }, 1200);
+      },
+    });
   }
 
   $("btn-fetch-desc").addEventListener("click", async () => {
-    if (descPollTimer) return toast("补全任务已在跑", "warn");
+    if (descStop) return toast("补全任务已在跑", "warn");
     try {
       const task = await api.post("/api/jobs/fetch-descriptions", { limit: 0 });
       toast(`补全已开始（${task.progress?.total ?? "?"} 条）`, "ok");
-      renderDesc(task);
+      descTaskId = task.task_id || null;
+      $("btn-fetch-desc").disabled = true;
+      $("btn-fetch-desc").textContent = "补全中…";
       startDescPoll();
     } catch (err) {
       stopDescPoll();
       toast(err.message, "bad");
     }
-  });
-
-  $("btn-desc-hide").addEventListener("click", () => {
-    if (descPollTimer) return toast("还在跑，先停掉再收起", "warn");
-    $("desc-panel").classList.add("hidden");
   });
 
   $("btn-prev").addEventListener("click", () => {
@@ -611,15 +518,15 @@ export async function renderJobs(root) {
   try {
     const s = await api.get("/api/jobs/fetch-descriptions/status");
     if (s.task_id && s.status === "running") {
-      renderDesc(s);
+      descTaskId = s.task_id;
+      $("btn-fetch-desc").disabled = true;
+      $("btn-fetch-desc").textContent = "补全中…";
       startDescPoll();
-    } else if (s.task_id) {
-      renderDesc(s);
     }
   } catch { }
 
   return () => {
-    clearInterval(pollTimer);
-    clearInterval(descPollTimer);
+    if (crawlStop) { crawlStop(); crawlStop = null; }
+    if (descStop) { descStop(); descStop = null; }
   };
 }
