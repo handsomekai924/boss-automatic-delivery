@@ -12,9 +12,22 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import boss_db
 from boss_jobs.models import Job, PageResult
-from boss_jobs.store import JobStore
+from boss_jobs.store import DEFAULT_SITE, JobStore
 from boss_web import create_app
+
+
+def _task_site(task_id: str) -> str:
+    """直接读 `crawl_tasks.site`（不走 `_row_to_crawl_task`，免得被它的兜底骗了）。"""
+    conn = boss_db.connect(boss_db.resolve_db_path(), migrate=False)
+    try:
+        row = conn.execute(
+            "SELECT site FROM crawl_tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return str(row[0]) if row else ""
 
 
 @pytest.fixture
@@ -348,3 +361,80 @@ def test_api_match_task_batch_requires_resume(client: TestClient):
     r = client.post("/api/crawl/tasks/tk_1/match", json={"resume_id": ""})
     assert r.status_code == 422
     assert "简历" in r.json()["message"]
+
+
+# --- 站点归属（多平台）：批次账按站点分账 ---
+
+
+def test_create_crawl_task_站点归属落库():
+    """`crawl_tasks.site` 是批次账的分账键，跟 `jobs.site` 同一套口径。"""
+    with JobStore() as store:
+        store.create_crawl_task("tk_site", site="51job")
+    assert _task_site("tk_site") == "51job"
+
+
+def test_create_crawl_task_不传站点吃兜底():
+    """单站点旧账口径：没传就跟列默认同值，**不是空串**。"""
+    with JobStore() as store:
+        store.create_crawl_task("tk_fallback")
+    assert _task_site("tk_fallback") == DEFAULT_SITE == "boss"
+
+
+def test_list_crawl_tasks_按站点切片():
+    """`site=None` = 跨站点全量（共用口）；传了就只列本站批次（站点口）。"""
+    with JobStore() as store:
+        store.create_crawl_task("tk_a", created_at=1.0, site="boss")
+        store.create_crawl_task("tk_b", created_at=2.0, site="51job")
+        store.create_crawl_task("tk_c", created_at=3.0, site="boss")
+
+        assert [t["task_id"] for t in store.list_crawl_tasks(site="boss")] == ["tk_c", "tk_a"]
+        assert [t["task_id"] for t in store.list_crawl_tasks(site="51job")] == ["tk_b"]
+        assert len(store.list_crawl_tasks()) == 3
+
+        assert store.count_crawl_tasks(site="boss") == 2
+        assert store.count_crawl_tasks(site="51job") == 1
+        assert store.count_crawl_tasks() == 3
+
+
+def test_批次回包带site():
+    """共用页要标来源，`site` 得随行出门。"""
+    with JobStore() as store:
+        store.create_crawl_task("tk_row", site="51job")
+        assert store.get_crawl_task("tk_row")["site"] == "51job"
+
+
+def test_api_共用批次列表跨站点(client: TestClient):
+    """共用口**不切片**：匹配/出题/简历优化选批次要看得见所有来源。
+
+    这条也是别名的守门员——`/api/crawl/tasks` 一旦被 legacy 别名接走，
+    `resolve_site` 会给它套上 `site="boss"`，51job 的批次立刻从列表里消失。
+    """
+    with JobStore() as store:
+        store.create_crawl_task("tk_boss", created_at=1.0, site="boss")
+        store.create_crawl_task("tk_51", created_at=2.0, site="51job")
+
+    body = client.get("/api/crawl/tasks").json()
+    assert body["total"] == 2
+    assert {i["site"] for i in body["items"]} == {"boss", "51job"}
+    assert {i["task_id"] for i in body["items"]} == {"tk_boss", "tk_51"}
+
+
+def test_api_站点口批次列表只列本站(client: TestClient):
+    """`/api/sites/{site}/crawl/tasks` 是切片口，别家站点的批次不串进来。"""
+    with JobStore() as store:
+        store.create_crawl_task("tk_boss", created_at=1.0, site="boss")
+        store.create_crawl_task("tk_51", created_at=2.0, site="51job")
+
+    body = client.get("/api/sites/boss/crawl/tasks").json()
+    assert [i["task_id"] for i in body["items"]] == ["tk_boss"]
+    assert body["total"] == 1
+
+
+def test_api_站点口批次详情照样可读(client: TestClient):
+    """详情是共用读法（跟 `jobs.py` 的 `get_job` 同一条先例）：路径只切列表。
+
+    平台页可能要跳去看一个跨站点批次的 JD，那里没有站点语义要守。
+    """
+    with JobStore() as store:
+        store.create_crawl_task("tk_51", site="51job")
+    assert client.get("/api/sites/boss/crawl/tasks/tk_51").status_code == 200

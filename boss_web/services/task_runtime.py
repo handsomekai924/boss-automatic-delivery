@@ -69,9 +69,10 @@ class TaskTypeSpec:
         title: 任务中心展示名。
         policy: 并发策略，取 `POLICY_*`。
         key_fn: `PER_KEY_SINGLE` 时从启动参数算占用 key；可回多个（面试题按岗位占用）。
-        max_parallel: `UNLIMITED` 时的全局并发上限；`None` = 不限。
-        mutual_group: 互斥组——同组任务同时只能跑一个（抓取/补抓共用站点通道）。
+        max_parallel: `UNLIMITED` 时的并发上限（按站点计）；`None` = 不限。
+        mutual_group: 互斥组——同站点同组任务同时只能跑一个（抓取/补抓共用站点通道）。
         title_fn: 从启动参数算任务卡标题。
+        site: 这类任务走哪个站点的通道；空 = 共用（简历解析这类不碰站点的）。
     """
 
     def __init__(
@@ -84,6 +85,7 @@ class TaskTypeSpec:
         max_parallel: int | None = None,
         mutual_group: str = "",
         title_fn: Callable[[dict[str, Any]], str] | None = None,
+        site: str = "",
     ) -> None:
         """初始化。"""
         self.task_type = task_type
@@ -93,6 +95,7 @@ class TaskTypeSpec:
         self.max_parallel = max_parallel
         self.mutual_group = mutual_group or task_type
         self.title_fn = title_fn
+        self.site = site
 
 
 def spec_keys(spec: TaskTypeSpec, request: dict[str, Any]) -> list[str]:
@@ -103,6 +106,16 @@ def spec_keys(spec: TaskTypeSpec, request: dict[str, Any]) -> list[str]:
     if isinstance(raw, str):
         return [raw] if raw else [""]
     return [str(k) for k in raw if str(k)] or [""]
+
+
+def site_of(spec: TaskTypeSpec, request: dict[str, Any]) -> str:
+    """算这次启动走哪个站点的通道；与 `track()` 的站点解析同一条规则。
+
+    占用一律按 `(site, key)` 记账：站点是通道边界，同型任务按站点排队
+    （docs/multiplatform-console-redesign.md 6.5）。站点为空 = 共用任务，
+    退化成原来的全局语义，所以简历解析这类不碰站点的行为不变。
+    """
+    return str(request.get("site") or "") or spec.site
 
 
 class TaskRecord:
@@ -116,6 +129,7 @@ class TaskRecord:
         title: 任务卡标题。
         ref: 业务任务对象（`CrawlTask` / `MatchTask` / …）。
         retry_fn: 重试入口（可空）。
+        site: 站点 id；空 = 共用。进快照与 WS 信封，供前端按站点过滤/分账。
     """
 
     def __init__(
@@ -128,6 +142,7 @@ class TaskRecord:
         title: str,
         ref: Any,
         retry_fn: Callable[[], Any] | None = None,
+        site: str = "",
     ) -> None:
         """初始化。"""
         self.task_id = task_id
@@ -137,6 +152,7 @@ class TaskRecord:
         self.title = title
         self.ref = ref
         self.retry_fn = retry_fn
+        self.site = site
 
 
 class TaskHub:
@@ -178,14 +194,18 @@ class TaskHub:
     def occupy(self, task_type: str, *, request: dict[str, Any] | None = None) -> list[str]:
         """提交前的占用检查；冲突抛 `ConflictError`，通过则回占用 key 列表。
 
-        - `GLOBAL_SINGLE`：该类型已有未结束任务就拒；
-        - `PER_KEY_SINGLE`：同 key 未结束就拒；
-        - `UNLIMITED`：只看 `max_parallel`；
-        - 互斥组：同 `mutual_group` 里其它类型有未结束任务也拒。
+        占用按 `(site, key)` 记账——站点是通道边界，同型任务按站点排队
+        （docs 6.5）；站点为空的共用任务退化成原来的全局语义。
+
+        - `GLOBAL_SINGLE`：同站点该类型已有未结束任务就拒；
+        - `PER_KEY_SINGLE`：同站点同 key 未结束就拒；
+        - `UNLIMITED`：只看 `max_parallel`（按站点计）；
+        - 互斥组：同站点同 `mutual_group` 里其它类型有未结束任务也拒
+          （抓取/补抓共用**站点**通道，跨站点互不干扰）。
 
         Args:
             task_type: 任务类型键。
-            request: 启动参数，用来算占用 key。
+            request: 启动参数，用来算占用 key 与站点。
 
         Returns:
             本次占用的 key 列表。
@@ -196,6 +216,7 @@ class TaskHub:
         spec = self.spec(task_type)
         req = dict(request or {})
         keys = spec_keys(spec, req)
+        site = site_of(spec, req)
         with self._lock:
             group = spec.mutual_group
             for tid in self._order:
@@ -206,6 +227,8 @@ class TaskHub:
                 status = _status_of(rec.ref)
                 if status not in UNFINISHED:
                     continue
+                if rec.site != site:
+                    continue  # 别的站点的通道，不归这里管
                 if rec.task_type != task_type:
                     if other.mutual_group == group:
                         raise ConflictError(
@@ -225,7 +248,10 @@ class TaskHub:
                 raise ConflictError(f"{spec.title}任务缺少占用 key")
 
             if spec.policy == POLICY_UNLIMITED and spec.max_parallel:
-                if len(self._unfinished(task_type)) >= spec.max_parallel:
+                same_site = [
+                    r for r in self._unfinished(task_type) if r.site == site
+                ]
+                if len(same_site) >= spec.max_parallel:
                     raise ConflictError(
                         f"{spec.title}任务并发已满（{spec.max_parallel}），稍后再试"
                     )
@@ -240,6 +266,7 @@ class TaskHub:
         keys: list[str] | None = None,
         title: str = "",
         retry_fn: Callable[[], Any] | None = None,
+        site: str = "",
     ) -> TaskRecord:
         """把业务任务对象登记进 Hub，并广播 `task.progress`。
 
@@ -252,6 +279,7 @@ class TaskHub:
             keys: 占用 key 列表。
             title: 任务卡标题；空则按类型模板算。
             retry_fn: 重试入口。
+            site: 站点 id；省略按「启动参数里的 site → 任务类型自述」兜底。
 
         Returns:
             登记后的记录。
@@ -266,6 +294,7 @@ class TaskHub:
             title=title or (spec.title_fn(req) if spec.title_fn else spec.title),
             ref=task,
             retry_fn=retry_fn,
+            site=site or site_of(spec, req),
         )
         with self._lock:
             self._records[rec.task_id] = rec
@@ -320,11 +349,14 @@ class TaskHub:
         """单任务规范化快照。"""
         return _normalize(self.get(task_id))
 
-    def list_snapshots(self, *, task_type: str = "", status: str = "") -> dict[str, Any]:
+    def list_snapshots(
+        self, *, task_type: str = "", status: str = "", site: str | None = None
+    ) -> dict[str, Any]:
         """任务中心列表。
 
         Args:
             task_type: 按类型过滤；空 = 全部。
+            site: 按站点过滤；`None` = 全部，`""` = 只看共用任务。
             status: 按状态过滤；`running` 等价于「未结束」；空 = 全部。
 
         Returns:
@@ -335,6 +367,8 @@ class TaskHub:
         tasks = [_normalize(r) for r in recs]
         if task_type:
             tasks = [t for t in tasks if t["task_type"] == task_type]
+        if site is not None:
+            tasks = [t for t in tasks if t.get("site", "") == site]
         if status == "running":
             tasks = [t for t in tasks if t["status"] in UNFINISHED]
         elif status == "finished":
@@ -424,13 +458,22 @@ class TaskHub:
         with self._lock:
             self._subscribers[:] = [(lp, q) for lp, q in self._subscribers if q is not queue]
 
-    def broadcast(self, msg_type: str, data: dict[str, Any], *, task_type: str = "", task_id: str = "") -> None:
-        """线程安全广播一帧 WS 消息。"""
+    def broadcast(
+        self,
+        msg_type: str,
+        data: dict[str, Any],
+        *,
+        task_type: str = "",
+        task_id: str = "",
+        site: str = "",
+    ) -> None:
+        """线程安全广播一帧 WS 消息。信封带 `site`：空 = 共用事件。"""
         payload = {
             "type": msg_type,
             "ts": time.time(),
             "task_type": task_type,
             "task_id": task_id,
+            "site": site,
             "data": data,
         }
         with self._lock:
@@ -466,6 +509,7 @@ class TaskHub:
             snap,
             task_type=rec.task_type,
             task_id=rec.task_id,
+            site=rec.site,
         )
 
     def emit_finished(self, rec: TaskRecord) -> None:
@@ -479,6 +523,7 @@ class TaskHub:
             snap,
             task_type=rec.task_type,
             task_id=rec.task_id,
+            site=rec.site,
         )
 
     def notify(self, task_id: str, *, finished: bool | None = None) -> None:
@@ -526,7 +571,7 @@ class TaskHub:
             "cancelled": "auth.state",
         }
         msg_type = mapping.get(status, "auth.state")
-        self.broadcast(msg_type, data, task_type="login", task_id=rec.task_id)
+        self.broadcast(msg_type, data, task_type="login", task_id=rec.task_id, site=rec.site)
         if msg_type == "auth.state":
             try:
                 from .login_task import login_tasks
@@ -536,6 +581,7 @@ class TaskHub:
                     login_tasks.status_payload(),
                     task_type="login",
                     task_id=rec.task_id,
+                    site=rec.site,
                 )
             except Exception:  # noqa: BLE001 - 会话推送失败不影响任务本身
                 logger.debug("session.changed 广播失败", exc_info=True)
@@ -616,6 +662,7 @@ def _normalize(rec: TaskRecord) -> dict[str, Any]:
     return {
         "task_id": rec.task_id,
         "task_type": rec.task_type,
+        "site": rec.site,
         "title": rec.title,
         "status": _status_of(rec.ref) or STATUS_RUNNING,
         "current": current,

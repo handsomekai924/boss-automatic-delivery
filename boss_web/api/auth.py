@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 
 from ..errors import ConflictError, NotFoundError
@@ -127,13 +127,17 @@ def slider_page(task_id: str) -> Response:
 
 
 @router.post("/slider/{task_id}/refresh")
-def slider_refresh(task_id: str) -> dict[str, Any]:
-    """帮助页「重新加载」：换一张新的极验挑战再渲染。"""
+def slider_refresh(request: Request, task_id: str) -> dict[str, Any]:
+    """帮助页「重新加载」：换一张新的极验挑战再渲染。
+
+    回的 `page_url` 是**站点作用域**路径，跟前端开窗那条同一个口径——
+    legacy 别名（`/api/auth/…`）是给旧 SPA 的，别再从这里往外发。
+    """
     task = login_tasks.refresh_slider(task_id)
     return {
         "ok": True,
         "status": task.status,
-        "page_url": f"/api/auth/slider/{task.task_id}",
+        "page_url": f"/api/sites/{request.state.site}/auth/slider/{task.task_id}",
     }
 
 

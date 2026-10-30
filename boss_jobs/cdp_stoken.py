@@ -37,12 +37,15 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Final, Mapping
 
 import boss_db
 
 from . import config as C
 from .stoken import STOKEN_MAX_AGE, StokenError
+
+#: 令牌账本归属的站点 id（todo3 Stage 1：随 boss-platform-boss 一起搬）。
+SITE_ID: Final[str] = "boss"
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +217,7 @@ class StokenStore:
     def load(self) -> StokenRecord | None:
         """读账本；没有、坏 JSON 或读盘失败都当没有。"""
         try:
-            raw = boss_db.doc_get_raw(boss_db.DOC_STOKEN, self.path)
+            raw = boss_db.doc_get_raw(boss_db.DOC_STOKEN, self.path, site=SITE_ID)
         except (OSError, sqlite3.Error) as exc:
             logger.warning("读 %s 的 %s 失败（当没有）：%s", self.path, boss_db.DOC_STOKEN, exc)
             return None
@@ -230,7 +233,7 @@ class StokenStore:
     def save(self, record: StokenRecord) -> None:
         """写账本；写失败只告警，不拦主流程。"""
         try:
-            resolved = boss_db.doc_set(boss_db.DOC_STOKEN, record.to_dict(), self.path)
+            resolved = boss_db.doc_set(boss_db.DOC_STOKEN, record.to_dict(), self.path, site=SITE_ID)
         except (OSError, sqlite3.Error) as exc:
             logger.warning("写 %s 失败（不拦主流程）：%s", self.path, exc)
         else:
@@ -241,7 +244,7 @@ class StokenStore:
     def clear(self) -> None:
         """删掉账本这一行；失败忽略。"""
         try:
-            boss_db.doc_delete(boss_db.DOC_STOKEN, self.path)
+            boss_db.doc_delete(boss_db.DOC_STOKEN, self.path, site=SITE_ID)
         except (OSError, sqlite3.Error):
             pass
 

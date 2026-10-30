@@ -1,13 +1,15 @@
 """职位库：列表 / 详情 / 删除 / 统计 / 补抓描述。
 
 `fetch-descriptions` 必须注册在 `/{encrypt_job_id}` 之前，免得被动态路由吃掉。
+列表 / 统计 / 清空都按路径里的 `{site}` 切片（`jobs.site`），别家站点的职位
+不串进来——这是跨站点职位库视图的底座。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
 from boss_jobs.store import JobStore
@@ -46,6 +48,7 @@ class FetchDescBody(BaseModel):
 
 @router.get("")
 def list_jobs(
+    request: Request,
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
     city: str | None = None,
@@ -53,14 +56,15 @@ def list_jobs(
     category: str | None = None,
     jd_status: str | None = None,
 ) -> dict[str, Any]:
-    """分页列出职位库。"""
+    """分页列出职位库；只认路径里那个站点的职位（跨站点视图的切片口）。"""
+    site = str(request.state.site)
     with JobStore() as store:
         items = store.list_jobs(
             limit=limit, offset=offset, city=city, keyword=keyword,
-            category=category, jd_status=jd_status,
+            category=category, jd_status=jd_status, site=site,
         )
         total = store.count_jobs_matching(
-            city=city, keyword=keyword, category=category, jd_status=jd_status
+            city=city, keyword=keyword, category=category, jd_status=jd_status, site=site
         )
     return {
         "items": [j.to_dict() for j in items],
@@ -71,13 +75,14 @@ def list_jobs(
 
 
 @router.get("/stats")
-def stats() -> dict[str, Any]:
+def stats(request: Request) -> dict[str, Any]:
     """职位库汇总统计与最近翻页日志。"""
+    site = str(request.state.site)
     with JobStore() as store:
-        summary = store.summary()
+        summary = store.summary(site=site)
         summary["missing_desc"] = store.count_jobs_missing_desc()
         pages_log = []
-        for row in store.list_pages(limit=20):
+        for row in store.list_pages(limit=20, site=site):
             item = dict(row)
             item["inserted"] = item.get("inserted_count", 0)
             item["updated"] = item.get("updated_count", 0)
@@ -142,10 +147,12 @@ def delete_many(body: DeleteBody) -> dict[str, Any]:
 
 
 @router.post("/clear")
-def clear_jobs(body: ClearBody) -> dict[str, Any]:
-    """清空职位库（需 confirm）。"""
+def clear_jobs(request: Request, body: ClearBody) -> dict[str, Any]:
+    """清空职位库（需 confirm）；只清路径里那个站点的职位。"""
     if not body.confirm:
         raise ValidationWebError("需要 confirm=true 才能清空")
     with JobStore() as store:
-        deleted = store.clear_jobs(city=body.city, keyword=body.keyword)
+        deleted = store.clear_jobs(
+            city=body.city, keyword=body.keyword, site=str(request.state.site)
+        )
     return {"deleted": deleted}

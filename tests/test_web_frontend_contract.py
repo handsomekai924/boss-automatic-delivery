@@ -15,9 +15,12 @@ STATIC = Path(__file__).resolve().parents[1] / "boss_web" / "static"
 
 
 def _read(rel: str) -> str:
-    """读 `boss_web/static` 下的相对路径文件文本。"""
-    path = STATIC / rel
-    assert path.is_file(), f"缺少静态文件：{rel}"
+    """读旧 SPA（`boss_web/static/legacy/`）下的相对路径文件文本。
+
+    M1 起旧壳整棵挪进 `legacy/`（`/legacy/` 入口，M3 删）；本文件钉的是旧壳契约。
+    """
+    path = STATIC / "legacy" / rel
+    assert path.is_file(), f"缺少静态文件：legacy/{rel}"
     return path.read_text(encoding="utf-8")
 
 

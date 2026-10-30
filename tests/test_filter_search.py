@@ -267,8 +267,7 @@ def test_load_旧库没有期望键就留空(tmp_path):
     boss_db.doc_set(
         boss_db.DOC_SEARCH_FILTER,
         {"query": "go", "city": "101010100"},
-        tmp_path / "boss.db",
-    )
+        tmp_path / "boss.db", site="boss")
     back = load_search_filter(tmp_path / "boss.db")
     assert back.encrypt_expect_id == ""
     assert "encryptExpectId" not in back.to_params()

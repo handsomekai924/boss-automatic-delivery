@@ -22,6 +22,7 @@ from .. import config as C
 from ..errors import ValidationWebError
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import LLMConfig, load_config
+from .resume_section_parser import to_markdown
 from .resume_store import load_resume, update_revision_result
 
 MAX_TARGET_JOBS = 10
@@ -240,7 +241,8 @@ def generate_revision(
         client = llm
 
     resume = load_resume(resume_id)
-    content, truncated = _truncate_resume(resume.raw or "")
+    # 分析用 md 规范化文本（任意格式章节名都能对齐）；original_md 仍存原文本供展示
+    content, truncated = _truncate_resume(to_markdown(resume.raw or ""))
     target_block, computed_snapshot = assemble_target_block(jobs)
     snapshot = dict(target_json if target_json is not None else computed_snapshot)
     snapshot["count"] = len(jobs)

@@ -129,6 +129,21 @@ def test_self_check_reports_missing_static(monkeypatch, capsys):
     assert "缺失" in capsys.readouterr().out
 
 
+def test_self_check_认_dist_index(monkeypatch, capsys):
+    """新壳（React）只打 `static/dist/index.html` 也要过自检。"""
+    import tempfile
+    from pathlib import Path
+
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "dist").mkdir()
+    (tmp / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setattr(cli.C, "STATIC_DIR", tmp)
+    assert cli.main(["--self-check"]) == 0
+    out = capsys.readouterr().out
+    assert "新壳 dist" in out
+    assert "正常" in out
+
+
 def test_self_check_does_not_start_server(monkeypatch):
     """自检路径不许把 uvicorn 拉起来——否则打包冒烟测试会挂住。"""
     started: list[int] = []

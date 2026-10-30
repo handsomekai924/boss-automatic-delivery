@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
 from ..errors import ConflictError, NotFoundError, UpstreamError, ValidationWebError
@@ -58,7 +58,12 @@ class CollectionBody(BaseModel):
 
 
 class RuleBody(BaseModel):
-    """一条黑名单规则。"""
+    """一条黑名单规则。
+
+    Attributes:
+        site: 站点归属。**不传 = 不动**（新建落成全站生效 `''`；更新保留原值）。
+            显式给空串 = 收成全站生效。公司名/JD 规则有的是站点语义（todo3 第四节）。
+    """
 
     rule_type: str
     pattern: str
@@ -66,6 +71,7 @@ class RuleBody(BaseModel):
     scope: str = ""
     description: str = ""
     enabled: bool = True
+    site: str | None = None
 
 
 class RuleTestBody(RuleBody):
@@ -186,11 +192,21 @@ def cancel_recheck() -> dict[str, Any]:
 
 
 @router.get("/blacklist/rules")
-def get_rules(rule_type: str | None = Query(None, alias="type")) -> dict[str, Any]:
-    """列黑名单规则；`type` 只认 `company` / `jd_keyword`。"""
+def get_rules(
+    request: Request, rule_type: str | None = Query(None, alias="type")
+) -> dict[str, Any]:
+    """列黑名单规则；`type` 只认 `company` / `jd_keyword`。
+
+    只回**本平台生效**的规则：全站规则（`site=''`）+ 路径里那个站点的专属规则。
+    行里带 `site`，前端要区分「全站 / 本站」直接看这个字段。
+    """
     if rule_type and rule_type not in {blacklist.COMPANY, blacklist.JD_KEYWORD}:
         raise ValidationWebError("type 必须是 company 或 jd_keyword")
-    return {"items": blacklist.list_rules(rule_type=rule_type)}
+    return {
+        "items": blacklist.list_rules(
+            rule_type=rule_type, site=str(request.state.site or "")
+        )
+    }
 
 
 @router.post("/blacklist/rules")

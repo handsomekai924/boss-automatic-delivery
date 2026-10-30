@@ -56,27 +56,99 @@ def test_connect_建出全部表(tmp_path):
     finally:
         conn.close()
     assert {"doc", "resume", "analysis", "jobs", "fetch_pages", "crawl_tasks",
-            "crawl_task_jobs", "resume_revisions", "interview_questions"} <= names
+            "crawl_task_jobs", "resume_revisions", "interview_questions",
+            "site_settings", "resume_site_map"} <= names
+
+
+def test_建表带_site_列(tmp_path):
+    """验新建库的 jobs/fetch_pages/blacklist_rules/analysis 都带 site 列。"""
+    conn = boss_db.connect(tmp_path / "boss.db", migrate=False)
+    try:
+        for table in ("jobs", "fetch_pages", "blacklist_rules", "analysis"):
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            assert "site" in cols, f"{table} 缺 site 列"
+    finally:
+        conn.close()
+
+
+def test_建表_doc_是_site_加_name_复合键(tmp_path):
+    """验 doc 表按 `(site, key)` 隔离——主键含 site，同名键各站点各一份。"""
+    conn = boss_db.connect(tmp_path / "boss.db", migrate=False)
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc)")}
+        assert {"site", "name", "payload", "updated_at"} <= cols
+        pk = [
+            r["name"]
+            for r in conn.execute("PRAGMA table_info(doc)")
+            if int(r["pk"]) > 0
+        ]
+        assert sorted(pk) == ["name", "site"]
+    finally:
+        conn.close()
+
+
+def test_旧库补_site_列(tmp_path):
+    """验旧库（没 site 列）走 `_migrate_columns` 无痛升级，旧行落默认 'boss'。
+
+    旧库 DDL 由现行 `_SCHEMA` 抹掉 site 列与两张新表生成——比手写 DDL 更耐改。
+    `doc` 另算：它换了主键，改列改不动，所以旧形态 DDL 先建（后建的 IF NOT EXISTS 是空操作）。
+    """
+    import re
+    import sqlite3
+
+    old_ddl = boss_db._SCHEMA
+    old_ddl = old_ddl[: old_ddl.index("CREATE TABLE IF NOT EXISTS site_settings")]
+    old_ddl = re.sub(r"^\s*site\s+TEXT[^\n]*\n", "", old_ddl, flags=re.MULTILINE)
+    old_ddl = (
+        "CREATE TABLE IF NOT EXISTS doc ("
+        " name TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at REAL NOT NULL);\n"
+        + old_ddl
+    )
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(old_ddl)
+    conn.execute(
+        "INSERT INTO jobs (encrypt_job_id, job_name, brand_name, fetched_at)"
+        " VALUES ('j1', 't', 'b', 'now')"
+    )
+    conn.execute("INSERT INTO doc (name, payload, updated_at) VALUES ('session', '{}', 1)")
+    conn.execute("INSERT INTO doc (name, payload, updated_at) VALUES ('llm_config', '{}', 1)")
+    conn.commit()
+    conn.close()
+
+    upgraded = boss_db.connect(path, migrate=False)
+    try:
+        row = upgraded.execute(
+            "SELECT site FROM jobs WHERE encrypt_job_id = 'j1'"
+        ).fetchone()
+        assert row["site"] == "boss"
+        tables = {
+            r["name"]
+            for r in upgraded.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert {"site_settings", "resume_site_map"} <= tables
+    finally:
+        upgraded.close()
 
 
 def test_doc_往返(tmp_path):
     """验 doc 读写删的完整往返。"""
     p = tmp_path / "boss.db"
-    assert boss_db.doc_get("session", p) is None
-    boss_db.doc_set("session", {"token": "t", "cookies": {"a": "1"}}, p)
-    got = boss_db.doc_get("session", p)
+    assert boss_db.doc_get("session", p, site="boss") is None
+    boss_db.doc_set("session", {"token": "t", "cookies": {"a": "1"}}, p, site="boss")
+    got = boss_db.doc_get("session", p, site="boss")
     assert got == {"token": "t", "cookies": {"a": "1"}}
-    assert boss_db.doc_delete("session", p) is True
-    assert boss_db.doc_delete("session", p) is False
-    assert boss_db.doc_get("session", p) is None
+    assert boss_db.doc_delete("session", p, site="boss") is True
+    assert boss_db.doc_delete("session", p, site="boss") is False
+    assert boss_db.doc_get("session", p, site="boss") is None
 
 
 def test_doc_坏payload按没有处理(tmp_path):
     """验坏 payload 按没有处理，原文仍可读。"""
     p = tmp_path / "boss.db"
-    boss_db.doc_set("session", "{不是 json", p)
-    assert boss_db.doc_get("session", p) is None
-    assert boss_db.doc_get_raw("session", p) == "{不是 json"
+    boss_db.doc_set("session", "{不是 json", p, site="boss")
+    assert boss_db.doc_get("session", p, site="boss") is None
+    assert boss_db.doc_get_raw("session", p, site="boss") == "{不是 json"
 
 
 def test_doc_raw_可以直接塞字符串(tmp_path):
@@ -86,22 +158,73 @@ def test_doc_raw_可以直接塞字符串(tmp_path):
     assert boss_db.doc_get("llm_config", p) == {"model": "m1"}
 
 
+def test_doc_登录态键必须带站点(tmp_path):
+    """漏传 site 就是跨站点串登录态——直接挡下来，不给静默写进共用位。"""
+    p = tmp_path / "boss.db"
+    with pytest.raises(ValueError, match="site"):
+        boss_db.doc_set("session", {"token": "t"}, p)
+    with pytest.raises(ValueError, match="site"):
+        boss_db.doc_get("session", p)
+
+
+def test_doc_按站点隔离(tmp_path):
+    """验换站点不清别家登录态：同名键各站点各一份。"""
+    p = tmp_path / "boss.db"
+    boss_db.doc_set("session", {"token": "b"}, p, site="boss")
+    boss_db.doc_set("session", {"token": "5"}, p, site="51job")
+    assert boss_db.doc_get("session", p, site="boss") == {"token": "b"}
+    assert boss_db.doc_get("session", p, site="51job") == {"token": "5"}
+    assert boss_db.doc_delete("session", p, site="51job") is True
+    assert boss_db.doc_get("session", p, site="51job") is None
+    assert boss_db.doc_get("session", p, site="boss") == {"token": "b"}
+
+
+def test_旧库_doc_升级成_site_复合键(tmp_path):
+    """验旧 `doc`（name 主键）整表重建：登录态归旧站点，全局配置归共用位。"""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE doc (name TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at REAL NOT NULL)"
+    )
+    conn.execute("INSERT INTO doc (name, payload, updated_at) VALUES ('session', '{\"a\":1}', 1)")
+    conn.execute("INSERT INTO doc (name, payload, updated_at) VALUES ('stoken', '{\"b\":2}', 2)")
+    conn.execute(
+        "INSERT INTO doc (name, payload, updated_at) VALUES ('llm_config', '{\"m\":3}', 3)"
+    )
+    conn.commit()
+    conn.close()
+
+    upgraded = boss_db.connect(path, migrate=False)
+    try:
+        pk = sorted(
+            r["name"] for r in upgraded.execute("PRAGMA table_info(doc)") if int(r["pk"]) > 0
+        )
+        assert pk == ["name", "site"]
+        assert boss_db.doc_get("session", path, site="boss") == {"a": 1}
+        assert boss_db.doc_get("stoken", path, site="boss") == {"b": 2}
+        assert boss_db.doc_get("llm_config", path) == {"m": 3}
+    finally:
+        upgraded.close()
+
+
 def test_内存库共享同一个连接():
     """验 `JobStore(":memory:")` 与 doc 助手共享同一连接。"""
     a = boss_db.acquire(":memory:")
-    boss_db.doc_set("stoken", {"token": "x"}, ":memory:")
+    boss_db.doc_set("stoken", {"token": "x"}, ":memory:", site="boss")
     b = boss_db.acquire(":memory:")
     assert a is b
-    row = b.execute("SELECT payload FROM doc WHERE name='stoken'").fetchone()
+    row = b.execute("SELECT payload FROM doc WHERE site='boss' AND name='stoken'").fetchone()
     assert json.loads(row["payload"]) == {"token": "x"}
 
 
 def test_close_all_之后重开(tmp_path):
     """验 close_all 后重开仍能读到已写数据。"""
     p = tmp_path / "boss.db"
-    boss_db.doc_set("session", {"a": 1}, p)
+    boss_db.doc_set("session", {"a": 1}, p, site="boss")
     boss_db.close_all()
-    assert boss_db.doc_get("session", p) == {"a": 1}
+    assert boss_db.doc_get("session", p, site="boss") == {"a": 1}
 
 
 def _write_legacy_tree(root):
@@ -191,8 +314,8 @@ def test_migrate_一次性导入(tmp_path):
     assert counts["jobs"] == 1
     assert counts["fetch_pages"] == 1
 
-    assert boss_db.doc_get("session", db_path)["phone_masked"] == "138****8000"
-    assert boss_db.doc_get("search_filter", db_path)["query"] == "Python"
+    assert boss_db.doc_get("session", db_path, site="boss")["phone_masked"] == "138****8000"
+    assert boss_db.doc_get("search_filter", db_path, site="boss")["query"] == "Python"
     assert boss_db.doc_get("llm_config", db_path)["model"] == "m"
 
     conn = boss_db.connect(db_path, migrate=False)

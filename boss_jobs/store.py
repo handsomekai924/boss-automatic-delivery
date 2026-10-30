@@ -20,6 +20,11 @@ from .models import Job, PageResult
 
 logger = logging.getLogger(__name__)
 
+#: 站点归属的兜底值：单站点旧账全归 BOSS，跟 `boss_db` 里 `jobs.site` /
+#: `fetch_pages.site` 的列默认同值。多站点抓取请**显式传** `save_page(site=…)`，
+#: 别指望列默认——列默认只是旧数据的归档口径，不是新数据的写入口。
+DEFAULT_SITE = "boss"
+
 
 @dataclass(frozen=True)
 class SaveOutcome:
@@ -45,7 +50,7 @@ class SaveOutcome:
 
 _INSERT_JOB = """
 INSERT INTO jobs (
-    encrypt_job_id, job_name, brand_name, location, salary_desc,
+    site, encrypt_job_id, job_name, brand_name, location, salary_desc,
     job_experience, job_degree, brand_industry, brand_scale_name,
     city_name, area_district, business_district, brand_stage_name,
     job_labels, skills, welfare_list, boss_name, boss_title,
@@ -58,6 +63,7 @@ INSERT INTO jobs (
     -- 重抓（UPSERT）不改写发送史，30 天冷却以「最近一次成功发送」为准。
     -- 写入只走 update_last_greeted_at()。
 ) VALUES (
+    COALESCE(NULLIF(:site, ''), :site_default),
     :encrypt_job_id, :job_name, :brand_name, :location, :salary_desc,
     :job_experience, :job_degree, :brand_industry, :brand_scale_name,
     :city_name, :area_district, :business_district, :brand_stage_name,
@@ -69,6 +75,9 @@ INSERT INTO jobs (
     :matched_rule_ids, :matched_rule_snapshot, :blacklist_checked_at, :auto_delivery_blocked
 )
 ON CONFLICT(encrypt_job_id) DO UPDATE SET
+    -- 站点归属重抓不改写（跟 last_greeted_at 同一条道理）：调用方没给就留原值。
+    -- 这里认的是**原始绑定值**，不是 `excluded.site`（后者已被下面的兜底填过）。
+    site              = COALESCE(NULLIF(:site, ''), site),
     job_name          = excluded.job_name,
     brand_name        = excluded.brand_name,
     location          = excluded.location,
@@ -101,9 +110,9 @@ ON CONFLICT(encrypt_job_id) DO UPDATE SET
 
 _INSERT_PAGE = """
 INSERT INTO fetch_pages (
-    page, raw_count, kept_count, dropped_count,
+    site, page, raw_count, kept_count, dropped_count,
     inserted_count, updated_count, has_more, note, fetched_at, task_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _INSERT_TASK_JOB = """
@@ -113,10 +122,10 @@ VALUES (?, ?, ?)
 
 _INSERT_CRAWL_TASK = """
 INSERT INTO crawl_tasks (
-    task_id, source, status, created_at, started_at, ended_at,
+    task_id, site, source, status, created_at, started_at, ended_at,
     params_json, stats_json, job_count, inserted_count, updated_count,
     error, stopped_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -138,12 +147,15 @@ class JobStore:
             self._conn = boss_db.connect(self.path)
             self._owns_conn = True
 
-    def save_page(self, result: PageResult, *, task_id: str = "") -> SaveOutcome:
+    def save_page(self, result: PageResult, *, task_id: str = "", site: str = "") -> SaveOutcome:
         """把一页的清洗结果立刻入库，同时记一行 `fetch_pages` 流水。
 
         Args:
             result: 一页清洗结果。
             task_id: 非空时本页职位还会写进 `crawl_task_jobs`。
+            site: 本页职位的站点归属；空则看 `Job.site`。新行再空由库补
+                `DEFAULT_SITE`，已有行的归属**不被重抓改写**。跨站点职位库视图
+                靠这一列分账，别只吃列默认。
 
         Returns:
             本页入库结果。
@@ -159,7 +171,7 @@ class JobStore:
                     "SELECT 1 FROM jobs WHERE encrypt_job_id = ?",
                     (job.encrypt_job_id,),
                 ).fetchone()
-                self._conn.execute(_INSERT_JOB, _job_params(job, now))
+                self._conn.execute(_INSERT_JOB, _job_params(job, now, site))
                 if before is None:
                     inserted += 1
                     action = "inserted"
@@ -173,6 +185,7 @@ class JobStore:
             self._conn.execute(
                 _INSERT_PAGE,
                 (
+                    site or DEFAULT_SITE,
                     result.page,
                     result.raw_count,
                     len(result.jobs),
@@ -197,9 +210,11 @@ class JobStore:
         )
         return SaveOutcome(page=result.page, inserted=inserted, updated=updated, skipped=skipped)
 
-    def save_pages(self, results: Iterable[PageResult], *, task_id: str = "") -> list[SaveOutcome]:
+    def save_pages(
+        self, results: Iterable[PageResult], *, task_id: str = "", site: str = ""
+    ) -> list[SaveOutcome]:
         """连续存多页（离线回放用；线上是抓一页存一页）。"""
-        return [self.save_page(result, task_id=task_id) for result in results]
+        return [self.save_page(result, task_id=task_id, site=site) for result in results]
 
     def update_job_desc(
         self, encrypt_job_id: str, job_desc: str, *, fetched_at: str | None = None,
@@ -309,13 +324,19 @@ class JobStore:
         created_at: float | None = None,
         started_at: float | None = None,
         params: Mapping[str, Any] | None = None,
+        site: str = "",
     ) -> None:
-        """`crawl_tasks.start()` 时插一行（status=running）+ 写入配置快照。"""
+        """`crawl_tasks.start()` 时插一行（status=running）+ 写入配置快照。
+
+        `site` 是这批抓取的站点归属（批次账按站点分账）。没传就吃 `DEFAULT_SITE`，
+        跟 `jobs.site` / `fetch_pages.site` 同一个兜底口径——**多站点抓取请显式传**。
+        """
         now = time.time() if created_at is None else float(created_at)
         self._conn.execute(
             _INSERT_CRAWL_TASK,
             (
                 task_id,
+                site or DEFAULT_SITE,
                 source or "search",
                 status or "running",
                 now,
@@ -397,17 +418,32 @@ class JobStore:
         ).fetchone()
         return _row_to_crawl_task(row) if row else None
 
-    def list_crawl_tasks(self, *, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
-        """历史任务，最近的在前。进行中任务的实时进度由调用方用内存快照覆盖。"""
+    def list_crawl_tasks(
+        self, *, limit: int = 20, offset: int = 0, site: str | None = None
+    ) -> list[dict[str, Any]]:
+        """历史任务，最近的在前。进行中任务的实时进度由调用方用内存快照覆盖。
+
+        `site` 是**过滤器**不是作用域：省略 = 跨站点全量（共用口），
+        传了就只列这个站点的批次（平台作用域口）。
+        """
+        where, args = "", []
+        if site is not None:
+            where, args = " WHERE site = ?", [site]
         rows = self._conn.execute(
-            "SELECT * FROM crawl_tasks ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            f"SELECT * FROM crawl_tasks{where} "
+            "ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",
+            (*args, limit, offset),
         ).fetchall()
         return [_row_to_crawl_task(row) for row in rows]
 
-    def count_crawl_tasks(self) -> int:
-        """抓取任务总数。"""
-        row = self._conn.execute("SELECT COUNT(*) AS n FROM crawl_tasks").fetchone()
+    def count_crawl_tasks(self, *, site: str | None = None) -> int:
+        """抓取任务总数；`site` 与 `list_crawl_tasks` 同一条切片口径。"""
+        if site is None:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM crawl_tasks").fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM crawl_tasks WHERE site = ?", (site,)
+            ).fetchone()
         return int(row["n"]) if row else 0
 
     def count_crawl_task_jobs(self, task_id: str, *, only_existing: bool = False) -> int:
@@ -483,9 +519,14 @@ class JobStore:
             out.append(item)
         return out
 
-    def count_jobs(self) -> int:
-        """职位总条数。"""
-        row = self._conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()
+    def count_jobs(self, *, site: str | None = None) -> int:
+        """职位总条数；`site` 传了就只数这个站点的。"""
+        sql = "SELECT COUNT(*) AS n FROM jobs"
+        params: list[Any] = []
+        if site:
+            sql += " WHERE site = ?"
+            params.append(site)
+        row = self._conn.execute(sql, params).fetchone()
         return int(row["n"]) if row else 0
 
     def count_pages(self) -> int:
@@ -509,14 +550,18 @@ class JobStore:
         keyword: str | None = None,
         category: str | None = None,
         jd_status: str | None = None,
+        site: str | None = None,
         stable: bool = False,
     ) -> list[Job]:
         """按最近抓取顺序列职位。`keyword` 同时匹配岗位名与公司名。
 
         `stable=True` 时按主键排序，批量扫描（规则重检）要用稳定序。
+        `site` 传了就只列这个站点的职位（跨站点职位库视图的切片口）。
         """
         sql = "SELECT * FROM jobs"
-        where, params = _match_where(city=city, keyword=keyword, category=category, jd_status=jd_status)
+        where, params = _match_where(
+            city=city, keyword=keyword, category=category, jd_status=jd_status, site=site
+        )
         if where:
             sql += " WHERE " + " AND ".join(where)
         if stable:
@@ -527,11 +572,16 @@ class JobStore:
         rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_job(row) for row in rows]
 
-    def list_pages(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """抓取流水，最近的在前。"""
-        rows = self._conn.execute(
-            "SELECT * FROM fetch_pages ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
+    def list_pages(self, *, limit: int = 50, site: str | None = None) -> list[dict[str, Any]]:
+        """抓取流水，最近的在前；`site` 传了就只看这个站点的。"""
+        sql = "SELECT * FROM fetch_pages"
+        params: list[Any] = []
+        if site:
+            sql += " WHERE site = ?"
+            params.append(site)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
     def count_jobs_matching(
@@ -541,11 +591,12 @@ class JobStore:
         keyword: str | None = None,
         category: str | None = None,
         jd_status: str | None = None,
+        site: str | None = None,
     ) -> int:
         """按 `list_jobs` 同款条件数职位，翻页前先看总数。"""
         sql = "SELECT COUNT(*) AS n FROM jobs"
         where, params = _match_where(
-            city=city, keyword=keyword, category=category, jd_status=jd_status
+            city=city, keyword=keyword, category=category, jd_status=jd_status, site=site
         )
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -610,9 +661,14 @@ class JobStore:
         self._conn.commit()
         return int(cur.rowcount)
 
-    def clear_jobs(self, *, city: str | None = None, keyword: str | None = None) -> int:
-        """按条件清空职位；两个条件都不给 = 清整张表。返回删除条数。"""
-        where, params = _match_where(city=city, keyword=keyword)
+    def clear_jobs(
+        self, *, city: str | None = None, keyword: str | None = None, site: str | None = None
+    ) -> int:
+        """按条件清空职位；条件都不给 = 清整张表。返回删除条数。
+
+        `site` 是安全绳：平台作用域来的清空必须带上它，别把别家站点的职位一起端了。
+        """
+        where, params = _match_where(city=city, keyword=keyword, site=site)
         sql = "DELETE FROM jobs"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -620,19 +676,24 @@ class JobStore:
         self._conn.commit()
         return int(cur.rowcount)
 
-    def summary(self) -> dict[str, Any]:
-        """一页人读摘要（CLI `stats` 用）。"""
-        total = self.count_jobs()
-        by_city = self._conn.execute(
-            "SELECT city_name, COUNT(*) AS n FROM jobs "
-            "GROUP BY city_name ORDER BY n DESC LIMIT 10"
-        ).fetchall()
-        pages = self._conn.execute(
-            "SELECT COUNT(*) AS n, COALESCE(SUM(raw_count),0) AS raw, "
-            "COALESCE(SUM(kept_count),0) AS kept, "
-            "COALESCE(SUM(dropped_count),0) AS dropped "
-            "FROM fetch_pages"
-        ).fetchone()
+    def summary(self, *, site: str | None = None) -> dict[str, Any]:
+        """一页人读摘要（CLI `stats` 用）；`site` 传了就只汇总这个站点的职位。"""
+        total = self.count_jobs(site=site)
+        by_sql = "SELECT city_name, COUNT(*) AS n FROM jobs"
+        by_params: list[Any] = []
+        if site:
+            by_sql += " WHERE site = ?"
+            by_params.append(site)
+        by_sql += " GROUP BY city_name ORDER BY n DESC LIMIT 10"
+        by_city = self._conn.execute(by_sql, by_params).fetchall()
+        pages_sql = "SELECT COUNT(*) AS n, COALESCE(SUM(raw_count),0) AS raw, "
+        pages_sql += "COALESCE(SUM(kept_count),0) AS kept, "
+        pages_sql += "COALESCE(SUM(dropped_count),0) AS dropped FROM fetch_pages"
+        pages_params: list[Any] = []
+        if site:
+            pages_sql += " WHERE site = ?"
+            pages_params.append(site)
+        pages = self._conn.execute(pages_sql, pages_params).fetchone()
         return {
             "db_path": str(self.path),
             "jobs": total,
@@ -666,10 +727,17 @@ def _match_where(
     keyword: str | None = None,
     category: str | None = None,
     jd_status: str | None = None,
+    site: str | None = None,
 ) -> tuple[list[str], list[Any]]:
-    """`list_jobs` / `delete_*` 共用的 WHERE 片段。"""
+    """`list_jobs` / `delete_*` 共用的 WHERE 片段。
+
+    `site` 是跨站点职位库的切片口：传了就只认这个站点的行，不传 = 全站。
+    """
     where: list[str] = []
     params: list[Any] = []
+    if site:
+        where.append("site = ?")
+        params.append(site)
     if city:
         where.append("city_name = ?")
         params.append(city)
@@ -694,9 +762,17 @@ def _match_where(
     return where, params
 
 
-def _job_params(job: Job, fetched_at: str) -> dict[str, Any]:
-    """职位 → UPSERT 参数（列表字段序列化成 JSON）。"""
+def _job_params(job: Job, fetched_at: str, site: str = "") -> dict[str, Any]:
+    """职位 → UPSERT 参数（列表字段序列化成 JSON）。
+
+    `site` 是调用方给的站点归属，原样传（可以是空串）：新行由 SQL 补
+    `DEFAULT_SITE`，已有行的归属由 SQL 保住不改写。
+    """
     params = job.to_dict()
+    # 原样往下传（可以是空串），兜底交给 SQL：INSERT 时补 `DEFAULT_SITE`，
+    # UPSERT 时不改写已有归属。两件事语义不同，别在 Python 里先揉成一个值。
+    params["site"] = site or job.site or ""
+    params["site_default"] = DEFAULT_SITE
     params["job_labels"] = json.dumps(list(job.job_labels), ensure_ascii=False)
     params["skills"] = json.dumps(list(job.skills), ensure_ascii=False)
     params["welfare_list"] = json.dumps(list(job.welfare_list), ensure_ascii=False)
@@ -762,6 +838,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         blacklist_checked_at=data.get("blacklist_checked_at") or "",
         auto_delivery_blocked=bool(data.get("auto_delivery_blocked", 1)),
         last_greeted_at=data.get("last_greeted_at") or "",
+        site=data.get("site") or "",
     )
 
 
@@ -778,6 +855,8 @@ def _row_to_crawl_task(row: sqlite3.Row) -> dict[str, Any]:
     data["job_count"] = int(data.get("job_count") or 0)
     data["inserted_count"] = int(data.get("inserted_count") or 0)
     data["updated_count"] = int(data.get("updated_count") or 0)
+    # 站点归属：旧库补列带列默认，读出来不至于是 NULL；兜底还是跟写入口同一个值。
+    data["site"] = str(data.get("site") or DEFAULT_SITE)
     return data
 
 

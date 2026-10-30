@@ -1,0 +1,5 @@
+# pnpm workspace —— 只管 apps/web（todo3 第三节：Python 侧走 uv workspace，互不混装）
+packages:
+  - apps/web
+allowBuilds:
+  esbuild: true

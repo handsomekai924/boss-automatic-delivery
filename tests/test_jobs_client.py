@@ -945,8 +945,7 @@ def test_cli_fetch_库里的条件_走搜索流(tmp_path, monkeypatch, capsys):
 
     db = tmp_path / "d.db"
     boss_db.doc_set(
-        boss_db.DOC_SEARCH_FILTER, {"query": "go", "city": "101010100"}, db
-    )
+        boss_db.DOC_SEARCH_FILTER, {"query": "go", "city": "101010100"}, db, site="boss")
     captured = {}
     monkeypatch.setattr(
         "boss_jobs.client.http_from_session", lambda *a, **k: _capturing_http(captured)

@@ -20,6 +20,7 @@ from .. import config as C
 from ..errors import ValidationWebError
 from .llm_client import LLMClient, extract_json
 from .llm_config_store import LLMConfig, load_config
+from .resume_section_parser import to_markdown
 from .resume_store import load_resume
 
 _RESUME_INPUT_LIMIT = 20_000
@@ -286,7 +287,8 @@ def generate_free_revision(
         client = llm
 
     resume = load_resume(resume_id)
-    content, truncated = _truncate_resume(resume.raw or "")
+    # 分析用 md 规范化文本（任意格式章节名都能对齐）；original_md 仍存原文本供展示
+    content, truncated = _truncate_resume(to_markdown(resume.raw or ""))
     truncate_note = "（原文已截断，后段未参与改写）\n\n" if truncated else ""
 
     def _chat(messages: list[dict[str, str]], max_tokens: int) -> tuple[str, str | None]:

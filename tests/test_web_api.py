@@ -88,6 +88,41 @@ def test_slider_refresh_without_active_slider_conflicts(client: TestClient):
         lt.login_tasks._tasks.pop(task.task_id, None)
 
 
+def test_slider_urls_一律站点作用域(client: TestClient):
+    """滑块那三条 URL 全是站点作用域：快照自报的入口、刷新回的入口、票据回传。
+
+    前端开窗用 `/api/sites/boss/auth/slider/{id}`，后端自报的得是同一口径——
+    legacy 别名是给旧 SPA 的，摘了别名帮助页还得能提交票据。这条测试本身也走
+    站点作用域路径，别名摘掉后不用改。
+    """
+    from boss_login.verify import SliderChallenge
+
+    from boss_web.services import login_task as lt
+
+    def refresher() -> SliderChallenge:
+        return SliderChallenge(
+            captcha_type=1, captcha_name="极验验证", gt="gt-x", challenge="ch-scope"
+        )
+
+    task = lt.LoginTask(task_id="scope-1", phone="13800138000")
+    task.status = lt.ST_NEED_SLIDER
+    task.slider_refresher = refresher
+    lt.login_tasks._tasks[task.task_id] = task
+    try:
+        assert task.snapshot()["slider"]["page_url"] == "/api/sites/boss/auth/slider/scope-1"
+
+        r = client.post("/api/sites/boss/auth/slider/scope-1/refresh")
+        assert r.status_code == 200
+        assert r.json()["page_url"] == "/api/sites/boss/auth/slider/scope-1"
+
+        page = client.get("/api/sites/boss/auth/slider/scope-1")
+        assert page.status_code == 200
+        assert "/api/sites/boss/auth/slider/scope-1/solution" in page.text
+        assert '"/api/auth/' not in page.text, "帮助页里混进别名路径了"
+    finally:
+        lt.login_tasks._tasks.pop(task.task_id, None)
+
+
 
 
 def test_qr_image_without_payload_404(client: TestClient):
@@ -133,7 +168,9 @@ def test_qr_snapshot_carries_image_url(client: TestClient):
         assert snap["status"] == "need_scan"
         assert snap["kind"] == "qr"
         assert snap["qr"]["payload"] == "qr-uuid"
-        assert snap["qr"]["image_url"].startswith("/api/auth/qr/qr-snap/image")
+        assert snap["qr"]["image_url"].startswith(
+            "/api/sites/boss/auth/qr/qr-snap/image"
+        ), "后端自报的 URL 只许是站点作用域，别名是 legacy 专用的"
         assert snap["qr"]["scanned"] is False
     finally:
         lt.login_tasks._tasks.pop(task.task_id, None)

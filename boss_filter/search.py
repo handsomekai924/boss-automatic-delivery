@@ -17,9 +17,12 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Final, Iterable, Mapping
 
 import boss_db
+
+#: 筛选条件归属的站点 id（todo3 Stage 1：随 boss-platform-boss 一起搬）。
+SITE_ID: Final[str] = "boss"
 
 from .models import FilterConditions, normalize_code
 
@@ -437,7 +440,7 @@ def load_search_filter(path: Path | str | None = None) -> JobSearchFilter:
         库里有就按那行装配（可全空）；没有就全空的 `JobSearchFilter`。
     """
     try:
-        raw = boss_db.doc_get_raw(boss_db.DOC_SEARCH_FILTER, path)
+        raw = boss_db.doc_get_raw(boss_db.DOC_SEARCH_FILTER, path, site=SITE_ID)
     except (OSError, sqlite3.Error) as exc:
         raise ValueError(f"读不了状态库 {filter_path(path)}：{exc}") from exc
 
@@ -470,4 +473,4 @@ def save_search_filter(
         "encryptExpectId": search_filter.encrypt_expect_id,
         "pageSize": search_filter.page_size,
     }
-    return boss_db.doc_set(boss_db.DOC_SEARCH_FILTER, data, path)
+    return boss_db.doc_set(boss_db.DOC_SEARCH_FILTER, data, path, site=SITE_ID)

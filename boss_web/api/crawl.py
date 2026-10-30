@@ -1,23 +1,41 @@
 """抓取任务：启动 / 进度 / 取消 + 历史任务档案。
 
+这里拆两个面（docs/console-migration-parity.md 三.7），挂法不同：
+
+- `batch_router`（`/tasks…`）= **批次账**。「这批带回了哪些职位」是库账，跨站点可读，
+  共用页（匹配 / 出题 / 简历优化）拿它当**职位来源选择器**。挂共用口时**不带**
+  站点作用域；挂 `/api/sites/{site}/crawl` 时按 `{site}` 切列表。
+- `router`（`/start` `/status` `/{task_id}` `/{task_id}/cancel`）= **抓取执行**。
+  限速与并发通道都在站点上，必须平台作用域。
+
 历史档案路由（`/tasks…`）必须注册在 `/{task_id}` 之前——动态段会把 `tasks`
-当成 task_id 吃掉（与 `jobs.py` 里 `fetch-descriptions` 同款坑）。
+当成 task_id 吃掉（与 `jobs.py` 里 `fetch-descriptions` 同款坑）。两个 router
+分开挂时这条退化成「`batch_router` 先挂」，见 `boss_web/api/__init__.py`。
+
+切片只认**路径作用域**：`/api/sites/{site}/crawl/tasks` 切到那个站点，
+`/api/crawl/tasks` 不切（跨站点全量）。故意不加 `?site=` 查询过滤——同一个
+handler 挂两遍时，`{site}` 既是路径段又是查询名会撞车；共用页要看全量、
+平台页看自己，这两种需求路径已经覆盖了，真要按站点挑再单开路由。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
-from boss_jobs.store import JobStore
+from boss_jobs.store import DEFAULT_SITE, JobStore
 
 from ..errors import NotFoundError, ValidationWebError
 from ..services.crawl_task import crawl_tasks
 from ..services.match_task import match_tasks
 
+#: 抓取执行（平台作用域）。
 router = APIRouter()
+
+#: 批次账（共用；站点口只切列表）。
+batch_router = APIRouter()
 
 
 class CrawlBody(BaseModel):
@@ -46,15 +64,22 @@ class CrawlMatchBody(BaseModel):
     resume_id: str
 
 
-@router.get("/tasks")
+@batch_router.get("/tasks")
 def list_tasks(
+    request: Request,
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
-    """历史任务分页列表。进行中任务置顶并附实时进度（内存快照优先）。"""
+    """批次账分页列表。进行中任务置顶并附实时进度（内存快照优先）。
+
+    切片只认路径作用域：站点口（`/api/sites/{site}/crawl/tasks`）只列本站点批次，
+    共用口（`/api/crawl/tasks`）跨站点全量。
+    """
+    scope = str(getattr(request.state, "site", "") or "")
+    sliced = scope or None
     with JobStore() as store:
-        items = store.list_crawl_tasks(limit=limit, offset=offset)
-        total = store.count_crawl_tasks()
+        items = store.list_crawl_tasks(limit=limit, offset=offset, site=sliced)
+        total = store.count_crawl_tasks(site=sliced)
         for item in items:
             item["job_count_existing"] = store.count_crawl_task_jobs(
                 str(item.get("task_id") or ""), only_existing=True
@@ -64,40 +89,43 @@ def list_tasks(
     live_id = live.task_id if live is not None else ""
     if live_id:
         snap = live.snapshot()
-        for item in items:
-            if str(item.get("task_id")) == live_id:
-                item["status"] = snap.get("status") or item.get("status")
-                item["progress"] = snap.get("progress") or {}
-                item["phase"] = snap.get("phase") or ""
-                item["live"] = True
-                break
-        else:
-            items.insert(0, {
-                "task_id": live_id,
-                "source": "expect" if _is_expect(snap) else "search",
-                "status": snap.get("status") or "running",
-                "created_at": snap.get("created_at") or 0,
-                "started_at": snap.get("created_at") or 0,
-                "ended_at": snap.get("ended_at") or 0,
-                "params": snap.get("params") or {},
-                "stats": snap.get("progress") or {},
-                "progress": snap.get("progress") or {},
-                "phase": snap.get("phase") or "",
-                "job_count": 0,
-                "job_count_existing": 0,
-                "inserted_count": 0,
-                "updated_count": 0,
-                "error": "",
-                "stopped_reason": "",
-                "live": True,
-            })
-            total += 1
+        live_site = str(snap.get("site") or live.site or DEFAULT_SITE)
+        if sliced is None or live_site == sliced:
+            for item in items:
+                if str(item.get("task_id")) == live_id:
+                    item["status"] = snap.get("status") or item.get("status")
+                    item["progress"] = snap.get("progress") or {}
+                    item["phase"] = snap.get("phase") or ""
+                    item["live"] = True
+                    break
+            else:
+                items.insert(0, {
+                    "task_id": live_id,
+                    "site": live_site,
+                    "source": "expect" if _is_expect(snap) else "search",
+                    "status": snap.get("status") or "running",
+                    "created_at": snap.get("created_at") or 0,
+                    "started_at": snap.get("created_at") or 0,
+                    "ended_at": snap.get("ended_at") or 0,
+                    "params": snap.get("params") or {},
+                    "stats": snap.get("progress") or {},
+                    "progress": snap.get("progress") or {},
+                    "phase": snap.get("phase") or "",
+                    "job_count": 0,
+                    "job_count_existing": 0,
+                    "inserted_count": 0,
+                    "updated_count": 0,
+                    "error": "",
+                    "stopped_reason": "",
+                    "live": True,
+                })
+                total += 1
     for item in items:
         item.setdefault("live", False)
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/tasks/{task_id}")
+@batch_router.get("/tasks/{task_id}")
 def get_task(task_id: str) -> dict[str, Any]:
     """按 id 取历史抓取任务；进行中可从内存快照兜底。"""
     with JobStore() as store:
@@ -108,6 +136,7 @@ def get_task(task_id: str) -> dict[str, Any]:
                 snap = live.snapshot()
                 return {
                     "task_id": task_id,
+                    "site": str(snap.get("site") or live.site or DEFAULT_SITE),
                     "source": "expect" if _is_expect(snap) else "search",
                     "status": snap.get("status") or "running",
                     "created_at": snap.get("created_at") or 0,
@@ -138,7 +167,7 @@ def get_task(task_id: str) -> dict[str, Any]:
     return item
 
 
-@router.get("/tasks/{task_id}/jobs")
+@batch_router.get("/tasks/{task_id}/jobs")
 def list_task_jobs(
     task_id: str,
     limit: int = Query(20, ge=1, le=5000),
@@ -162,7 +191,7 @@ def list_task_jobs(
     }
 
 
-@router.post("/tasks/{task_id}/match")
+@batch_router.post("/tasks/{task_id}/match")
 def match_task_batch(task_id: str, body: CrawlMatchBody) -> dict[str, Any]:
     """糖：等价于 `analyze` + `crawl_task_id`（前端可少拼一层）。
 

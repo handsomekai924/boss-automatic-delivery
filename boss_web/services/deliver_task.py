@@ -3,9 +3,12 @@
 一键 / 多条 / 单条三种入口只差目标集合，任务本身只认一串 `encrypt_job_id`。
 串行发送、`delivered_at` 有值跳过不重发、单条失败只记 `deliver_error` 不自动
 重试；结果写回 `analysis` 的 `deliver_status` / `delivered_at` / `deliver_error`。
+条间间隔与每日发对话配额从 `site_settings` 取——限速是**站点属性**不是全局
+常量，`throttle_ms` 配了就盖掉 `DELIVER_INTERVAL`，`daily_quota` 到顶整批不再发。
 协议与风控细节见 `notes/boss_web/services/deliver_task.md`。
 
 Attributes:
+    SITE: 发送通道所属站点；`site_settings` 的节流/每日配额按它取。
     ST_RUNNING: 任务运行中。
     ST_DONE: 任务正常结束。
     ST_ERROR: 任务出错或被停批。
@@ -43,6 +46,7 @@ from .resume_store import (
     update_delivery,
 )
 from .deliver_config_store import load_config as load_deliver_config
+from .site_settings_store import limits_payload, load_site_limits
 from .task_runtime import POLICY_GLOBAL_SINGLE, TaskTypeSpec, hub
 from .troubleshoot import humanize
 
@@ -50,12 +54,16 @@ logger = logging.getLogger(__name__)
 
 ST_RUNNING = "running"
 
+#: 发送通道所属站点：任务占用、`site_settings` 的节流/配额都按它分账。
+SITE = "boss"
+
 hub.register(
     TaskTypeSpec(
         "deliver",
         title="批量发送",
         policy=POLICY_GLOBAL_SINGLE,
         title_fn=lambda req: f"批量发送（{len(req.get('job_ids') or [])}条）",
+        site=SITE,  # todo3 Stage 1：随本模块一起搬进 boss-platform-boss，届时由 adapter 自述
     )
 )
 ST_DONE = "done"
@@ -242,6 +250,9 @@ class DeliverTask:
         items: 每个目标的状态流水，按 `encrypt_job_id` 贴回结果行。
         events: 最近事件环。
         cancel_flag: 是否已请求取消。
+        limits: 本次生效的站点限速/配额（`site_settings`），只读视图用。
+        stopped_reason: 整批停住 / 剩下的没发的原因；没停 = 空串。跟
+            `flow.DeliverReport.stopped_reason` 同一语义，投递页直接显示它。
     """
 
     def __init__(
@@ -273,6 +284,10 @@ class DeliverTask:
         self.items: list[dict[str, Any]] = []
         self.events: deque[dict[str, Any]] = deque(maxlen=100)
         self.cancel_flag = False
+        #: 本次生效的站点限速/配额（`site_settings`），任务中心只读视图用。
+        self.limits: dict[str, Any] = {}
+        #: 整批停住 / 剩下的没发的原因（`flow.DeliverReport.stopped_reason` 同义）。
+        self.stopped_reason: str = ""
         self.lock = threading.RLock()
 
     def push(self, name: str, payload: dict[str, Any] | None = None) -> None:
@@ -340,6 +355,8 @@ class DeliverTask:
                 "failed": self.failed,
                 "skipped": self.skipped,
                 "items": list(self.items),
+                "limits": dict(self.limits),
+                "stopped_reason": self.stopped_reason,
                 "events": list(self.events)[-20:],
             }
 
@@ -350,7 +367,8 @@ class DeliverTaskManager:
     Args:
         client_factory: 造 `JobClient` 的工厂（测试里注入假的）。
         sleeper: 可替换的 sleep（测试里注入 no-op）。
-        interval: 条间隔（秒），默认 `boss_jobs.config.DELIVER_INTERVAL`。
+        interval: 条间隔（秒），默认 `boss_jobs.config.DELIVER_INTERVAL`；
+            `site_settings.throttle_ms` 配了就盖掉它。
     """
 
     def __init__(
@@ -548,10 +566,30 @@ class DeliverTaskManager:
             with task.lock:
                 task.status = ST_ERROR
                 task.error = message
+                task.stopped_reason = message
                 task.ended_at = time.time()
             task.push("confirmation_required", {"message": message, "count": len(restricted)})
             store.close()
             return
+
+        # 站点限速/配额（site_settings）：限速是站点属性，条间隔与每日上限照它办
+        settings, sent_today = load_site_limits(SITE)
+        interval = settings.throttle_seconds or self._interval
+        quota_left = settings.quota_left(sent_today)
+        with task.lock:
+            task.limits = {"interval": interval, **limits_payload(settings, sent_today)}
+        if quota_left is not None and len(todo) > quota_left:
+            reason = f"今日发对话配额已用完（{settings.daily_quota} 条），未发送"
+            with task.lock:
+                task.stopped_reason = reason
+            for item in todo[quota_left:]:
+                self._record(task, item, status=ITEM_SKIPPED, error=reason)
+                task.push(
+                    "skipped",
+                    {"encrypt_job_id": item.get("encrypt_job_id"), "reason": reason},
+                )
+            todo = todo[:quota_left]
+            task.push("quota_exhausted", {"daily_quota": settings.daily_quota})
 
         task.total = len(todo)
         if not todo:
@@ -648,8 +686,8 @@ class DeliverTaskManager:
                     task.push("sent", {"encrypt_job_id": jid, "job_name": name})
 
                 task.done += 1
-                if self._interval > 0 and task.done < task.total:
-                    self._sleep(self._interval)
+                if interval > 0 and task.done < task.total:
+                    self._sleep(interval)
 
             with task.lock:
                 if task.status == ST_RUNNING:
@@ -760,6 +798,7 @@ class DeliverTaskManager:
         with task.lock:
             task.status = ST_ERROR
             task.error = message
+            task.stopped_reason = message
             task.ended_at = time.time()
         task.push("error", {"message": message})
 
@@ -768,6 +807,7 @@ class DeliverTaskManager:
         with task.lock:
             task.status = ST_ERROR
             task.error = message
+            task.stopped_reason = message
             task.ended_at = time.time()
         task.push("error", {"message": message})
 

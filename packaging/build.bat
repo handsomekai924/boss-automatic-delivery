@@ -16,6 +16,25 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
+rem The React shell is built first: PyInstaller packs boss_web/static/dist.
+rem Without it the frozen exe starts into an empty page, so fail loudly here.
+where pnpm >nul 2>nul
+if errorlevel 1 (
+  echo pnpm not found. The frontend build needs Node.js, then:
+  echo   npm install -g pnpm
+  echo Re-run build.bat after that.
+  exit /b 1
+)
+call pnpm install
+if errorlevel 1 exit /b 1
+pushd apps\web
+call pnpm run build
+if errorlevel 1 (
+  popd
+  exit /b 1
+)
+popd
+
 rem Wipe dist first. A leftover onefile exe / data/ from an older layout
 rem otherwise sits next to the new build and people ship the wrong thing.
 if exist "dist" (

@@ -111,6 +111,7 @@ class Job:
         jd_status: 详情处理状态：pending / collecting / completed / empty / failed / unchecked。
         is_blacklisted: 当前规则评估结果；历史分析另存自己的不可变快照。
         last_greeted_at: 最近一次「发招呼语」成功时间；30 天冷却的唯一岗位级依据，抓取 UPSERT 不覆盖。
+        site: 归属站点（`jobs.site`）；跨站点职位库按它过滤。
     """
 
     job_name: str
@@ -158,6 +159,9 @@ class Job:
     blacklist_checked_at: str = ""
     auto_delivery_blocked: bool = True
     last_greeted_at: str = ""
+    #: 归属站点（`jobs.site`）：跨站点职位库按它过滤。抓下来还没入库的清洗对象
+    #: 是空串，落库由列默认（单站点旧账全归 BOSS）补齐，读出来就一直带着。
+    site: str = ""
 
     @classmethod
     def from_api(cls, item: dict[str, Any], *, page: int = 0) -> "Job":

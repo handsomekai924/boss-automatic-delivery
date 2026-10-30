@@ -229,11 +229,14 @@ def search_payload(f: JobSearchFilter) -> dict[str, Any]:
     }
 
 
-def load_snapshot(path: Path | str | None = None) -> CollectionSnapshot:
+def load_snapshot(
+    path: Path | str | None = None, *, site: str | None = None
+) -> CollectionSnapshot:
     """给 worker 一次性读齐当前搜索、采集设置与启用中的黑名单规则。
 
     Args:
         path: 状态库路径；省略 = `BOSS_DB` = `data/boss.db`。
+        site: 只取这个站点生效的黑名单规则（含全站规则）；`None` = 不切。
 
     Returns:
         不可变的任务启动快照。
@@ -246,5 +249,5 @@ def load_snapshot(path: Path | str | None = None) -> CollectionSnapshot:
         created_at=__import__("time").time(),
         search=search_payload(f),
         collection=load_config(path).to_dict(),
-        rules=tuple(list_enabled_rules(path=path)),
+        rules=tuple(list_enabled_rules(site=site, path=path)),
     )

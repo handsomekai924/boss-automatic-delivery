@@ -14,7 +14,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import boss_db
 
@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = boss_db.PROJECT_ROOT
 
 DEFAULT_DB_PATH = boss_db.DEFAULT_DB_PATH
+
+#: 登录态归属的站点 id（todo3 Stage 1：随 boss-platform-boss 一起搬，届时由 adapter 自述）。
+SITE_ID: Final[str] = "boss"
 
 
 @dataclass
@@ -65,7 +68,7 @@ def save_session(
         "user": session.user,
         "saved_at": session.saved_at or time.time(),
     }
-    resolved = boss_db.doc_set(boss_db.DOC_SESSION, payload, path)
+    resolved = boss_db.doc_set(boss_db.DOC_SESSION, payload, path, site=SITE_ID)
     logger.info("登录态已保存到 %s", resolved)
     return resolved
 
@@ -73,7 +76,7 @@ def save_session(
 def load_session(path: Path | str | None = None) -> StoredSession:
     """读取登录态；库里没有、payload 坏了、库文件打不开，都按未登录处理。"""
     try:
-        payload = boss_db.doc_get(boss_db.DOC_SESSION, path)
+        payload = boss_db.doc_get(boss_db.DOC_SESSION, path, site=SITE_ID)
     except (OSError, sqlite3.Error) as exc:
         logger.warning("状态库打不开，按未登录处理：%s", exc)
         return StoredSession()
@@ -92,7 +95,7 @@ def load_session(path: Path | str | None = None) -> StoredSession:
 def clear_session(path: Path | str | None = None) -> bool:
     """删除本地登录态，返回是否真的删掉了东西。"""
     try:
-        removed = boss_db.doc_delete(boss_db.DOC_SESSION, path)
+        removed = boss_db.doc_delete(boss_db.DOC_SESSION, path, site=SITE_ID)
     except (OSError, sqlite3.Error) as exc:
         logger.warning("状态库打不开，登录态没删成：%s", exc)
         return False
@@ -107,6 +110,6 @@ def has_session_row(path: Path | str | None = None) -> bool:
     与 `load_session` 的「内容是不是空」是两回事；打不开的库按「没有」处理。
     """
     try:
-        return boss_db.doc_get_raw(boss_db.DOC_SESSION, path) is not None
+        return boss_db.doc_get_raw(boss_db.DOC_SESSION, path, site=SITE_ID) is not None
     except (OSError, sqlite3.Error):
         return False

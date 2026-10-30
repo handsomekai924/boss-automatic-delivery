@@ -117,20 +117,20 @@ def test_账本_读写往返(tmp_path: Path):
     again = store.load()
     assert again is not None and again.token == "0138S"
     assert store.path == db
-    assert boss_db.doc_get_raw(boss_db.DOC_STOKEN, db) is not None
+    assert boss_db.doc_get_raw(boss_db.DOC_STOKEN, db, site="boss") is not None
 
 
 def test_账本_坏payload当没有(tmp_path: Path):
     """验证账本就坏 payload 当没有。"""
     db = tmp_path / "boss.db"
-    boss_db.doc_set(boss_db.DOC_STOKEN, "不是 JSON", db)
+    boss_db.doc_set(boss_db.DOC_STOKEN, "不是 JSON", db, site="boss")
     assert StokenStore(db).load() is None
 
 
 def test_账本_非对象当没有(tmp_path: Path):
     """验证账本就非对象当没有。"""
     db = tmp_path / "boss.db"
-    boss_db.doc_set(boss_db.DOC_STOKEN, "[1, 2]", db)
+    boss_db.doc_set(boss_db.DOC_STOKEN, "[1, 2]", db, site="boss")
     assert StokenStore(db).load() is None
 
 
@@ -353,7 +353,7 @@ def test_不镜像时不碰登录态(tmp_path: Path):
         acquire=lambda: "0138X",
     )
     p.ensure()
-    assert boss_db.doc_get_raw(boss_db.DOC_SESSION, session_db) is None
+    assert boss_db.doc_get_raw(boss_db.DOC_SESSION, session_db, site="boss") is None
 
 
 def test_find_chrome_认环境变量(tmp_path: Path, monkeypatch):
@@ -847,7 +847,7 @@ def test_落盘记录带过期时间(tmp_path: Path):
     """`doc('stoken')` 必须有 expires_at，否则下次 fetch 判不了过期。"""
     p = provider(tmp_path)
     p.ensure()
-    payload = boss_db.doc_get(boss_db.DOC_STOKEN, tmp_path / "boss.db")
+    payload = boss_db.doc_get(boss_db.DOC_STOKEN, tmp_path / "boss.db", site="boss")
     assert payload is not None
     assert payload["token"] == "0138NEW"
     assert payload["expires_at"] > time.time()

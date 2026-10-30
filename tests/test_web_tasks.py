@@ -106,6 +106,71 @@ def test_unlimited_并发有上限(hub_spec):
         hub.occupy("match", request={})
 
 
+# --- 任务按站点排队（docs 6.5）：占用按 (site, key) 记账 ---
+
+
+def test_per_key_single_同key不同站点可并行(hub_spec):
+    """同一份简历在两个站点同时解析不互相挡——通道边界是站点。"""
+    hub.occupy("parse", request={"site": "boss", "resume_id": "r1"})
+    hub.track(FakeTask("p1"), task_type="parse", request={"site": "boss", "resume_id": "r1"})
+    keys = hub.occupy("parse", request={"site": "51job", "resume_id": "r1"})
+    assert keys == ["r1"]
+
+
+def test_per_key_single_同key同站点仍冲突(hub_spec):
+    """站点不同才放行；同站点同 key 照旧拦。"""
+    hub.occupy("parse", request={"site": "boss", "resume_id": "r1"})
+    hub.track(FakeTask("p1"), task_type="parse", request={"site": "boss", "resume_id": "r1"})
+    with pytest.raises(ConflictError):
+        hub.occupy("parse", request={"site": "boss", "resume_id": "r1"})
+
+
+def test_global_single_按站点串行(hub_spec):
+    """同型任务按站点排队：boss 在发，不挡 51job 发。"""
+    hub.occupy("deliver", request={"site": "boss"})
+    hub.track(FakeTask("d1"), task_type="deliver", request={"site": "boss"})
+    assert hub.occupy("deliver", request={"site": "51job"}) == [""]
+    with pytest.raises(ConflictError):
+        hub.occupy("deliver", request={"site": "boss"})
+
+
+def test_mutual_group_按站点分通道(hub_spec):
+    """抓取/补抓共用**站点**通道：boss 在抓不挡 51job 抓，也不挡 51job 补抓。"""
+    hub.occupy("crawl", request={"site": "boss"})
+    hub.track(FakeTask("c1"), task_type="crawl", request={"site": "boss"})
+    with pytest.raises(ConflictError):
+        hub.occupy("desc", request={"site": "boss"})
+    hub.occupy("crawl", request={"site": "51job"})
+    hub.occupy("desc", request={"site": "51job"})
+
+
+def test_unlimited_max_parallel_按站点计(hub_spec):
+    """并发上限分站点算，不跨站点挤兑。"""
+    hub.occupy("match", request={"site": "boss"})
+    hub.track(FakeTask("m1"), task_type="match", request={"site": "boss"})
+    hub.occupy("match", request={"site": "boss"})
+    hub.track(FakeTask("m2"), task_type="match", request={"site": "boss"})
+    with pytest.raises(ConflictError):
+        hub.occupy("match", request={"site": "boss"})
+    # 另一个站点还有额度
+    hub.occupy("match", request={"site": "51job"})
+
+
+def test_站点取值顺序_启动参数优先于类型自述(hub_spec):
+    """`track()` 与 `occupy()` 算站点必须同一条规则，否则记账对不上。"""
+    hub.register(TaskTypeSpec("login", title="登录", policy=POLICY_GLOBAL_SINGLE, site="boss"))
+    try:
+        hub.occupy("login", request={})
+        hub.track(FakeTask("l1"), task_type="login", request={})
+        assert hub.snapshot("l1")["site"] == "boss"  # spec 自述兜底
+        with pytest.raises(ConflictError):
+            hub.occupy("login", request={})
+        # 启动参数里的 site 覆盖 spec 自述
+        assert hub.occupy("login", request={"site": "51job"}) == [""]
+    finally:
+        hub._specs.pop("login", None)  # noqa: SLF001
+
+
 def test_结束任务不占坑(hub_spec):
     """任务到终态后自动放行下一个。"""
     t = FakeTask("c1")
@@ -138,6 +203,20 @@ def test_api_list_and_cancel(client: TestClient, hub_spec):
     r = client.delete("/api/tasks/c1")
     assert r.status_code == 200
     assert client.get("/api/tasks").json()["tasks"] == []
+
+
+def test_api_list_items与tasks是同一个列表(client: TestClient, hub_spec):
+    """`items` 是列表接口的通用键，`tasks` 留给 WS `hello` 与 legacy。
+
+    两把钥匙开同一扇门，别只回一个键把另一侧晾着——前端按 `items` 取，
+    WS 快照按 `tasks` 取，缺哪个都有人拿不到东西。
+    """
+    t = FakeTask("c1")
+    hub.occupy("crawl", request={})
+    hub.track(t, task_type="crawl", title="抓「前端」")
+    data = client.get("/api/tasks").json()
+    assert data["items"] == data["tasks"]
+    assert [i["task_id"] for i in data["items"]] == ["c1"]
 
 
 def test_api_delete_拒绝未结束(client: TestClient, hub_spec):

@@ -27,6 +27,29 @@ const routes = {
   "/llm": renderSettings,
 };
 
+/**
+ * 已迁到新壳的页面：旧 hash → 新壳路由（M2「旧入口逐个下线并在 legacy 留跳转」）。
+ *
+ * 目标在另一个壳（`/` 是新壳，这里挂 `/legacy/`），所以走整页跳转而不是改 hash；
+ * 回退就是把对应行从这张表里摘掉，legacy 视图代码一行没动。
+ */
+const MIGRATED = {
+  "/tasks": "/tasks",
+  "/login": "/boss/login",
+  "/jobs": "/boss/jobs",
+  "/settings": "/settings",
+  "/llm": "/settings",
+  "/resume": "/resumes",
+  "/match": "/match",
+  "/interview": "/interview",
+};
+
+/** 新壳根路径：把 `/legacy/…` 前缀削掉，换壳跳转对部署前缀不敏感。 */
+function newShellHref(target) {
+  const base = window.location.pathname.replace(/\/legacy\/.*$/, "/");
+  return `${base}#${target}`;
+}
+
 /** 上一视图的清理函数，换页前调用。 */
 let disposePrev = null;
 
@@ -59,6 +82,12 @@ function paintStages(path) {
 /** 按 hash 渲染当前视图，换页前先调用上一视图的 dispose。 */
 export async function navigate() {
   const path = currentPath();
+  // 迁走的页面不再本地渲染，直接把旧书签/旧入口送进新壳对应页
+  const migrated = MIGRATED[path];
+  if (migrated) {
+    window.location.replace(newShellHref(migrated));
+    return;
+  }
   paintStages(path);
   const view = document.getElementById("view");
   if (typeof disposePrev === "function") {

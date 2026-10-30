@@ -20,6 +20,7 @@ import os
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Iterator, Mapping
 from contextlib import contextmanager
@@ -44,18 +45,31 @@ DOC_DELIVER_CONFIG: Final[str] = "deliver_config"
 DOC_APP_SETTINGS: Final[str] = "app_settings"
 DOC_COLLECTION_CONFIG: Final[str] = "collection_config"
 
+#: 共用 doc 键的站点值：不带站点语义（LLM / 应用设置这类全局配置）。
+SITE_SHARED: Final[str] = ""
+
+#: 旧账本的归属站点：单站点时代整库都是 BOSS 的，登录态一族迁入这个站点名下。
+LEGACY_SITE: Final[str] = "boss"
+
+#: 随站点走的 doc 键：登录态一族，按 `(site, key)` 隔离，换站点不清别家登录态。
+DOC_SITE_SCOPED: Final[frozenset[str]] = frozenset({DOC_SESSION, DOC_SEARCH_FILTER, DOC_STOKEN})
+
 _MIGRATED_FLAG: Final[str] = "legacy_imported"
 
 _DEPRECATED_ENV: Final[tuple[str, ...]] = ("BOSS_SEARCH_FILTER", "BOSS_STOKEN_STORE")
 _warned_env: set[str] = set()
 
-_SCHEMA = """
+_DOC_DDL = """
 CREATE TABLE IF NOT EXISTS doc (
-    name       TEXT PRIMARY KEY,
+    site       TEXT NOT NULL DEFAULT '',
+    name       TEXT NOT NULL,
     payload    TEXT NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (site, name)
 );
+"""
 
+_SCHEMA = _DOC_DDL + """
 CREATE TABLE IF NOT EXISTS resume (
     resume_id  TEXT PRIMARY KEY,
     title      TEXT NOT NULL DEFAULT '',
@@ -69,6 +83,8 @@ CREATE INDEX IF NOT EXISTS idx_resume_created ON resume(created_at);
 
 CREATE TABLE IF NOT EXISTS analysis (
     analysis_id  TEXT PRIMARY KEY,
+    -- 站点维度（多平台）：引用 (site, encrypt_job_id)；旧库走 _migrate_columns 补列。
+    site         TEXT NOT NULL DEFAULT 'boss',
     resume_id    TEXT NOT NULL DEFAULT '',
     resume_title TEXT NOT NULL DEFAULT '',
     created_at   REAL NOT NULL,
@@ -84,6 +100,8 @@ CREATE INDEX IF NOT EXISTS idx_analysis_created ON analysis(created_at);
 
 CREATE TABLE IF NOT EXISTS jobs (
     encrypt_job_id     TEXT PRIMARY KEY,
+    -- 站点维度（多平台）：旧库走 _migrate_columns 补列；唯一键语义是 (site, encrypt_job_id)。
+    site               TEXT NOT NULL DEFAULT 'boss',
     job_name           TEXT NOT NULL,
     brand_name         TEXT NOT NULL,
     location           TEXT NOT NULL DEFAULT '',
@@ -137,6 +155,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_salary ON jobs(salary_desc);
 
 CREATE TABLE IF NOT EXISTS fetch_pages (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- 站点维度（多平台）：抓取流水按站点分账；旧库走 _migrate_columns 补列。
+    site           TEXT NOT NULL DEFAULT 'boss',
     page           INTEGER NOT NULL,
     raw_count      INTEGER NOT NULL DEFAULT 0,
     kept_count     INTEGER NOT NULL DEFAULT 0,
@@ -154,6 +174,8 @@ CREATE INDEX IF NOT EXISTS idx_fetch_pages_page ON fetch_pages(page);
 
 CREATE TABLE IF NOT EXISTS blacklist_rules (
     rule_id       TEXT PRIMARY KEY,
+    -- 站点维度（多平台）：空串 = 全站生效；旧库走 _migrate_columns 补列。
+    site          TEXT NOT NULL DEFAULT '',
     rule_type     TEXT NOT NULL,
     pattern       TEXT NOT NULL,
     match_mode    TEXT NOT NULL,
@@ -194,6 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_blacklist_hits_task ON blacklist_hits(task_id);
 -- 只读追溯流水，不提供删除/编辑；旧数据不回填（上线前的抓取没有档案）。
 CREATE TABLE IF NOT EXISTS crawl_tasks (
     task_id        TEXT PRIMARY KEY,
+    site           TEXT NOT NULL DEFAULT 'boss',     -- 站点归属（多平台）：一批抓取只来自一个站点；旧库走 _migrate_columns 补列
     source         TEXT NOT NULL DEFAULT 'search',   -- search | expect
     status         TEXT NOT NULL DEFAULT 'running',  -- running | done | error | cancelled
     created_at     REAL NOT NULL,
@@ -270,6 +293,25 @@ CREATE TABLE IF NOT EXISTS interview_questions (
 CREATE INDEX IF NOT EXISTS idx_interview_questions_analysis ON interview_questions(analysis_id);
 CREATE INDEX IF NOT EXISTS idx_interview_questions_job ON interview_questions(encrypt_job_id);
 CREATE INDEX IF NOT EXISTS idx_interview_questions_created ON interview_questions(created_at);
+
+-- 每站点节流/配额/并发：限速是站点属性不是全局常量（todo3 第四节）。
+CREATE TABLE IF NOT EXISTS site_settings (
+    site            TEXT PRIMARY KEY,
+    throttle_ms     INTEGER NOT NULL DEFAULT 0,   -- 条间隔（毫秒），0 = 用站点默认
+    daily_quota     INTEGER NOT NULL DEFAULT 0,   -- 每日投递配额，0 = 不限
+    max_parallel    INTEGER NOT NULL DEFAULT 1,   -- 并发上限
+    apply_enabled   INTEGER NOT NULL DEFAULT 0,   -- 门槛过了之后要不要真投简历
+    updated_at      REAL NOT NULL DEFAULT 0
+);
+
+-- 解析简历 ↔ 站点简历 ID 映射：一份解析简历各站各一份站内简历（ResumeRef 落地处）。
+CREATE TABLE IF NOT EXISTS resume_site_map (
+    resume_id       TEXT NOT NULL,
+    site            TEXT NOT NULL,
+    site_resume_id  TEXT NOT NULL DEFAULT '',
+    updated_at      REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (resume_id, site)
+);
 """
 
 
@@ -367,6 +409,7 @@ def close_all() -> None:
 
 _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     "jobs": {
+        "site": "TEXT NOT NULL DEFAULT 'boss'",
         "job_desc": "TEXT NOT NULL DEFAULT ''",
         "detail_fetched_at": "TEXT NOT NULL DEFAULT ''",
         "jd_status": "TEXT NOT NULL DEFAULT 'pending'",
@@ -384,7 +427,17 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "last_greeted_at": "TEXT NOT NULL DEFAULT ''",
     },
     "fetch_pages": {
+        "site": "TEXT NOT NULL DEFAULT 'boss'",
         "task_id": "TEXT NOT NULL DEFAULT ''",
+    },
+    "crawl_tasks": {
+        "site": "TEXT NOT NULL DEFAULT 'boss'",
+    },
+    "blacklist_rules": {
+        "site": "TEXT NOT NULL DEFAULT ''",
+    },
+    "analysis": {
+        "site": "TEXT NOT NULL DEFAULT 'boss'",
     },
     "resume_revisions": {
         "mode": "TEXT NOT NULL DEFAULT 'targeted'",
@@ -408,6 +461,31 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
             logger.info("状态库补列：%s.%s", table, name)
 
 
+def _migrate_doc_site(conn: sqlite3.Connection) -> None:
+    """`doc` 升级成 `(site, name)` 复合键。
+
+    加列改不了主键，只能整表重建。旧库是单站点（BOSS）账本：登录态一族落
+    `site='boss'`（换站点不清别家登录态），其余 doc 键是全局配置落 `SITE_SHARED`。
+    """
+    existing = {
+        str(row["name"]) for row in conn.execute("PRAGMA table_info(doc)").fetchall()
+    }
+    if "site" in existing:
+        return
+    conn.execute("ALTER TABLE doc RENAME TO doc_pre_site")
+    conn.execute(_DOC_DDL)
+    scoped = sorted(DOC_SITE_SCOPED)
+    marks = ",".join("?" for _ in scoped)
+    conn.execute(
+        "INSERT INTO doc (site, name, payload, updated_at) "
+        f"SELECT CASE WHEN name IN ({marks}) THEN ? ELSE ? END, name, payload, updated_at "
+        "FROM doc_pre_site",
+        (*scoped, LEGACY_SITE, SITE_SHARED),
+    )
+    conn.execute("DROP TABLE doc_pre_site")
+    logger.info("状态库 doc 升级为 (site, name) 复合键")
+
+
 def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
     """打开连接并建表/补列；只对默认库做历史迁移。"""
     is_memory = str(resolved) == ":memory:"
@@ -424,6 +502,7 @@ def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SCHEMA)
+        _migrate_doc_site(conn)
         _migrate_columns(conn)
         conn.commit()
     except sqlite3.Error:
@@ -444,38 +523,58 @@ def _open(resolved: Path, *, migrate: bool) -> sqlite3.Connection:
     return conn
 
 
-def doc_get_raw(name: str, path: Path | str | None = None) -> str | None:
+def _check_site(name: str, site: str) -> str:
+    """登录态一族必须带站点名，不许落进共用位（漏传 = 跨站点串登录态）。
+
+    共用键不带站点语义，`site` 缺省 `SITE_SHARED`；显式传了就按站点隔离。
+    """
+    if name in DOC_SITE_SCOPED and not site:
+        raise ValueError(f"doc 键 {name!r} 随站点走，必须传 site=（站点 id）")
+    return site
+
+
+def doc_get_raw(name: str, path: Path | str | None = None, *, site: str = SITE_SHARED) -> str | None:
     """读 payload 的原始文本（给要自己报 `ValueError` 的调用方用）。"""
     conn = acquire(path)
-    row = conn.execute("SELECT payload FROM doc WHERE name = ?", (name,)).fetchone()
+    row = conn.execute(
+        "SELECT payload FROM doc WHERE site = ? AND name = ?", (_check_site(name, site), name)
+    ).fetchone()
     return None if row is None else str(row["payload"])
 
 
-def doc_get(name: str, path: Path | str | None = None) -> dict[str, Any] | None:
+def doc_get(name: str, path: Path | str | None = None, *, site: str = SITE_SHARED) -> dict[str, Any] | None:
     """读一份单例文档。没有 / payload 坏了 → `None`（调用方按「没有」处理）。"""
-    return _decode_payload(doc_get_raw(name, path))
+    return _decode_payload(doc_get_raw(name, path, site=site))
 
 
-def doc_set(name: str, payload: Mapping[str, Any] | list[Any] | str, path: Path | str | None = None) -> Path:
+def doc_set(
+    name: str,
+    payload: Mapping[str, Any] | list[Any] | str,
+    path: Path | str | None = None,
+    *,
+    site: str = SITE_SHARED,
+) -> Path:
     """写一份单例文档。`payload` 可以是对象，也可以是已经序列化好的字符串。"""
     resolved = resolve_db_path(path)
     text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
     conn = acquire(resolved)
     with conn:
         conn.execute(
-            "INSERT INTO doc (name, payload, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET payload = excluded.payload, "
+            "INSERT INTO doc (site, name, payload, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(site, name) DO UPDATE SET payload = excluded.payload, "
             "updated_at = excluded.updated_at",
-            (name, text, time.time()),
+            (_check_site(name, site), name, text, time.time()),
         )
     return resolved
 
 
-def doc_delete(name: str, path: Path | str | None = None) -> bool:
+def doc_delete(name: str, path: Path | str | None = None, *, site: str = SITE_SHARED) -> bool:
     """删一份单例文档；返回「真的删掉了东西」。"""
     conn = acquire(path)
     with conn:
-        cur = conn.execute("DELETE FROM doc WHERE name = ?", (name,))
+        cur = conn.execute(
+            "DELETE FROM doc WHERE site = ? AND name = ?", (_check_site(name, site), name)
+        )
     return cur.rowcount > 0
 
 
@@ -489,6 +588,175 @@ def _decode_payload(raw: Any) -> dict[str, Any] | None:
         logger.warning("doc.payload 不是合法 JSON，按没有处理")
         return None
     return data if isinstance(data, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# 站点限速/配额（`site_settings`）：限速是站点属性不是全局常量（todo3 第四节）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SiteSettings:
+    """一站点的节流/每日配额/并发/投递开关。
+
+    库里没有这一行也算有值——读出来永远是完整的默认，调用方不用判空。
+    `daily_quota` 数的是**发对话条数**（站点限的本来就是沟通次数），
+    账记在 `jobs.last_greeted_at`，见 `count_greeted_today`。
+
+    Attributes:
+        site: 站点 id。
+        throttle_ms: 条间隔（毫秒）；`0` = 用调用方自带的站点默认。
+        daily_quota: 每日发对话配额；`0` = 不限。
+        max_parallel: 并发上限（任务中心按站点计占用时用）。
+        apply_enabled: 门槛过了之后要不要真投简历。
+        updated_at: 最近一次写入时刻；从未写过 = `0`。
+    """
+
+    site: str
+    throttle_ms: int = 0
+    daily_quota: int = 0
+    max_parallel: int = 1
+    apply_enabled: bool = False
+    updated_at: float = 0.0
+
+
+def _as_int(value: Any, default: int, *, minimum: int = 0) -> int:
+    """表里的整数列读进来夹一下：坏值当默认，负数顶到下限。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, n)
+
+
+def _settings_from_row(row: Any) -> SiteSettings:
+    """把 `site_settings` 一行解成 `SiteSettings`；缺列按默认补。"""
+    data = dict(row) if row is not None else {}
+    site = str(data.get("site") or "")
+    return SiteSettings(
+        site=site,
+        throttle_ms=_as_int(data.get("throttle_ms"), 0),
+        daily_quota=_as_int(data.get("daily_quota"), 0),
+        max_parallel=_as_int(data.get("max_parallel"), 1, minimum=1),
+        apply_enabled=bool(_as_int(data.get("apply_enabled"), 0)),
+        updated_at=float(data.get("updated_at") or 0.0),
+    )
+
+
+def get_site_settings(site: str, path: Path | str | None = None) -> SiteSettings:
+    """读一站点的限速/配额；没有这一行 → 全默认值（节流 0 / 配额 0 / 并发 1 / 不投）。
+
+    Args:
+        site: 站点 id。
+        path: 库路径；省略 = `resolve_db_path()`。
+
+    Returns:
+        该站点的限速/配额设置。
+    """
+    if not site:
+        raise ValueError("site_settings 必须带站点名")
+    conn = acquire(path)
+    row = conn.execute("SELECT * FROM site_settings WHERE site = ?", (site,)).fetchone()
+    if row is None:
+        return SiteSettings(site=site)
+    return _settings_from_row(row)
+
+
+def set_site_settings(
+    site: str,
+    path: Path | str | None = None,
+    *,
+    throttle_ms: int | None = None,
+    daily_quota: int | None = None,
+    max_parallel: int | None = None,
+    apply_enabled: bool | None = None,
+) -> SiteSettings:
+    """改一站点的限速/配额；传 `None` 的字段保持原值（跟 `update_config` 同规矩）。
+
+    Args:
+        site: 站点 id。
+        path: 库路径；省略 = `resolve_db_path()`。
+        throttle_ms: 条间隔（毫秒）。
+        daily_quota: 每日发对话配额。
+        max_parallel: 并发上限。
+        apply_enabled: 门槛过了之后要不要真投简历。
+
+    Returns:
+        写完之后的设置。
+    """
+    current = get_site_settings(site, path)
+    merged = SiteSettings(
+        site=site,
+        throttle_ms=current.throttle_ms if throttle_ms is None else _as_int(throttle_ms, 0),
+        daily_quota=current.daily_quota if daily_quota is None else _as_int(daily_quota, 0),
+        max_parallel=(
+            current.max_parallel if max_parallel is None else _as_int(max_parallel, 1, minimum=1)
+        ),
+        apply_enabled=(
+            current.apply_enabled if apply_enabled is None else bool(apply_enabled)
+        ),
+        updated_at=time.time(),
+    )
+    conn = acquire(path)
+    with conn:
+        conn.execute(
+            "INSERT INTO site_settings "
+            "(site, throttle_ms, daily_quota, max_parallel, apply_enabled, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(site) DO UPDATE SET "
+            "throttle_ms = excluded.throttle_ms, daily_quota = excluded.daily_quota, "
+            "max_parallel = excluded.max_parallel, apply_enabled = excluded.apply_enabled, "
+            "updated_at = excluded.updated_at",
+            (
+                site,
+                merged.throttle_ms,
+                merged.daily_quota,
+                merged.max_parallel,
+                int(merged.apply_enabled),
+                merged.updated_at,
+            ),
+        )
+    return merged
+
+
+def list_site_settings(path: Path | str | None = None) -> list[SiteSettings]:
+    """全部写过限速/配额的站点；没写过行的站点不在这儿（用默认值即可）。"""
+    conn = acquire(path)
+    rows = conn.execute("SELECT * FROM site_settings ORDER BY site").fetchall()
+    return [_settings_from_row(r) for r in rows]
+
+
+def count_greeted_today(
+    site: str,
+    *,
+    now: float | None = None,
+    path: Path | str | None = None,
+) -> int:
+    """该站点今天已经发出去的招呼数——每日配额的账。
+
+    账记在 `jobs.last_greeted_at`（`boss_jobs.store.JobStore.update_last_greeted_at`
+    写，`%Y-%m-%d %H:%M:%S`，字典序 == 时间序），所以按 `(site, 当天零点)`
+    数行就行。失败/跳过不写这一列，天然只数成功的。
+
+    Args:
+        site: 站点 id。
+        now: 判定时刻；省略用当前时间（跨天按本地日历算）。
+        path: 库路径；省略 = `resolve_db_path()`。
+
+    Returns:
+        今天发出的条数。
+    """
+    if not site:
+        raise ValueError("count_greeted_today 必须带站点名")
+    day_start = time.strftime(
+        "%Y-%m-%d 00:00:00", time.localtime(time.time() if now is None else float(now))
+    )
+    conn = acquire(path)
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE site = ? AND last_greeted_at >= ?",
+        (site, day_start),
+    ).fetchone()
+    return int(row["n"] or 0) if row is not None else 0
 
 
 def migrate_legacy(
@@ -534,7 +802,7 @@ def migrate_legacy(
             (DOC_STOKEN, root / "stoken.json"),
             (DOC_LLM_CONFIG, data_dir / "llm_config.json"),
         ):
-            if _raw_row(conn, name) is not None or not src.exists():
+            if _raw_row(conn, name, site=_legacy_site(name)) is not None or not src.exists():
                 continue
             try:
                 text = src.read_text(encoding="utf-8")
@@ -543,8 +811,8 @@ def migrate_legacy(
                 logger.warning("迁移跳过 %s：%s", src, exc)
                 continue
             conn.execute(
-                "INSERT INTO doc (name, payload, updated_at) VALUES (?, ?, ?)",
-                (name, text, src.stat().st_mtime),
+                "INSERT INTO doc (site, name, payload, updated_at) VALUES (?, ?, ?, ?)",
+                (_legacy_site(name), name, text, src.stat().st_mtime),
             )
             counts[name] = 1
             _unlink_quiet(src)
@@ -553,10 +821,11 @@ def migrate_legacy(
         counts["analysis"] = _import_analyses(conn, data_dir / "analyses")
 
         conn.execute(
-            "INSERT INTO doc (name, payload, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET payload = excluded.payload, "
+            "INSERT INTO doc (site, name, payload, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(site, name) DO UPDATE SET payload = excluded.payload, "
             "updated_at = excluded.updated_at",
             (
+                SITE_SHARED,
                 SCHEMA_DOC,
                 json.dumps({_MIGRATED_FLAG: True, "migrated_at": time.time()}),
                 time.time(),
@@ -574,9 +843,16 @@ def migrate_legacy(
     return counts
 
 
-def _raw_row(conn: sqlite3.Connection, name: str) -> str | None:
+def _legacy_site(name: str) -> str:
+    """旧账本某 doc 键该落谁名下：登录态一族归旧站点，其余是全局配置。"""
+    return LEGACY_SITE if name in DOC_SITE_SCOPED else SITE_SHARED
+
+
+def _raw_row(conn: sqlite3.Connection, name: str, site: str = SITE_SHARED) -> str | None:
     """读 `doc` 某行的原始 payload 文本。"""
-    row = conn.execute("SELECT payload FROM doc WHERE name = ?", (name,)).fetchone()
+    row = conn.execute(
+        "SELECT payload FROM doc WHERE site = ? AND name = ?", (_check_site(name, site), name)
+    ).fetchone()
     return None if row is None else str(row["payload"])
 
 
@@ -757,6 +1033,10 @@ __all__ = [
     "DOC_LLM_CONFIG",
     "DOC_DELIVER_CONFIG",
     "DOC_APP_SETTINGS",
+    "DOC_SITE_SCOPED",
+    "SITE_SHARED",
+    "LEGACY_SITE",
+    "SiteSettings",
     "resolve_db_path",
     "db",
     "acquire",
@@ -767,5 +1047,9 @@ __all__ = [
     "doc_get_raw",
     "doc_set",
     "doc_delete",
+    "get_site_settings",
+    "set_site_settings",
+    "list_site_settings",
+    "count_greeted_today",
     "migrate_legacy",
 ]

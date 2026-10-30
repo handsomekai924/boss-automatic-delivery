@@ -26,9 +26,17 @@ router = APIRouter()
 def list_tasks(
     task_type: str = Query("", description="按类型过滤"),
     status: str = Query("", description="running / finished / 具体状态；空=全部"),
+    site: str | None = Query(
+        None, description="按站点过滤；不传=全部，传空串=只看共用任务"
+    ),
 ) -> dict[str, Any]:
-    """任务中心列表。"""
-    return hub.list_snapshots(task_type=task_type, status=status)
+    """任务中心列表。
+
+    回包里 `items` 与 `tasks` 是**同一个列表**：`items` 是列表接口的通用键，
+    新前端按 `items` 取；`tasks` 留给 WS `hello` 快照与 legacy 读，别删。
+    """
+    snap = hub.list_snapshots(task_type=task_type, status=status, site=site)
+    return {**snap, "items": snap["tasks"]}
 
 
 @router.get("/tasks/{task_id}")
@@ -79,8 +87,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
             "ts": _now(),
             "task_type": "",
             "task_id": "",
+            "site": "",
             "data": {
                 "tasks": hub.hello_payload(),
+                "sessions": _sessions_payload(),
+                # `session` 是旧壳（legacy）认的单站摘要，M3 随 legacy 一起删，只留 `sessions`。
                 "session": _session_payload(),
                 "update": _update_payload(),
                 "version": _version_payload(),
@@ -126,14 +137,17 @@ async def _consume(ws: WebSocket) -> None:
             continue
         kind = str(data.get("type") or "")
         if kind == "ping":
-            await _send(ws, {"type": "pong", "ts": _now(), "task_type": "", "task_id": "", "data": {}})
+            await _send(ws, {
+                "type": "pong", "ts": _now(), "task_type": "", "task_id": "", "site": "", "data": {},
+            })
         elif kind == "resync":
             await _send(ws, {
                 "type": "task.snapshot",
                 "ts": _now(),
                 "task_type": "",
                 "task_id": "",
-                "data": {"tasks": hub.hello_payload()},
+                "site": "",
+                "data": {"tasks": hub.hello_payload(), "sessions": _sessions_payload()},
             })
 
 
@@ -151,6 +165,20 @@ def _now() -> float:
     import time
 
     return time.time()
+
+
+def _sessions_payload() -> dict[str, Any]:
+    """全站登录态摘要（hello 帧附带）：`{site_id: SessionSummary}`。
+
+    由注册表聚合各 adapter 自述，前端不许自己维护站点清单；形状与
+    `GET /api/platforms` 里的 `session` 同构。
+    """
+    try:
+        from ..core.registry import all_adapters
+
+        return {a.site_id: dict(a.session_summary()) for a in all_adapters()}
+    except Exception:  # noqa: BLE001 - 摘要取不到不该拦住 WS 握手
+        return {}
 
 
 def _session_payload() -> dict[str, Any]:

@@ -488,3 +488,89 @@ def test_match_includes_safety_snapshot():
         "matched_rule_snapshot",
     ):
         assert key in snap
+
+
+# --- 站点归属（todo3 第四节）：规则有的是站点语义，`site=''` = 全站生效 ---
+
+
+def test_create_rule_默认全站生效():
+    """不指定站点 = 全站规则（空串），跟单站点旧账同形状——不是落成 `'boss'`。"""
+    rule = blacklist.create_rule(
+        {"rule_type": "company", "pattern": "甲公司", "match_mode": "exact"}
+    )
+    assert rule["site"] == ""
+
+
+def test_create_rule_可指定站点归属():
+    """站点专属规则：只在那个站点的抓取/重检里生效。"""
+    rule = blacklist.create_rule(
+        {"rule_type": "company", "pattern": "乙公司", "match_mode": "exact", "site": "51job"}
+    )
+    assert rule["site"] == "51job"
+
+
+def test_list_rules_按站点生效切片():
+    """传 `site` = 该站点**生效**的规则：全站（`''`）+ 本站专属，别家的不串进来。"""
+    blacklist.create_rule({"rule_type": "company", "pattern": "全站", "match_mode": "exact"})
+    blacklist.create_rule({"rule_type": "company", "pattern": "BOSS专属", "match_mode": "exact", "site": "boss"})
+    blacklist.create_rule({"rule_type": "company", "pattern": "别家专属", "match_mode": "exact", "site": "51job"})
+
+    def patterns(site):
+        return sorted(r["pattern"] for r in blacklist.list_rules(site=site))
+
+    assert patterns("boss") == ["BOSS专属", "全站"]
+    assert patterns("51job") == ["全站", "别家专属"]
+    assert len(blacklist.list_rules()) == 3  # 不传 = 全部
+
+
+def test_update_rule_不传站点不改归属():
+    """只改备注不该顺手把规则收成全站——`site=None` 是「这次不动」。"""
+    rule = blacklist.create_rule(
+        {"rule_type": "company", "pattern": "丙公司", "match_mode": "exact", "site": "51job"}
+    )
+    updated = blacklist.update_rule(rule["rule_id"], {"description": "改个备注"})
+    assert updated["site"] == "51job"
+
+
+def test_update_rule_显式空串收成全站():
+    """显式给空串 = 用户就要把它放开到全站，那是有意的改法。"""
+    rule = blacklist.create_rule(
+        {"rule_type": "company", "pattern": "丁公司", "match_mode": "exact", "site": "boss"}
+    )
+    updated = blacklist.update_rule(rule["rule_id"], {"site": ""})
+    assert updated["site"] == ""
+
+
+def test_api_rules_只回本平台生效(client: TestClient):
+    """平台作用域的规则列表不串别家站点的专属规则（全站规则照回）。"""
+    blacklist.create_rule({"rule_type": "company", "pattern": "全站", "match_mode": "exact"})
+    blacklist.create_rule({"rule_type": "company", "pattern": "别家", "match_mode": "exact", "site": "51job"})
+    blacklist.create_rule({"rule_type": "company", "pattern": "本家", "match_mode": "exact", "site": "boss"})
+
+    body = client.get("/api/sites/boss/blacklist/rules").json()
+    assert sorted(i["pattern"] for i in body["items"]) == ["全站", "本家"]
+
+
+def test_api_rules_回包带site(client: TestClient):
+    """行里带 `site`，前端要区分「全站 / 本站」直接看这个字段。"""
+    blacklist.create_rule({"rule_type": "company", "pattern": "全站", "match_mode": "exact"})
+    body = client.get("/api/sites/boss/blacklist/rules").json()
+    assert body["items"][0]["site"] == ""
+
+
+def test_api_rules_新建不传site默认全站(client: TestClient):
+    """API 层不传 `site` 落成全站——老行为不变，别让共存期规则突然长出归属。"""
+    r = client.post(
+        "/api/sites/boss/blacklist/rules",
+        json={"rule_type": "company", "pattern": "戊公司", "match_mode": "exact"},
+    )
+    assert r.status_code == 200
+    assert r.json()["item"]["site"] == ""
+
+
+def test_api_rules_legacy别名同样按boss生效(client: TestClient):
+    """共存期别名 `/api/blacklist/rules` 也落 `site="boss"` 的口径，行为跟新面一致。"""
+    blacklist.create_rule({"rule_type": "company", "pattern": "全站", "match_mode": "exact"})
+    blacklist.create_rule({"rule_type": "company", "pattern": "别家", "match_mode": "exact", "site": "51job"})
+    body = client.get("/api/blacklist/rules").json()
+    assert sorted(i["pattern"] for i in body["items"]) == ["全站"]

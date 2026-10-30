@@ -36,6 +36,10 @@ ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
 
+#: 本模块服务的站点（todo3 Stage 1 随模块搬进 boss-platform-boss 时改由 adapter 自述）。
+#: 用来：任务中心按站点记账的自述值 + 黑名单规则按站点取「本站生效」的那批。
+SITE = "boss"
+
 hub.register(
     TaskTypeSpec(
         "desc",
@@ -43,6 +47,7 @@ hub.register(
         policy=POLICY_GLOBAL_SINGLE,
         mutual_group="fetch",
         title_fn=lambda req: f"补抓JD（{req.get('limit') or '不限'}条）",
+        site=SITE,
     )
 )
 
@@ -190,7 +195,7 @@ class DescTaskManager:
         try:
             client = create_client()
             store = JobStore()
-            rules = tuple(list_enabled_rules())
+            rules = tuple(list_enabled_rules(site=SITE))
             has_jd_rules = any(r.get("rule_type") == "jd_keyword" for r in rules)
             try:
                 missing = store.list_jobs_missing_desc(limit=limit or 10_000)

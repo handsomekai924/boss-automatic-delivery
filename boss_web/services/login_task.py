@@ -68,12 +68,19 @@ ST_CANCELLED = "cancelled"
 
 _TERMINAL = {ST_DONE, ST_ERROR, ST_CANCELLED}
 
+#: 本模块服务的站点（todo3 Stage 1 随模块搬进 boss-platform-boss 时改由 adapter 自述）。
+#: 只用来拼**站点作用域**的 URL——别再往回吐 legacy 别名路径（`/api/auth/…`）：
+#: 别名一摘，滑块帮助页的 `post_url` 就断在半路。前端已经按站点作用域拼入口
+#: （`/api/sites/{site}/auth/slider/{id}`），后端自报的这几个 URL 得同一条口径。
+SITE = "boss"
+
 hub.register(
     TaskTypeSpec(
         "login",
         title="登录",
         policy=POLICY_GLOBAL_SINGLE,
         title_fn=lambda req: f"登录（{req.get('kind') or 'sms'}）",
+        site=SITE,  # todo3 Stage 1：随本模块一起搬进 boss-platform-boss，届时由 adapter 自述
     )
 )
 
@@ -192,7 +199,7 @@ class LoginTask:
                 "slider": {
                     "needed": self.slider_needed,
                     "solved": bool(self.slider_box.get("solution")),
-                    "page_url": f"/api/auth/slider/{self.task_id}",
+                    "page_url": f"/api/sites/{SITE}/auth/slider/{self.task_id}",
                 },
                 "qr": {
                     "active": self.status == ST_NEED_SCAN or self.qr_scanned,
@@ -203,7 +210,7 @@ class LoginTask:
                     "pk": self.qr_pk,
                     "revision": self.qr_revision,
                     "image_url": (
-                        f"/api/auth/qr/{self.task_id}/image?v={self.qr_revision}"
+                        f"/api/sites/{SITE}/auth/qr/{self.task_id}/image?v={self.qr_revision}"
                         if self.qr_payload
                         else ""
                     ),
@@ -490,7 +497,7 @@ class LoginTaskManager:
             ) from exc
         html = build_helper_html(
             challenge,
-            post_url=f"/api/auth/slider/{task.task_id}/solution",
+            post_url=f"/api/sites/{SITE}/auth/slider/{task.task_id}/solution",
         )
         with task.lock:
             task.slider_challenge = challenge
@@ -542,7 +549,7 @@ class LoginTaskManager:
                 return None
             html = build_helper_html(
                 challenge,
-                post_url=f"/api/auth/slider/{task.task_id}/solution",
+                post_url=f"/api/sites/{SITE}/auth/slider/{task.task_id}/solution",
             )
             with task.lock:
                 task.slider_challenge = challenge

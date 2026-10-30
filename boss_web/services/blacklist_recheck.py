@@ -26,12 +26,17 @@ ST_DONE = "done"
 ST_ERROR = "error"
 ST_CANCELLED = "cancelled"
 
+#: 本模块服务的站点（todo3 Stage 1 随模块搬进 boss-platform-boss 时改由 adapter 自述）。
+#: 用来：任务中心按站点记账的自述值 + 黑名单规则按站点取「本站生效」的那批。
+SITE = "boss"
+
 hub.register(
     TaskTypeSpec(
         "recheck",
         title="黑名单重检",
         policy=POLICY_GLOBAL_SINGLE,
         title_fn=lambda req: "黑名单规则重检",
+        site=SITE,
     )
 )
 
@@ -128,7 +133,7 @@ class RecheckTaskManager:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有规则重检任务在运行")
             task = RecheckTask(job_ids=job_ids, limit=limit)
-            task.rules_snapshot = tuple(list_enabled_rules())
+            task.rules_snapshot = tuple(list_enabled_rules(site=SITE))
             self._task = task
         hub.track(task, task_type="recheck", request=request, retry_fn=lambda: self.start(**request))
 

@@ -46,6 +46,11 @@ PHASE_TEXT = {
     "crawl": "翻页搜索",
 }
 
+#: 本模块服务的站点（todo3 Stage 1 随模块搬进 boss-platform-boss 时改由 adapter 自述）。
+#: 两处用途同源：任务中心按站点记账的自述值，以及 `crawl_tasks.site` 的归属写入口。
+#: 多站点抓取别改这里——`start()` 该从 adapter 拿站点，不是改常量。
+SITE = "boss"
+
 hub.register(
     TaskTypeSpec(
         "crawl",
@@ -53,6 +58,7 @@ hub.register(
         policy=POLICY_GLOBAL_SINGLE,
         mutual_group="fetch",
         title_fn=lambda req: "职位爬取",
+        site=SITE,
     )
 )
 
@@ -99,6 +105,7 @@ def _archive_start(
     source: str,
     created_at: float,
     params: Mapping[str, Any],
+    site: str = "",
 ) -> bool:
     """启动时插一行 `crawl_tasks`。落库失败只告警，不挡抓取本体。
 
@@ -107,6 +114,7 @@ def _archive_start(
         source: 来源标识（expect / search）。
         created_at: 创建时间戳。
         params: 任务参数。
+        site: 站点归属；空 = 由 `JobStore` 吃兜底。
 
     Returns:
         是否落库成功。
@@ -119,6 +127,7 @@ def _archive_start(
                 created_at=created_at,
                 started_at=created_at,
                 params=dict(params),
+                site=site,
             )
         return True
     except Exception:  # noqa: BLE001 - 历史记录未保存不该拖垮抓取
@@ -194,6 +203,7 @@ class CrawlTask:
 
     Attributes:
         task_id: 任务 id。
+        site: 站点归属（批次账按站点分账，跟 `crawl_tasks.site` 同源）。
         params: 启动参数。
         status: 任务状态。
         phase: 当前阶段。
@@ -207,9 +217,15 @@ class CrawlTask:
         lock: 状态锁。
     """
 
-    def __init__(self, params: dict[str, Any]) -> None:
-        """初始化。"""
+    def __init__(self, params: dict[str, Any], *, site: str = "") -> None:
+        """初始化。
+
+        Args:
+            params: 启动参数。
+            site: 站点归属；空串留给调用方兜底（`JobStore` 落库时补 `DEFAULT_SITE`）。
+        """
         self.task_id = uuid.uuid4().hex[:12]
+        self.site = site
         self.params = params
         self.status = ST_RUNNING
         self.phase = "prepare"
@@ -281,6 +297,7 @@ class CrawlTask:
         with self.lock:
             return {
                 "task_id": self.task_id,
+                "site": self.site,
                 "status": self.status,
                 "phase": self.phase,
                 "current": PHASE_TEXT.get(self.phase, self.phase),
@@ -366,7 +383,7 @@ class CrawlTaskManager:
             ValidationWebError: 搜索流条件全空。
             ConflictError: 已有抓取任务在跑。
         """
-        config_snapshot = load_snapshot()
+        config_snapshot = load_snapshot(site=SITE)
         saved = config_snapshot.collection
         if use_search is False:
             logger.warning("旧「推荐页」配置已移除，改用关键词搜索")
@@ -388,7 +405,7 @@ class CrawlTaskManager:
         with self._lock:
             if self._task is not None and self._task.status == ST_RUNNING:
                 raise ConflictError("已有抓取任务在跑，等它结束或先取消")
-            task = CrawlTask(params)
+            task = CrawlTask(params, site=SITE)
             task.progress.update({
                 "company_hits": 0, "jd_hits": 0, "blacklist_skipped": 0,
                 "ordinary_stored": 0, "jd_unchecked": 0, "jd_empty": 0,
@@ -415,7 +432,9 @@ class CrawlTaskManager:
             ),
         )
 
-        _archive_start(task.task_id, source=source, created_at=task.created_at, params=params)
+        _archive_start(
+            task.task_id, source=source, created_at=task.created_at, params=params, site=SITE
+        )
 
         thread = threading.Thread(
             target=self._run, args=(task,), daemon=True, name=f"crawl-{task.task_id}"

@@ -50,6 +50,8 @@ class Rule:
         last_error: 最近一次运行期匹配错误。
         created_at: 创建时间文本。
         updated_at: 最近更新时间文本。
+        site: 站点归属；**空串 = 全站生效**（todo3 第四节）。公司名/JD 规则有的是
+            站点语义，靠这一列分账；默认空串，单站点旧账不用迁移。
     """
 
     rule_id: str
@@ -62,6 +64,7 @@ class Rule:
     last_error: str = ""
     created_at: str = ""
     updated_at: str = ""
+    site: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """转普通字典，`enabled` 强制成 bool。"""
@@ -147,17 +150,27 @@ def _rule_from_row(row: Any) -> Rule:
         last_error=str(row["last_error"] or ""),
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
+        site=str(row["site"] or ""),
     )
 
 
 def list_rules(
-    *, rule_type: str | None = None, enabled: bool | None = None, path: Path | str | None = None
+    *,
+    rule_type: str | None = None,
+    enabled: bool | None = None,
+    site: str | None = None,
+    path: Path | str | None = None,
 ) -> list[dict[str, Any]]:
     """按条件列规则，每条附 `hit_count`。
+
+    `site` 是**该站点生效**的口径，不是精确匹配：传 `"boss"` 会把全站规则
+    （`site=''`）和 BOSS 专属规则一起端上来，正好是「本平台在用的规则」。
+    不传 = 全部（管理视图 / 旧调用方）。
 
     Args:
         rule_type: 只看这一类规则。
         enabled: 只看启用 / 停用的规则。
+        site: 只看这个站点生效的（含全站规则）；`None` = 不切。
         path: 状态库路径。
 
     Returns:
@@ -173,6 +186,9 @@ def list_rules(
     if enabled is not None:
         where.append("enabled = ?")
         params.append(1 if enabled else 0)
+    if site is not None:
+        where.append("(site = '' OR site = ?)")
+        params.append(site)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY created_at DESC, rule_id"
@@ -188,16 +204,19 @@ def list_rules(
     return items
 
 
-def list_enabled_rules(*, path: Path | str | None = None) -> list[dict[str, Any]]:
-    """只列启用中的规则。
+def list_enabled_rules(
+    *, site: str | None = None, path: Path | str | None = None
+) -> list[dict[str, Any]]:
+    """只列启用中的规则（抓取 / 重扫那条路走这里）。
 
     Args:
+        site: 只取这个站点生效的（含全站规则）；`None` = 不切。
         path: 状态库路径。
 
     Returns:
         启用中的规则字典列表。
     """
-    return list_rules(enabled=True, path=path)
+    return list_rules(enabled=True, site=site, path=path)
 
 
 def get_rule(rule_id: str, path: Path | str | None = None) -> dict[str, Any] | None:
@@ -241,10 +260,10 @@ def create_rule(payload: Mapping[str, Any], path: Path | str | None = None) -> d
     with conn:
         conn.execute(
             "INSERT INTO blacklist_rules "
-            "(rule_id,rule_type,pattern,match_mode,scope,description,enabled,last_error,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (rule_id, rule_type, pattern, mode, scope, str(payload.get("description") or ""),
-             1 if enabled else 0, "", created, created),
+            "(rule_id,site,rule_type,pattern,match_mode,scope,description,enabled,last_error,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (rule_id, str(payload.get("site") or ""), rule_type, pattern, mode, scope,
+             str(payload.get("description") or ""), 1 if enabled else 0, "", created, created),
         )
     return get_rule(rule_id, path) or {}
 
@@ -269,6 +288,9 @@ def update_rule(rule_id: str, payload: Mapping[str, Any], path: Path | str | Non
     mode = str(merged.get("match_mode") or merged.get("mode") or "")
     scope = str(merged.get("scope") or ("" if rule_type == COMPANY else "both"))
     enabled = bool(merged.get("enabled", True))
+    # 站点归属：`None` = 这次不动（别让「只改个备注」顺手把规则收成全站）；
+    # 显式给值才改，空串 = 收成全站生效。
+    site = old["site"] if payload.get("site") is None else str(payload.get("site") or "")
     if enabled:
         validate_rule_payload(rule_type, pattern, mode, scope)
     elif rule_type not in {COMPANY, JD_KEYWORD} or mode not in (COMPANY_MODES | JD_MODES):
@@ -281,9 +303,9 @@ def update_rule(rule_id: str, payload: Mapping[str, Any], path: Path | str | Non
     conn = boss_db.acquire(path)
     with conn:
         conn.execute(
-            "UPDATE blacklist_rules SET rule_type=?,pattern=?,match_mode=?,scope=?,description=?,"
+            "UPDATE blacklist_rules SET site=?,rule_type=?,pattern=?,match_mode=?,scope=?,description=?,"
             "enabled=?,last_error=?,updated_at=? WHERE rule_id=?",
-            (rule_type, pattern, mode, scope, str(merged.get("description") or ""),
+            (site, rule_type, pattern, mode, scope, str(merged.get("description") or ""),
              1 if enabled else 0, "", stamp, rule_id),
         )
     return get_rule(rule_id, path) or {}

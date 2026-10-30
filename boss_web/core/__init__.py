@@ -1,0 +1,111 @@
+"""多平台核心（todo3 Stage 0）：契约 + 能力协议 + 注册表。
+
+Stage 0 落在 `boss_web/core/`，不新建顶层包；Stage 1 迁 `packages/core` 时一起搬。
+server 编排层只认这里的 Protocol/registry，站点实现在 `adapters/`。
+"""
+
+from __future__ import annotations
+
+from .contracts import (
+    ApplyGate,
+    ApplyReceipt,
+    AuthCaps,
+    ConversationState,
+    DeliveryCaps,
+    DeliverFault,
+    JobRef,
+    LoginHandle,
+    LoginState,
+    NavExtra,
+    PageResult,
+    ResumeRef,
+    SearchCriteria,
+    SearchParams,
+    SendReceipt,
+    SessionRef,
+    SiteFilterOptions,
+    SourceCaps,
+)
+from .flow import (
+    CrawlHooks,
+    CrawlReport,
+    DeliverHooks,
+    DeliverReport,
+    DeliverTarget,
+    GateOutcome,
+    run_crawl,
+    run_deliver,
+)
+from .limits import (
+    BREAKER_TRIP,
+    Breaker,
+    FaultAction,
+    SiteLimits,
+    fault_action,
+    throttle_hook,
+)
+from .protocols import (
+    Applier,
+    AuthFlow,
+    AuthSink,
+    Catalog,
+    JobSource,
+    Messenger,
+    SiteAdapter,
+)
+from .registry import (
+    all_adapters,
+    build_descriptor,
+    get_adapter,
+    register,
+    registered_sites,
+    reset_registry,
+)
+
+__all__ = [
+    "Applier",
+    "ApplyGate",
+    "ApplyReceipt",
+    "AuthCaps",
+    "AuthFlow",
+    "AuthSink",
+    "BREAKER_TRIP",
+    "Breaker",
+    "Catalog",
+    "ConversationState",
+    "CrawlHooks",
+    "CrawlReport",
+    "DeliveryCaps",
+    "DeliverFault",
+    "DeliverHooks",
+    "DeliverReport",
+    "DeliverTarget",
+    "FaultAction",
+    "GateOutcome",
+    "JobRef",
+    "JobSource",
+    "LoginHandle",
+    "LoginState",
+    "Messenger",
+    "NavExtra",
+    "PageResult",
+    "ResumeRef",
+    "SearchCriteria",
+    "SearchParams",
+    "SendReceipt",
+    "SessionRef",
+    "SiteAdapter",
+    "SiteFilterOptions",
+    "SiteLimits",
+    "SourceCaps",
+    "all_adapters",
+    "build_descriptor",
+    "fault_action",
+    "get_adapter",
+    "register",
+    "registered_sites",
+    "reset_registry",
+    "run_crawl",
+    "run_deliver",
+    "throttle_hook",
+]

@@ -59,11 +59,21 @@ def test_打包前必须清空_dist():
     """验证打包脚本在跑 PyInstaller 前先清空 dist。"""
     text = BUILD_BAT.read_bytes().decode("ascii")
     wipe = text.index('rd /s /q "dist"')
-    pyinstaller = text.index("PyInstaller")
+    pyinstaller = text.index("-m PyInstaller")
     assert wipe < pyinstaller, "清 dist 必须发生在 PyInstaller 之前"
     after = text[wipe:]
     assert 'if exist "dist"' in after.split("PyInstaller")[0]
     assert "exit /b 1" in after.split("PyInstaller")[0]
+
+
+def test_build_bat_先建前端再打包():
+    """前端没建就打包 = 双击开白屏；build.bat 必须先 pnpm build，缺 node 时说人话。"""
+    text = BUILD_BAT.read_bytes().decode("ascii")
+    pnpm_build = text.index("pnpm run build")
+    pyinstaller = text.index("-m PyInstaller")
+    assert pnpm_build < pyinstaller, "前端构建必须发生在 PyInstaller 之前"
+    assert "where pnpm" in text, "先探 pnpm 在不在"
+    assert "pnpm not found" in text, "缺 node 环境要报可读错误"
 
 
 def test_make_zip_把_stdout_切成_utf8():
