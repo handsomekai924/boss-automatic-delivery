@@ -38,7 +38,7 @@ export function PlatformSidebar({ platform, activeKey, onSelect, sx }: PlatformS
         sx,
       )}
     >
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 1, pb: 1.5 }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 1, pb: 1.5, flex: "0 0 auto" }}>
         <Typography sx={{ ...typeScale.s, color: "text.secondary" }}>{platform.display_name}</Typography>
         <StatusDot
           tone={platform.session.busy ? "busy" : platform.session.logged_in ? "ok" : "idle"}
@@ -46,33 +46,39 @@ export function PlatformSidebar({ platform, activeKey, onSelect, sx }: PlatformS
         />
       </Box>
 
-      {items.map((item) => {
-        const active = item.key === activeKey;
-        return (
-          <Box
-            key={item.key}
-            component="button"
-            type="button"
-            onClick={() => onSelect(item.key)}
-            className="apple-press"
-            sx={{
-              border: 0,
-              textAlign: "left",
-              px: 1.5,
-              py: 1,
-              borderRadius: "12px",
-              cursor: "pointer",
-              ...typeScale.bodySm,
-              fontWeight: active ? 590 : 400,
-              color: "text.primary",
-              bgcolor: active ? "surface2" : "transparent",
-              "&:hover": { bgcolor: (t: Theme) => (t.palette.mode === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)") },
-            }}
-          >
-            {item.label}
-          </Box>
-        );
-      })}
+      {/* 矮窗口时导航自己滚，侧栏整体不塌（整页固定 + 内部滚动） */}
+      <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+        {items.map((item) => {
+          const active = item.key === activeKey;
+          return (
+            <Box
+              key={item.key}
+              component="button"
+              type="button"
+              onClick={() => onSelect(item.key)}
+              className="apple-press"
+              sx={{
+                display: "block",
+                width: "100%",
+                border: 0,
+                textAlign: "left",
+                px: 1.5,
+                py: 1,
+                mb: 0.5,
+                borderRadius: "12px",
+                cursor: "pointer",
+                ...typeScale.bodySm,
+                fontWeight: active ? 590 : 400,
+                color: "text.primary",
+                bgcolor: active ? "surface2" : "transparent",
+                "&:hover": { bgcolor: (t: Theme) => (t.palette.mode === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)") },
+              }}
+            >
+              {item.label}
+            </Box>
+          );
+        })}
+      </Box>
     </Box>
   );
 }

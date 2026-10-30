@@ -10,8 +10,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Box, Typography } from "@mui/material";
 
 import {
-  Button, EmptyState, InlineAlert, PageHeader, Pill, Select, Skeleton, Surface, TaskPanel, TextField,
-  useToast,
+  Button, EmptyState, InlineAlert, PageHeader, Pill, ScrollArea, Select, Skeleton, Surface, TaskPanel, TextField,
+  pageRootSx, useToast,
 } from "../../components";
 import { usePlatform } from "../../platform/PlatformProvider";
 import { useTaskStore, type TaskSnapshot } from "../../stores/taskStore";
@@ -307,7 +307,7 @@ export function TasksPage() {
   };
 
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader
         title="任务中心"
         subtitle="所有异步任务都在这里：抓取、补 JD、解析、优化、匹配、发送、出题……可以随时停止、重试、清理。"
@@ -328,7 +328,7 @@ export function TasksPage() {
 
       {loadError && <InlineAlert tone="danger">{loadError}</InlineAlert>}
 
-      <Surface sx={{ mb: 2.5, display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
+      <Surface sx={{ flex: "0 0 auto", mb: 2.5, display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
         <Select
           label="类型"
           options={Object.entries(TYPE_LABELS).map(([code, name]) => ({ code, name }))}
@@ -363,39 +363,41 @@ export function TasksPage() {
         />
       </Surface>
 
-      {loading && all.length === 0 ? (
-        // 首屏拉取窗口：3 行任务卡骨架（约等于 TaskPanel 高度），数据到了直接替换不跳版
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
-          {[0, 1, 2].map((i) => (
-            <Skeleton key={i} height={96} sx={{ borderRadius: radius.s }} />
-          ))}
-        </Box>
-      ) : visible.length === 0 ? (
-        <EmptyState
-          title={all.length ? "没有符合筛选条件的任务" : "还没有任何任务"}
-          description={all.length ? "换个筛选条件再看看。" : "发起抓取、投递或登录后，进度会实时推到这里。"}
-        />
-      ) : (
-        <Box>
-          {visible.map((t) => (
-            <TaskCard
-              key={t.task_id}
-              task={t}
-              siteName={siteLabel(t.site)}
-              expanded={expanded.has(t.task_id)}
-              action={busyIds[t.task_id] ?? null}
-              onToggle={() => toggleExpand(t.task_id)}
-              onCancel={() => void act("cancel", t.task_id)}
-              onRetry={() => void act("retry", t.task_id)}
-              onDelete={() => void act("delete", t.task_id)}
-            />
-          ))}
-        </Box>
-      )}
+      <ScrollArea>
+        {loading && all.length === 0 ? (
+          // 首屏拉取窗口：3 行任务卡骨架（约等于 TaskPanel 高度），数据到了直接替换不跳版
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} height={96} sx={{ borderRadius: radius.s }} />
+            ))}
+          </Box>
+        ) : visible.length === 0 ? (
+          <EmptyState
+            title={all.length ? "没有符合筛选条件的任务" : "还没有任何任务"}
+            description={all.length ? "换个筛选条件再看看。" : "发起抓取、投递或登录后，进度会实时推到这里。"}
+          />
+        ) : (
+          <Box>
+            {visible.map((t) => (
+              <TaskCard
+                key={t.task_id}
+                task={t}
+                siteName={siteLabel(t.site)}
+                expanded={expanded.has(t.task_id)}
+                action={busyIds[t.task_id] ?? null}
+                onToggle={() => toggleExpand(t.task_id)}
+                onCancel={() => void act("cancel", t.task_id)}
+                onRetry={() => void act("retry", t.task_id)}
+                onDelete={() => void act("delete", t.task_id)}
+              />
+            ))}
+          </Box>
+        )}
 
-      <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2 }}>
-        共 {visible.length} 条
-      </Typography>
+        <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2 }}>
+          共 {visible.length} 条
+        </Typography>
+      </ScrollArea>
     </Box>
   );
 }

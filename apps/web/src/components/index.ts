@@ -36,6 +36,7 @@ export { EventStream, type EventStreamProps, type TaskEvent, type EventKind } fr
 export { TaskPanel, type TaskPanelProps } from "./feedback/TaskPanel";
 
 export { PageHeader, type PageHeaderProps } from "./layout/PageHeader";
+export { ScrollArea, pageRootSx } from "./layout/ScrollArea";
 export { TopBar, type TopBarProps } from "./layout/TopBar";
 export { PlatformSidebar, type PlatformSidebarProps } from "./layout/PlatformSidebar";
 export { TaskBadge, SessionSignal } from "./layout/TaskBadge";

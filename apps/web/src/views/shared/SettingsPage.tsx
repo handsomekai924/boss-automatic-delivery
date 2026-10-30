@@ -17,7 +17,8 @@ import { useNavigate } from "react-router-dom";
 
 import {
   Button, ConfirmSheet, EmptyState, InlineAlert, InsetGroup, InsetRow, PageHeader, Pill,
-  SegmentedControl, Select, Sheet, Skeleton, StatusDot, TaskPanel, TextField, useToast, ViewFade,
+  ScrollArea, SegmentedControl, Select, Sheet, Skeleton, StatusDot, TaskPanel, TextField, ViewFade,
+  pageRootSx, useToast,
 } from "../../components";
 import { usePlatform } from "../../platform/PlatformProvider";
 import { useTaskStore } from "../../stores/taskStore";
@@ -1102,13 +1103,13 @@ export function SettingsPage() {
   );
 
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader
         title="设置"
         subtitle="LLM 接口、程序更新、黑名单规则和外观偏好集中管理。修改后记得保存；当前采集任务使用启动时的配置快照。"
       />
 
-      <Box sx={{ mb: 3 }}>
+      <Box sx={{ flex: "0 0 auto", mb: 3 }}>
         <SegmentedControl<TabValue>
           aria-label="设置分区"
           value={tab}
@@ -1117,12 +1118,14 @@ export function SettingsPage() {
         />
       </Box>
 
-      <ViewFade slotKey={tab}>
-        {tab === "llm" && <LlmSection />}
-        {tab === "update" && <UpdateSection status={updateStatus} onStatus={setUpdateStatus} />}
-        {tab === "blacklist" && <BlacklistSection />}
-        {tab === "appearance" && <AppearanceSection />}
-      </ViewFade>
+      <ScrollArea>
+        <ViewFade slotKey={tab}>
+          {tab === "llm" && <LlmSection />}
+          {tab === "update" && <UpdateSection status={updateStatus} onStatus={setUpdateStatus} />}
+          {tab === "blacklist" && <BlacklistSection />}
+          {tab === "appearance" && <AppearanceSection />}
+        </ViewFade>
+      </ScrollArea>
     </Box>
   );
 }

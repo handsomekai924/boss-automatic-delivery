@@ -123,7 +123,7 @@ export function LibrarySection({
             return (
               <Surface
                 key={item.resume_id}
-                interactive
+                hoverable
                 onClick={() => onSelect(item.resume_id)}
                 sx={{ outline: item.resume_id === currentId ? "2px solid var(--accent)" : "none" }}
               >

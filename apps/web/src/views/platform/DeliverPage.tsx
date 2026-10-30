@@ -17,8 +17,8 @@ import { Box, Checkbox, Skeleton, Tooltip, Typography } from "@mui/material";
 import { useNavigate } from "react-router-dom";
 
 import {
-  Button, EmptyState, InlineAlert, PageHeader, Pill, ScoreRing, Select, Sheet, Surface,
-  TextField, useToast,
+  Button, EmptyState, InlineAlert, PageHeader, Pill, ScoreRing, ScrollArea, Select, Sheet, Surface,
+  TextField, pageRootSx, useToast,
 } from "../../components";
 import { usePlatform } from "../../platform/PlatformProvider";
 import { useTaskStore } from "../../stores/taskStore";
@@ -436,7 +436,7 @@ export function DeliverPage() {
     : "配额信息读不到时按不限处理";
 
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader
         title="发对话与投递"
         subtitle="发出去的是招呼语正文；投不投简历由门槛决定，两路径都在这里说清楚。"
@@ -452,18 +452,22 @@ export function DeliverPage() {
         }
       />
 
-      <InlineAlert tone={applyGate === "after_greeting" ? "info" : "warn"}>
-        {gateText(applyGate, limits?.apply_enabled)}
-      </InlineAlert>
+      {/* 固定区：门槛 / 停发 / 错误横幅（InlineAlert 不吃 sx，包一层定住不随清单滚） */}
+      <Box sx={{ flex: "0 0 auto" }}>
+        <InlineAlert tone={applyGate === "after_greeting" ? "info" : "warn"}>
+          {gateText(applyGate, limits?.apply_enabled)}
+        </InlineAlert>
 
-      {/* 没停就是空串，别渲染成「未知原因」 */}
-      {status?.stopped_reason ? (
-        <InlineAlert tone="warn">发送停住了：{status.stopped_reason}</InlineAlert>
-      ) : null}
+        {/* 没停就是空串，别渲染成「未知原因」 */}
+        {status?.stopped_reason ? (
+          <InlineAlert tone="warn">发送停住了：{status.stopped_reason}</InlineAlert>
+        ) : null}
 
-      {loadError && <InlineAlert tone="danger">{loadError}</InlineAlert>}
+        {loadError && <InlineAlert tone="danger">{loadError}</InlineAlert>}
+      </Box>
 
-      <Surface sx={{ mt: 2, mb: 2.5 }}>
+      {/* 固定区：控制行 */}
+      <Surface sx={{ flex: "0 0 auto", mt: 2, mb: 2.5 }}>
         <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "flex-end" }}>
           <Select
             label="用哪次匹配"
@@ -499,83 +503,96 @@ export function DeliverPage() {
         </Typography>
       </Surface>
 
-      {(analysesLoading || analysisLoading) && analysis == null ? (
-        // 首拉窗口：4 行行卡骨架（约等于发送行高度）；已有数据时刷新走原地替换，不回骨架
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2 }}>
-          {[0, 1, 2, 3].map((i) => (
-            <Skeleton key={i} height={64} sx={{ borderRadius: radius.s }} />
-          ))}
-        </Box>
-      ) : !analysisId ? (
-        <EmptyState
-          title="还没有分析结果"
-          description="先在「匹配」跑一次匹配，结果会出现在这里。"
-        />
-      ) : ranked.length === 0 ? (
-        <EmptyState title="这次分析没有匹配结果" description="换一份简历或放宽职位范围再跑一次。" />
-      ) : (
-        <Surface sx={{ p: 0 }}>
-          <Box sx={{ px: 2.5, py: 1.5, display: "flex", gap: 1.5, alignItems: "center" }}>
-            <Typography sx={{ ...typeScale.s, fontWeight: 590, flex: 1, minWidth: 0 }}>
-              发送清单
-            </Typography>
-            <Typography sx={{ ...typeScale.xs, color: "text.secondary" }}>
-              共 {fmtNumber(ranked.length)} 条
-            </Typography>
-            {/* 全选跳过冷却中的（复选框也是禁用的），别让人勾了发不出去 */}
-            <Button
-              size="small"
-              variant="plain"
-              onClick={() => setSelected(new Set(ranked.filter((m) => m.greet_in_cooldown !== true).map((m) => m.encrypt_job_id)))}
-            >
-              全选
-            </Button>
-            <Button size="small" variant="plain" onClick={() => setSelected(new Set())}>清空</Button>
-          </Box>
-          {ranked.map((m) => {
-            const jid = m.encrypt_job_id;
-            const cool = m.greet_in_cooldown === true;
-            const r = restriction(m);
-            return (
-              <Box
-                key={jid}
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1.5,
-                  px: 2.5,
-                  py: 1.25,
-                  borderTop: (t) => `1px solid ${t.palette.divider}`,
-                }}
+      {/* 局部滚动：发送清单内容区（容器头固定，行卡自滚）；骨架 / 空态同占这块 */}
+      <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {(analysesLoading || analysisLoading) && analysis == null ? (
+          // 首拉窗口：4 行行卡骨架（约等于发送行高度）；已有数据时刷新走原地替换，不回骨架
+          <ScrollArea>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2 }}>
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} height={64} sx={{ borderRadius: radius.s }} />
+              ))}
+            </Box>
+          </ScrollArea>
+        ) : !analysisId ? (
+          <ScrollArea>
+            <EmptyState
+              title="还没有分析结果"
+              description="先在「匹配」跑一次匹配，结果会出现在这里。"
+            />
+          </ScrollArea>
+        ) : ranked.length === 0 ? (
+          <ScrollArea>
+            <EmptyState title="这次分析没有匹配结果" description="换一份简历或放宽职位范围再跑一次。" />
+          </ScrollArea>
+        ) : (
+          <Surface sx={{ p: 0, flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            {/* 容器头部标题固定在卡顶，不随清单滚 */}
+            <Box sx={{ px: 2.5, py: 1.5, display: "flex", gap: 1.5, alignItems: "center", flex: "0 0 auto" }}>
+              <Typography sx={{ ...typeScale.s, fontWeight: 590, flex: 1, minWidth: 0 }}>
+                发送清单
+              </Typography>
+              <Typography sx={{ ...typeScale.xs, color: "text.secondary" }}>
+                共 {fmtNumber(ranked.length)} 条
+              </Typography>
+              {/* 全选跳过冷却中的（复选框也是禁用的），别让人勾了发不出去 */}
+              <Button
+                size="small"
+                variant="plain"
+                onClick={() => setSelected(new Set(ranked.filter((m) => m.greet_in_cooldown !== true).map((m) => m.encrypt_job_id)))}
               >
-                <Checkbox
-                  checked={selected.has(jid)}
-                  disabled={cool}
-                  onChange={() => toggle(jid)}
-                  inputProps={{ "aria-label": `选择 ${m.job_name}` }}
-                />
-                <ScoreHoverCard site={site} row={m} />
-                <Box sx={{ flex: 1, minWidth: 0 }}>
-                  <Typography sx={{ ...typeScale.bodySm, fontWeight: 590, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {m.job_name} <Box component="span" sx={{ color: "text.secondary", fontWeight: 400 }}>@ {m.brand_name}</Box>
-                  </Typography>
-                  <Typography sx={{ ...typeScale.xs, color: r ? "warning.main" : "text.secondary" }}>
-                    {statusLabel(m)}
-                  </Typography>
-                  {(m.greeting || "").trim() && (
-                    <Typography sx={{ ...typeScale.xs, color: "text.secondary", mt: 0.25 }} noWrap>
-                      {m.greeting}
+                全选
+              </Button>
+              <Button size="small" variant="plain" onClick={() => setSelected(new Set())}>清空</Button>
+            </Box>
+            <ScrollArea sx={{ p: 0 }}>
+            {ranked.map((m) => {
+              const jid = m.encrypt_job_id;
+              const cool = m.greet_in_cooldown === true;
+              const r = restriction(m);
+              return (
+                <Box
+                  key={jid}
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1.5,
+                    px: 2.5,
+                    py: 1.25,
+                    borderTop: (t) => `1px solid ${t.palette.divider}`,
+                  }}
+                >
+                  <Checkbox
+                    checked={selected.has(jid)}
+                    disabled={cool}
+                    onChange={() => toggle(jid)}
+                    inputProps={{ "aria-label": `选择 ${m.job_name}` }}
+                  />
+                  <ScoreHoverCard site={site} row={m} />
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography sx={{ ...typeScale.bodySm, fontWeight: 590, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {m.job_name} <Box component="span" sx={{ color: "text.secondary", fontWeight: 400 }}>@ {m.brand_name}</Box>
                     </Typography>
-                  )}
+                    <Typography sx={{ ...typeScale.xs, color: r ? "warning.main" : "text.secondary" }}>
+                      {statusLabel(m)}
+                    </Typography>
+                    {(m.greeting || "").trim() && (
+                      <Typography sx={{ ...typeScale.xs, color: "text.secondary", mt: 0.25 }} noWrap>
+                        {m.greeting}
+                      </Typography>
+                    )}
+                  </Box>
+                  {r && <Pill tone="warn">{r}</Pill>}
                 </Box>
-                {r && <Pill tone="warn">{r}</Pill>}
-              </Box>
-            );
-          })}
-        </Surface>
-      )}
+              );
+            })}
+            </ScrollArea>
+          </Surface>
+        )}
+      </Box>
 
-      <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2 }}>
+      {/* 固定底：任务中心路标，不随清单滚 */}
+      <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2, flex: "0 0 auto" }}>
         发送进度、失败重试都在任务中心
         <Box
           component="button"

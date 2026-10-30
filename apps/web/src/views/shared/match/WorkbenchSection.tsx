@@ -12,11 +12,11 @@
  * 保存招呼语 / 重打草稿 / 单条重跑的动作也在这层（跟结果卡走）。
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Typography } from "@mui/material";
 
 import {
-  Button, EmptyState, Pill, Select, Skeleton, Surface, TaskPanel, TextField,
+  Button, EmptyState, Pill, ScrollArea, Select, Skeleton, Surface, TaskPanel, TextField,
 } from "../../../components";
 import { useToast } from "../../../components";
 import { typeScale } from "../../../theme/tokens";
@@ -193,12 +193,28 @@ export function WorkbenchSection({
 
   /* ---------------- 单条操作：保存招呼语 / 重打草稿 / 重跑（只改不增） ---------------- */
 
-  const saveGreeting = async (jid: string) => {
-    if (!analysisId) return;
-    const text = drafts[jid] ?? matches.find((m) => m.encrypt_job_id === jid)?.greeting ?? "";
+  // 这几个动作要读「当下」的草稿/结果快照：走 ref 读最新值，回调就不绑 state 依赖、引用全程稳定，
+  // MatchCard 的 memo 才拦得住（缺陷「展开收起卡顿」：状态一变全部卡片跟着重渲染）。
+  const latestRef = useRef({ analysisId, drafts, matches });
+  latestRef.current = { analysisId, drafts, matches };
+
+  /** 招呼语草稿按 id 写回（正在输入的那张卡才重渲染）。 */
+  const handleDraft = useCallback((jid: string, text: string) => {
+    onSetDrafts((prev) => ({ ...prev, [jid]: text }));
+  }, [onSetDrafts]);
+
+  /** 展开/收起详情按 id 切（只有变化的两张卡重渲染）。 */
+  const handleToggleDetail = useCallback((jid: string) => {
+    onSetExpandedJid((prev) => (prev === jid ? null : jid));
+  }, [onSetExpandedJid]);
+
+  const saveGreeting = useCallback(async (jid: string) => {
+    const cur = latestRef.current;
+    if (!cur.analysisId) return;
+    const text = cur.drafts[jid] ?? cur.matches.find((m) => m.encrypt_job_id === jid)?.greeting ?? "";
     onSetBusyJid(jid);
     try {
-      const r = (await matchApi.patchGreeting(analysisId, jid, text)) as { item?: MatchItem };
+      const r = (await matchApi.patchGreeting(cur.analysisId, jid, text)) as { item?: MatchItem };
       onSetMatches((prev) => rank(prev.map((m) => (m.encrypt_job_id === jid ? (r.item ?? { ...m, greeting: text }) : m))));
       onSetDrafts((prev) => {
         const next = { ...prev };
@@ -211,14 +227,15 @@ export function WorkbenchSection({
     } finally {
       onSetBusyJid(null);
     }
-  };
+  }, [onSetBusyJid, onSetDrafts, onSetMatches, toast]);
 
-  const regenGreeting = async (jid: string) => {
-    if (!analysisId) return;
+  const regenGreeting = useCallback(async (jid: string) => {
+    const cur = latestRef.current;
+    if (!cur.analysisId) return;
     onSetBusyJid(jid);
     try {
       // 只回草稿不落库：先放草稿框里，确认后再点保存（legacy 语义）
-      const r = await matchApi.regenGreeting(analysisId, jid);
+      const r = await matchApi.regenGreeting(cur.analysisId, jid);
       onSetDrafts((prev) => ({ ...prev, [jid]: r.greeting }));
       toast.toast("已生成新草稿，确认后记得保存", "ok");
     } catch (e) {
@@ -226,14 +243,15 @@ export function WorkbenchSection({
     } finally {
       onSetBusyJid(null);
     }
-  };
+  }, [onSetBusyJid, onSetDrafts, toast]);
 
-  const rematchOne = async (jid: string) => {
-    if (!analysisId) return;
+  const rematchOne = useCallback(async (jid: string) => {
+    const cur = latestRef.current;
+    if (!cur.analysisId) return;
     onSetBusyJid(jid);
     try {
       // 只改不增：后端原地改库里那条 match，这里也只替换这一条，不往列表塞新行
-      const r = (await matchApi.rematch(analysisId, jid)) as { item?: MatchItem };
+      const r = (await matchApi.rematch(cur.analysisId, jid)) as { item?: MatchItem };
       if (r.item) onSetMatches((prev) => rank(prev.map((m) => (m.encrypt_job_id === jid ? r.item! : m))));
       toast.toast("已重跑这一条", "ok");
     } catch (e) {
@@ -241,7 +259,7 @@ export function WorkbenchSection({
     } finally {
       onSetBusyJid(null);
     }
-  };
+  }, [onSetBusyJid, onSetMatches, toast]);
 
   /* ---------------- 派生展示 ---------------- */
 
@@ -271,7 +289,11 @@ export function WorkbenchSection({
         display: "flex",
         flexDirection: { xs: "column", md: "row" },
         gap: 2.5,
-        alignItems: "flex-start",
+        // 宽屏两栏等高各自滚；窄屏整块一起滚（栏 overflowY visible）
+        flex: 1,
+        minHeight: 0,
+        overflow: "hidden",
+        overflowY: { xs: "auto", md: "hidden" },
       }}
     >
       {/* ---------------- 左栏：搜索 / 配置 ---------------- */}
@@ -284,9 +306,14 @@ export function WorkbenchSection({
           flex: { xs: "1 1 auto", md: "0 0 360px" },
           maxWidth: { md: 380 },
           minWidth: 0,
+          display: "flex",
+          flexDirection: "column",
+          minHeight: { xs: "auto", md: 0 },
+          overflowY: { xs: "visible", md: "hidden" },
         }}
       >
-        <Surface>
+        <ScrollArea sx={{ flex: { xs: "0 0 auto", md: 1 }, minHeight: { xs: "auto", md: 0 }, overflowY: { xs: "visible", md: "auto" } }}>
+          <Surface>
           <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
             <Select
               label="简历"
@@ -371,25 +398,44 @@ export function WorkbenchSection({
                     </Box>
                   ))}
                 </Box>
-                <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-                  <Button size="small" variant="gray" disabled={jobPage <= 0} onClick={() => setJobPage((p) => p - 1)}>
-                    上一页
-                  </Button>
-                  <Typography sx={{ ...typeScale.s, color: "text.secondary" }}>
-                    第 {jobPage + 1} / {pageCount} 页 · 共 {fmtNumber(jobsTotal)} 个职位
-                  </Typography>
+                {/* 分页行（缺陷「左侧分页器文本变形」）：窄栏里一行不挤字——
+                    flexWrap 允许换行，文本 nowrap + tabular-nums 一行完整显示（flexBasis 100% 整行换行），
+                    两个按钮 flex: 0 0 auto 不被压扁。 */}
+                <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center", justifyContent: "center" }}>
                   <Button
                     size="small" variant="gray"
+                    sx={{ flex: "0 0 auto" }}
+                    disabled={jobPage <= 0}
+                    onClick={() => setJobPage((p) => p - 1)}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    size="small" variant="gray"
+                    sx={{ flex: "0 0 auto" }}
                     disabled={jobPage + 1 >= pageCount}
                     onClick={() => setJobPage((p) => p + 1)}
                   >
                     下一页
                   </Button>
+                  <Typography
+                    sx={{
+                      ...typeScale.s,
+                      color: "text.secondary",
+                      whiteSpace: "nowrap",
+                      fontVariantNumeric: "tabular-nums",
+                      flexBasis: "100%",
+                      textAlign: "center",
+                    }}
+                  >
+                    第 {jobPage + 1} / {pageCount} 页 · 共 {fmtNumber(jobsTotal)} 个职位
+                  </Typography>
                 </Box>
               </>
             )}
           </Box>
         </Surface>
+        </ScrollArea>
       </Box>
 
       {/* ---------------- 右栏：任务进度 + 匹配结果 ---------------- */}
@@ -397,8 +443,28 @@ export function WorkbenchSection({
         role="region"
         aria-label="匹配结果区"
         data-testid="match-results-col"
-        sx={{ flex: 1, minWidth: 0, width: { xs: "100%" } }}
+        sx={{
+          flex: 1,
+          minWidth: 0,
+          width: { xs: "100%" },
+          display: "flex",
+          flexDirection: "column",
+          minHeight: { xs: "auto", md: 0 },
+          overflowY: { xs: "visible", md: "hidden" },
+        }}
       >
+        {/* 容器头部标题固定在栏顶，不随结果滚 */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1.5, flex: "0 0 auto" }}>
+          <Typography sx={{ ...typeScale.m, fontWeight: 600, flex: 1 }}>匹配结果</Typography>
+          {matches.length > 0 && (
+            <>
+              <Pill tone="static">{fmtNumber(matches.length)} 条</Pill>
+              <Button size="small" variant="plain" onClick={onClearResults}>清空</Button>
+            </>
+          )}
+        </Box>
+
+        <ScrollArea sx={{ flex: { xs: "0 0 auto", md: 1 }, minHeight: { xs: "auto", md: 0 }, overflowY: { xs: "visible", md: "auto" } }}>
         {/* ---------------- 任务进度 ---------------- */}
         {(taskSnap || liveTask) && (
           <Box sx={{ mb: 2.5 }}>
@@ -418,17 +484,6 @@ export function WorkbenchSection({
             />
           </Box>
         )}
-
-        {/* ---------------- 匹配结果 ---------------- */}
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1.5 }}>
-          <Typography sx={{ ...typeScale.m, fontWeight: 600, flex: 1 }}>匹配结果</Typography>
-          {matches.length > 0 && (
-            <>
-              <Pill tone="static">{fmtNumber(matches.length)} 条</Pill>
-              <Button size="small" variant="plain" onClick={onClearResults}>清空</Button>
-            </>
-          )}
-        </Box>
 
         {showResultSkeletons ? (
           // 骨架屏预占最终卡位：历史详情在途 / 任务刚起步还没吐行时先撑住高度
@@ -450,17 +505,16 @@ export function WorkbenchSection({
                 draft={drafts[m.encrypt_job_id]}
                 busy={busyJid === m.encrypt_job_id}
                 expanded={expandedJid === m.encrypt_job_id}
-                onDraft={(text) => onSetDrafts((prev) => ({ ...prev, [m.encrypt_job_id]: text }))}
-                onToggleDetail={() =>
-                  onSetExpandedJid((prev) => (prev === m.encrypt_job_id ? null : m.encrypt_job_id))
-                }
-                onSave={() => void saveGreeting(m.encrypt_job_id)}
-                onRegen={() => void regenGreeting(m.encrypt_job_id)}
-                onRematch={() => void rematchOne(m.encrypt_job_id)}
+                onDraft={handleDraft}
+                onToggleDetail={handleToggleDetail}
+                onSave={saveGreeting}
+                onRegen={regenGreeting}
+                onRematch={rematchOne}
               />
             ))}
           </Box>
         )}
+        </ScrollArea>
       </Box>
     </Box>
   );

@@ -6,7 +6,7 @@
  */
 
 import { Box, Typography } from "@mui/material";
-import { Button, EmptyState, PageHeader, Surface } from "../components";
+import { Button, EmptyState, PageHeader, ScrollArea, Surface, pageRootSx } from "../components";
 import { fontFamilyMono, typeScale } from "../theme/tokens";
 
 export interface PendingPageProps {
@@ -24,38 +24,40 @@ export function legacyHref(hash: string): string {
 
 export function PendingPage({ title, legacyHash, scope }: PendingPageProps) {
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader title={title} subtitle={`${scope} · 还在旧壳里跑`} />
-      <Surface sx={{ maxWidth: 560 }}>
-        <EmptyState
-          icon="◷"
-          title="这一页还没迁到新壳"
-          description={
-            legacyHash
-              ? "新壳的路由、平台切换与实时推送已经就位；这一页的功能暂时还在旧界面，点下面的按钮直接过去。"
-              : "这一页要等后面的迁移阶段补上。"
-          }
-          action={
-            legacyHash ? (
-              <Button
-                variant="filled"
-                onClick={() => {
-                  window.location.href = legacyHref(legacyHash);
-                }}
-              >
-                打开旧界面
-              </Button>
-            ) : undefined
-          }
-        />
-      </Surface>
-      {legacyHash && (
-        <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2 }}>
-          也可以直接访问{" "}
-          <Box component="span" sx={{ fontFamily: fontFamilyMono }}>{legacyHref(legacyHash)}</Box>
-          ；旧书签会自动跳到新路由。
-        </Typography>
-      )}
+      <ScrollArea>
+        <Surface sx={{ maxWidth: 560 }}>
+          <EmptyState
+            icon="◷"
+            title="这一页还没迁到新壳"
+            description={
+              legacyHash
+                ? "新壳的路由、平台切换与实时推送已经就位；这一页的功能暂时还在旧界面，点下面的按钮直接过去。"
+                : "这一页要等后面的迁移阶段补上。"
+            }
+            action={
+              legacyHash ? (
+                <Button
+                  variant="filled"
+                  onClick={() => {
+                    window.location.href = legacyHref(legacyHash);
+                  }}
+                >
+                  打开旧界面
+                </Button>
+              ) : undefined
+            }
+          />
+        </Surface>
+        {legacyHash && (
+          <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2 }}>
+            也可以直接访问{" "}
+            <Box component="span" sx={{ fontFamily: fontFamilyMono }}>{legacyHref(legacyHash)}</Box>
+            ；旧书签会自动跳到新路由。
+          </Typography>
+        )}
+      </ScrollArea>
     </Box>
   );
 }

@@ -3,13 +3,18 @@
  *
  * 旧版这里是「卡片 + 详情弹窗」两层；招呼语本来就在卡上改最顺手，这轮把详情收成卡内展开，
  * 少一次弹窗跳转。重跑语义是「只改不增」——`matchApi.rematch` 原地替换这一条，列表不长行。
+ *
+ * 性能（缺陷「展开收起卡顿」）：`memo` 包一层，回调 props 一律「带 jid 的稳定引用」（id 由本卡
+ * 自己传出去），父层列表状态变化时只有 props 真变了的卡才重渲染。展开区不做高度动画——
+ * height 逐帧整页 reflow 是卡顿根因，改成即时布局 + 仅 opacity 短淡入，收起即卸（点了立刻变）。
  */
 
+import { memo } from "react";
 import { Box, Typography } from "@mui/material";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { motion } from "motion/react";
 
 import { Button, Pill, ScoreRing, Surface, TextField } from "../../../components";
-import { springs, typeScale } from "../../../theme/tokens";
+import { typeScale } from "../../../theme/tokens";
 import { GREETING_MAX, type MatchItem } from "./types";
 
 /** 技能标签行（匹配 / 欠缺）。 */
@@ -38,7 +43,7 @@ function ListLine({ label, values }: { label: string; values: string[] }) {
   );
 }
 
-export function MatchCard({
+export const MatchCard = memo(function MatchCard({
   item, draft, busy, expanded,
   onDraft, onToggleDetail, onSave, onRegen, onRematch,
 }: {
@@ -48,16 +53,17 @@ export function MatchCard({
   /** 该条是否正在重跑/生成（按钮转圈禁用） */
   busy: boolean;
   expanded: boolean;
-  onDraft: (text: string) => void;
-  onToggleDetail: () => void;
-  onSave: () => void;
-  onRegen: () => void;
-  onRematch: () => void;
+  /** 稳定回调（带 id）：组件自己把 `item.encrypt_job_id` 传出去，父层共享同一函数引用 */
+  onDraft: (jid: string, text: string) => void;
+  onToggleDetail: (jid: string) => void;
+  onSave: (jid: string) => void;
+  onRegen: (jid: string) => void;
+  onRematch: (jid: string) => void;
 }) {
+  const jid = item.encrypt_job_id;
   const meta = [item.location, item.salary_desc, item.job_experience, item.job_degree]
     .filter(Boolean).join(" · ");
   const dirty = draft !== undefined && draft !== item.greeting;
-  const reduced = useReducedMotion();
 
   return (
     <Surface
@@ -98,7 +104,7 @@ export function MatchCard({
           fullWidth
           inputProps={{ maxLength: GREETING_MAX }}
           value={draft ?? item.greeting ?? ""}
-          onChange={(e) => onDraft(e.target.value)}
+          onChange={(e) => onDraft(jid, e.target.value)}
           placeholder="给 HR 的开场白，可自己改"
         />
         {dirty && (
@@ -109,39 +115,36 @@ export function MatchCard({
       </Box>
 
       <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
-        <Button size="small" variant="filled" onClick={onSave} disabled={busy}>保存招呼语</Button>
-        <Button size="small" variant="gray" onClick={onRegen} disabled={busy}>
+        <Button size="small" variant="filled" onClick={() => onSave(jid)} disabled={busy}>保存招呼语</Button>
+        <Button size="small" variant="gray" onClick={() => onRegen(jid)} disabled={busy}>
           {busy ? "生成中…" : "重新生成"}
         </Button>
-        <Button size="small" variant="gray" onClick={onRematch} disabled={busy}>重跑</Button>
-        <Button size="small" variant="plain" onClick={onToggleDetail}>
+        <Button size="small" variant="gray" onClick={() => onRematch(jid)} disabled={busy}>重跑</Button>
+        <Button size="small" variant="plain" onClick={() => onToggleDetail(jid)}>
           {expanded ? "收起详情" : "匹配详情"}
         </Button>
       </Box>
 
-      {/* 展开 / 收起走弹簧高度动画（缺陷清单「展开收起卡顿」）；reduced-motion 退化为淡入淡出 */}
-      <AnimatePresence initial={false}>
-        {expanded && (
-          <motion.div
-            key="detail"
-            initial={reduced ? { opacity: 0 } : { height: 0, opacity: 0 }}
-            animate={reduced ? { opacity: 1 } : { height: "auto", opacity: 1 }}
-            exit={reduced ? { opacity: 0 } : { height: 0, opacity: 0 }}
-            transition={springs.ui}
-            style={{ overflow: "hidden" }}
-          >
-            <Surface sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-              <SkillLine label="匹配技能" values={item.matched_skills} tone="ok" />
-              <SkillLine label="欠缺技能" values={item.missing_skills} tone="warn" />
-              <ListLine label="优势" values={item.pros} />
-              <ListLine label="风险" values={item.cons} />
-              {item.error && (
-                <Typography sx={{ ...typeScale.s, color: "error.main" }}>错误：{item.error}</Typography>
-              )}
-            </Surface>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* 展开区：即时布局变化 + 仅 opacity 短淡入（缺陷「展开收起卡顿」）——
+          height 动画每帧整页 reflow 是卡顿根因，已去掉；收起直接卸载，点了立刻变。 */}
+      {expanded && (
+        <motion.div
+          key="detail"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.15, ease: "easeOut" }}
+        >
+          <Surface sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            <SkillLine label="匹配技能" values={item.matched_skills} tone="ok" />
+            <SkillLine label="欠缺技能" values={item.missing_skills} tone="warn" />
+            <ListLine label="优势" values={item.pros} />
+            <ListLine label="风险" values={item.cons} />
+            {item.error && (
+              <Typography sx={{ ...typeScale.s, color: "error.main" }}>错误：{item.error}</Typography>
+            )}
+          </Surface>
+        </motion.div>
+      )}
     </Surface>
   );
-}
+});

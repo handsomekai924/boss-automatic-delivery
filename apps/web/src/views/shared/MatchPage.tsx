@@ -13,7 +13,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Box } from "@mui/material";
 
-import { InlineAlert, PageHeader, SegmentedControl, useToast } from "../../components";
+import {
+  InlineAlert, PageHeader, pageRootSx, ScrollArea, SegmentedControl, useToast, ViewFade,
+} from "../../components";
 import { useTasks } from "../../stores/taskStore";
 import {
   matchApi, resumeApi, type ResumeItem,
@@ -170,19 +172,29 @@ export function MatchPage() {
     setResultsLoading(false);
   }, []);
 
+  // 传给工作台的 setter 保持稳定引用：MatchCard 靠 memo 挡重渲染，回调一变全列表跟着渲
+  const setMatchesFn = useCallback((fn: (prev: MatchItem[]) => MatchItem[]) => setMatches(fn), []);
+  const setDraftsFn = useCallback(
+    (fn: (prev: Record<string, string>) => Record<string, string>) => setDrafts(fn),
+    [],
+  );
+  const setExpandedJidFn = useCallback((fn: (prev: string | null) => string | null) => setExpandedJid(fn), []);
+
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader
         title="匹配"
         subtitle="拿你的简历和搜到的岗位逐个比对：给出匹配度、好在哪、差在哪，还有一句给 HR 的开场白（可自己改）。"
       />
 
       {/* 发对话/投递是平台作用域（各家登录态、各家通道），归 M3 的 deliver 页——这里只留路标 */}
-      <InlineAlert tone="info">
-        发对话与投递已移到平台侧『发对话与投递』页——那页按平台登录态操作，这页只管匹配、历史分析和招呼语文案。
-      </InlineAlert>
+      <Box sx={{ flex: "0 0 auto" }}>
+        <InlineAlert tone="info">
+          发对话与投递已移到平台侧『发对话与投递』页——那页按平台登录态操作，这页只管匹配、历史分析和招呼语文案。
+        </InlineAlert>
+      </Box>
 
-      <Box sx={{ my: 2.5 }}>
+      <Box sx={{ my: 2.5, flex: "0 0 auto" }}>
         <SegmentedControl<TabValue>
           aria-label="匹配分区"
           value={tab}
@@ -191,39 +203,51 @@ export function MatchPage() {
         />
       </Box>
 
+      {/* 工作台双栏：ViewFade 自带撑满，两栏各自内部滚动（不套整块 ScrollArea） */}
       {tab === "workbench" && (
-        <WorkbenchSection
-          resumes={resumes as unknown as { resume_id: string; title: string; parsed?: boolean }[]}
-          resumeId={resumeId}
-          onResumeId={setResumeId}
-          taskSnap={taskSnap}
-          liveTask={liveTask as unknown as { title?: string; status: string; done: number; total: number; current?: string; error?: string | null; events?: unknown[] } | null}
-          activeTaskId={activeTaskId}
-          resultsLoading={resultsLoading}
-          analysisId={analysisId}
-          matches={matches}
-          drafts={drafts}
-          busyJid={busyJid}
-          expandedJid={expandedJid}
-          onAdoptTask={adoptTask}
-          onSetMatches={(fn) => setMatches(fn)}
-          onSetDrafts={(fn) => setDrafts(fn)}
-          onSetBusyJid={setBusyJid}
-          onSetExpandedJid={(fn) => setExpandedJid(fn)}
-          onClearResults={clearResults}
-        />
+        <ViewFade slotKey={tab}>
+          <WorkbenchSection
+            resumes={resumes as unknown as { resume_id: string; title: string; parsed?: boolean }[]}
+            resumeId={resumeId}
+            onResumeId={setResumeId}
+            taskSnap={taskSnap}
+            liveTask={liveTask as unknown as { title?: string; status: string; done: number; total: number; current?: string; error?: string | null; events?: unknown[] } | null}
+            activeTaskId={activeTaskId}
+            resultsLoading={resultsLoading}
+            analysisId={analysisId}
+            matches={matches}
+            drafts={drafts}
+            busyJid={busyJid}
+            expandedJid={expandedJid}
+            onAdoptTask={adoptTask}
+            onSetMatches={setMatchesFn}
+            onSetDrafts={setDraftsFn}
+            onSetBusyJid={setBusyJid}
+            onSetExpandedJid={setExpandedJidFn}
+            onClearResults={clearResults}
+          />
+        </ViewFade>
       )}
 
+      {/* 历史段同工作台：ViewFade 直挂，HistorySection 自己 fill（标题固定 + 列表局部滚动） */}
       {tab === "history" && (
-        <HistorySection
-          rows={rows}
-          setRows={(fn) => setRows(fn)}
-          onLoadAnalysis={loadAnalysis}
-          onDelete={onDeleteAnalysis}
-        />
+        <ViewFade slotKey={tab}>
+          <HistorySection
+            rows={rows}
+            setRows={(fn) => setRows(fn)}
+            onLoadAnalysis={loadAnalysis}
+            onDelete={onDeleteAnalysis}
+          />
+        </ViewFade>
       )}
 
-      {tab === "greeting" && <GreetingSection />}
+      {tab === "greeting" && (
+        <ScrollArea>
+          <ViewFade slotKey={tab}>
+            <GreetingSection />
+          </ViewFade>
+        </ScrollArea>
+      )}
     </Box>
   );
 }

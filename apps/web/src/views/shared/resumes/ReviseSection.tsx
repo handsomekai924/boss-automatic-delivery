@@ -14,7 +14,8 @@ import { useEffect, useState } from "react";
 import { Box, Checkbox, Typography } from "@mui/material";
 
 import {
-  Button, EmptyState, SegmentedControl, Select, Skeleton, Surface, TaskPanel, TextField, useToast,
+  Button, EmptyState, ScrollArea, SegmentedControl, Select, Skeleton, Surface, TaskPanel,
+  TextField, pageRootSx, useToast,
 } from "../../../components";
 import { typeScale } from "../../../theme/tokens";
 import { fmtNumber, fmtTime } from "../../../utils/format";
@@ -237,8 +238,8 @@ export function ReviseSection({
   const done = task != null && task.status === "done";
 
   return (
-    <Box>
-      <Surface sx={{ mb: 2.5, display: "flex", gap: 2, flexWrap: "wrap", alignItems: "center" }}>
+    <Box sx={pageRootSx}>
+      <Surface sx={{ mb: 2.5, flex: "0 0 auto", display: "flex", gap: 2, flexWrap: "wrap", alignItems: "center" }}>
         <Select
           label="简历"
           options={resumes.map((r) => ({ code: r.resume_id, name: r.title || r.resume_id }))}
@@ -256,10 +257,22 @@ export function ReviseSection({
         <Typography sx={{ ...typeScale.s, color: "text.secondary", flex: 1, minWidth: 180 }}>
           修改以这份【原文】为底稿，不是解析结果。原简历永不覆盖。
         </Typography>
+        {/* 优化入口并进顶部工具条（GenerateSection 筛选条同款范式），不再单独占底部一行 */}
+        <Button
+          variant="filled"
+          sx={{ ml: "auto" }}
+          disabled={running || starting}
+          onClick={() => void start()}
+        >
+          {starting ? "启动中…" : running ? "生成中…" : "启动优化"}
+        </Button>
+        <Typography sx={{ ...typeScale.s, color: "text.secondary", flexBasis: "100%" }}>
+          生成是一次长任务，进度和事件流水都在上面的任务卡里。
+        </Typography>
       </Surface>
 
       {task ? (
-        <Box sx={{ mb: 2.5 }}>
+        <Box sx={{ mb: 2.5, flex: "0 0 auto" }}>
           <TaskPanel
             title={`简历优化 · ${task.mode === "free" ? "自由优化" : "定向优化"}`}
             status={task.status}
@@ -285,11 +298,21 @@ export function ReviseSection({
       ) : null}
 
       {mode === "targeted" ? (
-        <Surface sx={{ mb: 2.5, display: "flex", flexDirection: "column", gap: 2 }}>
-          {/* 目标范围一行：批次下拉 + 搜索框（缺陷清单「目标范围」：不选批次 = 搜全部职位） */}
+        <Surface
+          sx={{
+            mb: 2.5,
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            overflow: "hidden",
+          }}
+        >
+          {/* 固定头部：目标范围一行 + 两行说明（容器头部信息，不随列表滚） */}
           <Box
             data-testid="revise-scope-row"
-            sx={{ display: "flex", gap: 1.5, alignItems: "center", flexWrap: "wrap" }}
+            sx={{ display: "flex", gap: 1.5, alignItems: "center", flexWrap: "wrap", flex: "0 0 auto" }}
           >
             <Select
               label="爬取批次"
@@ -310,52 +333,57 @@ export function ReviseSection({
             />
           </Box>
 
-          <Typography sx={{ ...typeScale.s, color: "text.secondary" }}>
+          <Typography sx={{ ...typeScale.s, color: "text.secondary", flex: "0 0 auto" }}>
             不选批次 = 搜全部职位；勾具体岗位 = 只改这几个，不勾 = 以搜索范围内的全部岗位为目标（后端取前 {MAX_TARGET} 个）。
           </Typography>
 
-          <Typography sx={{ ...typeScale.s, color: "text.secondary" }}>
+          <Typography sx={{ ...typeScale.s, color: "text.secondary", flex: "0 0 auto" }}>
             已选 {jobIds.length}/{MAX_TARGET}（后端最多吃 {MAX_TARGET} 个）· 共 {fmtNumber(jobTotal)} 个候选
           </Typography>
-          {jobsLoading ? (
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-              {Array.from({ length: 5 }, (_, i) => <Skeleton key={i} height={36} />)}
-            </Box>
-          ) : (
-            <Box sx={{ maxHeight: 260, overflowY: "auto", display: "flex", flexDirection: "column" }}>
-              {jobs.map((j) => (
-                <Box
-                  key={j.encrypt_job_id}
-                  component="label"
-                  sx={{
-                    display: "flex", alignItems: "center", gap: 1, py: 0.5, cursor: "pointer",
-                    borderBottom: "1px solid", borderColor: "divider",
-                  }}
-                >
-                  <Checkbox
-                    size="small"
-                    checked={jobIds.includes(j.encrypt_job_id)}
-                    disabled={!jobIds.includes(j.encrypt_job_id) && jobIds.length >= MAX_TARGET}
-                    onChange={(e) => toggleJob(j.encrypt_job_id, e.target.checked)}
-                  />
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography sx={{ ...typeScale.bodySm }} noWrap>
-                      {j.job_name}{" "}
-                      <Box component="span" sx={{ ...typeScale.s, color: "text.secondary" }}>@ {j.brand_name}</Box>
-                    </Typography>
-                    <Typography sx={{ ...typeScale.xs, color: "text.secondary" }}>
-                      {[j.salary_desc, j.location].filter(Boolean).join(" · ")}
-                    </Typography>
+
+          {/* 候选岗位列表：内容区自滚（去掉 maxHeight），骨架同占这块 */}
+          <ScrollArea>
+            {jobsLoading ? (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                {Array.from({ length: 5 }, (_, i) => <Skeleton key={i} height={36} />)}
+              </Box>
+            ) : (
+              <Box sx={{ display: "flex", flexDirection: "column" }}>
+                {jobs.map((j) => (
+                  <Box
+                    key={j.encrypt_job_id}
+                    component="label"
+                    sx={{
+                      display: "flex", alignItems: "center", gap: 1, py: 0.5, cursor: "pointer",
+                      borderBottom: "1px solid", borderColor: "divider",
+                    }}
+                  >
+                    <Checkbox
+                      size="small"
+                      checked={jobIds.includes(j.encrypt_job_id)}
+                      disabled={!jobIds.includes(j.encrypt_job_id) && jobIds.length >= MAX_TARGET}
+                      onChange={(e) => toggleJob(j.encrypt_job_id, e.target.checked)}
+                    />
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ ...typeScale.bodySm }} noWrap>
+                        {j.job_name}{" "}
+                        <Box component="span" sx={{ ...typeScale.s, color: "text.secondary" }}>@ {j.brand_name}</Box>
+                      </Typography>
+                      <Typography sx={{ ...typeScale.xs, color: "text.secondary" }}>
+                        {[j.salary_desc, j.location].filter(Boolean).join(" · ")}
+                      </Typography>
+                    </Box>
                   </Box>
-                </Box>
-              ))}
-              {jobs.length === 0 ? (
-                <Typography sx={{ ...typeScale.s, color: "text.secondary", py: 1 }}>没匹配的职位</Typography>
-              ) : null}
-            </Box>
-          )}
-          {/* 分页（缺陷清单「目标范围」）：整页替换 + 上一页/下一页，跟职位页同款 */}
-          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
+                ))}
+                {jobs.length === 0 ? (
+                  <Typography sx={{ ...typeScale.s, color: "text.secondary", py: 1 }}>没匹配的职位</Typography>
+                ) : null}
+              </Box>
+            )}
+          </ScrollArea>
+
+          {/* 固定底：分页（缺陷清单「目标范围」）+ 清空勾选，不随列表滚 */}
+          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center", flex: "0 0 auto" }}>
             <Button
               size="small"
               variant="gray"
@@ -379,78 +407,72 @@ export function ReviseSection({
           </Box>
         </Surface>
       ) : (
-        <Surface sx={{ mb: 2.5, display: "flex", flexDirection: "column", gap: 2 }}>
-          <Box>
-            <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 1 }}>
-              优化章节（留空 = 全部）
-            </Typography>
-            <Box sx={{ maxHeight: 220, overflowY: "auto" }}>
-              {sectionsLoading ? (
-                <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                  {Array.from({ length: 3 }, (_, i) => <Skeleton key={i} height={28} />)}
-                </Box>
-              ) : sections.length === 0 ? (
-                <Typography sx={{ ...typeScale.s, color: "text.secondary" }}>未检测到章节标题</Typography>
-              ) : (
-                sections.map((s) => (
-                  <Box key={s.title} component="label" sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.25, cursor: "pointer" }}>
-                    <Checkbox
-                      size="small"
-                      checked={selected.includes(s.title)}
-                      onChange={(e) => toggleSection(s.title, e.target.checked)}
-                    />
-                    <Typography sx={{ ...typeScale.bodySm, flex: 1 }}>{s.title}</Typography>
-                    <Typography sx={{ ...typeScale.xs, color: "text.secondary" }}>H{s.level}</Typography>
+        /* 自由模式没有分页器：整段自滚 */
+        <ScrollArea sx={{ mb: 2.5 }}>
+          <Surface sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <Box>
+              <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 1 }}>
+                优化章节（留空 = 全部）
+              </Typography>
+              <Box sx={{ maxHeight: 220, overflowY: "auto" }}>
+                {sectionsLoading ? (
+                  <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                    {Array.from({ length: 3 }, (_, i) => <Skeleton key={i} height={28} />)}
                   </Box>
-                ))
-              )}
-            </Box>
-          </Box>
-
-          <Box>
-            <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 1 }}>
-              优化提示词
-            </Typography>
-            {presetsLoading ? (
-              <Skeleton height={32} width={280} sx={{ mb: 1.5 }} />
-            ) : (
-              <Box sx={{ display: "flex", gap: 1, alignItems: "center", flexWrap: "wrap", mb: 1.5 }}>
-                <Select
-                  label="预设分类"
-                  options={presetCats.map((c) => ({ code: c, name: c }))}
-                  value={presetCat}
-                  onChange={setPresetCat}
-                  emptyLabel={null}
-                  sx={{ minWidth: 160 }}
-                />
-                {(presets[presetCat] ?? []).map((p) => (
-                  <Button key={p.name} size="small" variant="gray" onClick={() => setPrompt(p.prompt)}>
-                    {p.name}
-                  </Button>
-                ))}
+                ) : sections.length === 0 ? (
+                  <Typography sx={{ ...typeScale.s, color: "text.secondary" }}>未检测到章节标题</Typography>
+                ) : (
+                  sections.map((s) => (
+                    <Box key={s.title} component="label" sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.25, cursor: "pointer" }}>
+                      <Checkbox
+                        size="small"
+                        checked={selected.includes(s.title)}
+                        onChange={(e) => toggleSection(s.title, e.target.checked)}
+                      />
+                      <Typography sx={{ ...typeScale.bodySm, flex: 1 }}>{s.title}</Typography>
+                      <Typography sx={{ ...typeScale.xs, color: "text.secondary" }}>H{s.level}</Typography>
+                    </Box>
+                  ))
+                )}
               </Box>
-            )}
-            <TextField
-              label="优化提示词"
-              multiline
-              rows={4}
-              fullWidth
-              placeholder="输入自定义提示词，或点上方预设填入"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          </Box>
-        </Surface>
-      )}
+            </Box>
 
-      <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
-        <Button variant="filled" disabled={running || starting} onClick={() => void start()}>
-          {starting ? "启动中…" : running ? "生成中…" : "启动优化"}
-        </Button>
-        <Typography sx={{ ...typeScale.s, color: "text.secondary" }}>
-          生成是一次长任务，进度和事件流水都在上面的任务卡里。
-        </Typography>
-      </Box>
+            <Box>
+              <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 1 }}>
+                优化提示词
+              </Typography>
+              {presetsLoading ? (
+                <Skeleton height={32} width={280} sx={{ mb: 1.5 }} />
+              ) : (
+                <Box sx={{ display: "flex", gap: 1, alignItems: "center", flexWrap: "wrap", mb: 1.5 }}>
+                  <Select
+                    label="预设分类"
+                    options={presetCats.map((c) => ({ code: c, name: c }))}
+                    value={presetCat}
+                    onChange={setPresetCat}
+                    emptyLabel={null}
+                    sx={{ minWidth: 160 }}
+                  />
+                  {(presets[presetCat] ?? []).map((p) => (
+                    <Button key={p.name} size="small" variant="gray" onClick={() => setPrompt(p.prompt)}>
+                      {p.name}
+                    </Button>
+                  ))}
+                </Box>
+              )}
+              <TextField
+                label="优化提示词"
+                multiline
+                rows={4}
+                fullWidth
+                placeholder="输入自定义提示词，或点上方预设填入"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+              />
+            </Box>
+          </Surface>
+        </ScrollArea>
+      )}
     </Box>
   );
 }

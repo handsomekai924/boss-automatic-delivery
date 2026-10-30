@@ -16,8 +16,8 @@ body {
 
 html,
 body {
-  /* 外壳 100dvh 定死、滚动都在内容区（layouts CONTENT_SX 的 overflow:auto）；
-     页面本身禁止滚动，顺带压掉移动端滚动穿透 */
+  /* 外壳 100dvh 定死、整页不滚（layouts CONTENT_SX 的 overflow:hidden）；
+     滚动只发生在页面内部 ScrollArea，顺带压掉移动端滚动穿透 */
   overflow: hidden;
 }
 

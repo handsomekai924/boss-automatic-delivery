@@ -30,7 +30,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Box } from "@mui/material";
 
 import {
-  InlineAlert, PageHeader, SegmentedControl, Sheet, useToast,
+  InlineAlert, PageHeader, ScrollArea, SegmentedControl, Sheet, ViewFade, pageRootSx, useToast,
 } from "../../components";
 import { fontFamilyMono, typeScale } from "../../theme/tokens";
 import { resumeApi, tasksApi } from "./repos";
@@ -267,15 +267,19 @@ export function ResumesPage() {
   const currentRun = currentId ? runs[currentId] : undefined;
 
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader
         title="简历"
         subtitle="上传简历、LLM 解析与优化修改。解析结果是人岗匹配的底稿，先在这里确认没有读错。"
       />
 
-      {loadError ? <InlineAlert tone="danger">{loadError}</InlineAlert> : null}
+      {loadError ? (
+        <Box sx={{ flex: "0 0 auto" }}>
+          <InlineAlert tone="danger">{loadError}</InlineAlert>
+        </Box>
+      ) : null}
 
-      <Box sx={{ my: 2.5 }}>
+      <Box sx={{ my: 2.5, flex: "0 0 auto" }}>
         <SegmentedControl
           aria-label="简历分区"
           value={tab}
@@ -292,47 +296,54 @@ export function ResumesPage() {
         />
       </Box>
 
-      {tab === "library" ? (
-        <LibrarySection
-          resumes={resumes}
-          currentId={currentId}
-          runs={runs}
-          loading={resumesLoading}
-          rawBusyId={rawBusyId}
-          parseBusyId={parseBusyId}
-          onSelect={setCurrentId}
-          onChanged={loadResumes}
-          onRunParse={runParse}
-          onViewRaw={viewRaw}
-        />
-      ) : null}
-
-      {tab === "parse" ? (
-        <ParseSection
-          current={current}
-          detail={detail}
-          run={currentRun}
-          loading={detailLoading}
-          rawBusyId={rawBusyId}
-          parseBusyId={parseBusyId}
-          onRunParse={runParse}
-          onViewRaw={viewRaw}
-        />
-      ) : null}
-
+      {/* 解析与优化修改自带「白底容器内滚 / 固定头 + 内部滚动」，ViewFade 直挂、不套整块 ScrollArea；其余两段整段自滚 */}
       {tab === "revise" ? (
-        <ReviseSection
-          resumes={resumes}
-          currentId={currentId}
-          task={reviseTask}
-          onTaskChange={setReviseTask}
-          onViewRevision={openRevisionFromTask}
-        />
-      ) : null}
+        <ViewFade slotKey={tab}>
+          <ReviseSection
+            resumes={resumes}
+            currentId={currentId}
+            task={reviseTask}
+            onTaskChange={setReviseTask}
+            onViewRevision={openRevisionFromTask}
+          />
+        </ViewFade>
+      ) : tab === "parse" ? (
+        <ViewFade slotKey={tab}>
+          <ParseSection
+            current={current}
+            detail={detail}
+            run={currentRun}
+            loading={detailLoading}
+            rawBusyId={rawBusyId}
+            parseBusyId={parseBusyId}
+            onRunParse={runParse}
+            onViewRaw={viewRaw}
+          />
+        </ViewFade>
+      ) : (
+        <ScrollArea>
+          <ViewFade slotKey={tab}>
+            {tab === "library" ? (
+              <LibrarySection
+                resumes={resumes}
+                currentId={currentId}
+                runs={runs}
+                loading={resumesLoading}
+                rawBusyId={rawBusyId}
+                parseBusyId={parseBusyId}
+                onSelect={setCurrentId}
+                onChanged={loadResumes}
+                onRunParse={runParse}
+                onViewRaw={viewRaw}
+              />
+            ) : null}
 
-      {tab === "records" ? (
-        <RecordsSection openRevisionId={pendingRevision} onOpened={clearPendingRevision} />
-      ) : null}
+            {tab === "records" ? (
+              <RecordsSection openRevisionId={pendingRevision} onOpened={clearPendingRevision} />
+            ) : null}
+          </ViewFade>
+        </ScrollArea>
+      )}
 
       <Sheet open={rawItem != null} onClose={() => setRawItem(null)} title={`原文 · ${rawItem?.title ?? ""}`} width={640}>
         <Box

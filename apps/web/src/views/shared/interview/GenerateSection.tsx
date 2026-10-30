@@ -10,7 +10,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Typography } from "@mui/material";
 
 import {
-  Button, CellTitle, DataTable, Pill, Select, Surface, TextField, useToast, type Column,
+  Button, CellTitle, DataTable, Pill, ScrollArea, Select, Surface, TextField, pageRootSx,
+  useToast, type Column,
 } from "../../../components";
 import { typeScale } from "../../../theme/tokens";
 import { fmtTime } from "../../../utils/format";
@@ -208,8 +209,8 @@ export function GenerateSection({
   const jobsPageCount = Math.max(1, Math.ceil(jobsTotal / PAGE_SIZE));
 
   return (
-    <Box>
-      <Surface sx={{ mb: 2, display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
+    <Box sx={pageRootSx}>
+      <Surface sx={{ mb: 2, flex: "0 0 auto", display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
         <Select
           label="抓取批次"
           options={batchOptions}
@@ -258,40 +259,42 @@ export function GenerateSection({
         </Typography>
       </Surface>
 
-      <DataTable
-        columns={jobColumns}
-        rows={jobs}
-        rowKey={(j) => j.encrypt_job_id}
-        loading={jobsLoading}
-        emptyText="没有符合条件的岗位"
-        rowActions={(j) => (
-          <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
-            {/* 没生成过题就没有可看的——禁用，别开了个空侧栏（缺陷清单「查看按钮」） */}
-            <Button
-              size="small"
-              variant="plain"
-              disabled={j.question_count === 0}
-              onClick={() =>
-                setPrep({
-                  encryptJobId: j.encrypt_job_id,
-                  jobName: j.job_name,
-                  brandName: j.brand_name,
-                })
-              }
-            >
-              查看
-            </Button>
-            <Button
-              size="small"
-              variant="gray"
-              disabled={busy.has(j.encrypt_job_id) || genKey !== null}
-              onClick={() => void startGenerate([j.encrypt_job_id], j.encrypt_job_id)}
-            >
-              {busy.has(j.encrypt_job_id) ? "任务中" : genKey === j.encrypt_job_id ? "生成中…" : "生成"}
-            </Button>
-          </Box>
-        )}
-      />
+      <ScrollArea>
+        <DataTable
+          columns={jobColumns}
+          rows={jobs}
+          rowKey={(j) => j.encrypt_job_id}
+          loading={jobsLoading}
+          emptyText="没有符合条件的岗位"
+          rowActions={(j) => (
+            <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
+              {/* 没生成过题就没有可看的——禁用，别开了个空侧栏（缺陷清单「查看按钮」） */}
+              <Button
+                size="small"
+                variant="plain"
+                disabled={j.question_count === 0}
+                onClick={() =>
+                  setPrep({
+                    encryptJobId: j.encrypt_job_id,
+                    jobName: j.job_name,
+                    brandName: j.brand_name,
+                  })
+                }
+              >
+                查看
+              </Button>
+              <Button
+                size="small"
+                variant="gray"
+                disabled={busy.has(j.encrypt_job_id) || genKey !== null}
+                onClick={() => void startGenerate([j.encrypt_job_id], j.encrypt_job_id)}
+              >
+                {busy.has(j.encrypt_job_id) ? "任务中" : genKey === j.encrypt_job_id ? "生成中…" : "生成"}
+              </Button>
+            </Box>
+          )}
+        />
+      </ScrollArea>
       <Pager
         total={jobsTotal}
         page={jobsPage}

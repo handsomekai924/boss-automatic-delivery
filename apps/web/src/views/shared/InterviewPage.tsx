@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Box, Typography } from "@mui/material";
 import { useNavigate } from "react-router-dom";
 
-import { PageHeader, SegmentedControl, ViewFade } from "../../components";
+import { PageHeader, pageRootSx, SegmentedControl, ViewFade } from "../../components";
 import { useTaskStore, useTasks } from "../../stores/taskStore";
 import { getStatus } from "../../ws/client";
 import { typeScale } from "../../theme/tokens";
@@ -71,13 +71,13 @@ export function InterviewPage() {
   }, [refreshTasks]);
 
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader
         title="面试题"
         subtitle="按抓取批次或职位名挑一批岗位批量出题；生成的题可以逐题浏览、补题、导出。"
       />
 
-      <Box sx={{ my: 2.5 }}>
+      <Box sx={{ my: 2.5, flex: "0 0 auto" }}>
         <SegmentedControl<TabValue>
           aria-label="面试题分区"
           value={tab}
@@ -100,8 +100,8 @@ export function InterviewPage() {
         )}
       </ViewFade>
 
-      {/* 生成任务已迁任务中心——留路标，不摆假按钮 */}
-      <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2 }}>
+      {/* 生成任务已迁任务中心——留路标，不摆假按钮；固定在最外层底部，不随内容滚 */}
+      <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2, flex: "0 0 auto" }}>
         生成任务的进度、取消 / 重试 / 删除都在任务中心
         <Box
           component="button"

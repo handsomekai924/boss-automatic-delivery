@@ -18,6 +18,7 @@ export function PageHeader({ title, subtitle, actions }: PageHeaderProps) {
         gap: 3,
         mb: 3,
         flexWrap: "wrap",
+        flex: "0 0 auto",
       }}
     >
       <Box sx={{ minWidth: 0 }}>

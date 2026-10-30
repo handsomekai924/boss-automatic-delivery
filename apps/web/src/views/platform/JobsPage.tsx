@@ -15,7 +15,7 @@ import { useNavigate } from "react-router-dom";
 
 import {
   Button, ConfirmSheet, EmptyState, InlineAlert, JobCard, JobDetailDrawer, PageHeader, Pill,
-  SearchFilterBar, Select, Skeleton, Surface, TextField, useToast,
+  ScrollArea, SearchFilterBar, Select, Skeleton, Surface, TextField, pageRootSx, useToast,
 } from "../../components";
 import type { JobDetail, JobSummary } from "../../api/dto";
 import { usePlatform } from "../../platform/PlatformProvider";
@@ -410,7 +410,7 @@ export function JobsPage() {
   );
 
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader
         title="找工作"
         subtitle="在本地职位库浏览、筛选和补全职位描述。采集条件就地配，细进度去任务中心。"
@@ -434,7 +434,7 @@ export function JobsPage() {
         }
       />
 
-      <Surface sx={{ mb: 2.5 }}>
+      <Surface sx={{ flex: "0 0 auto", mb: 2.5 }}>
         <Box sx={{ display: "flex", gap: 1.5, alignItems: "flex-start", flexWrap: "wrap" }}>
           <Box sx={{ flex: "1 1 320px", minWidth: 0 }}>
             <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 0.5 }}>
@@ -466,9 +466,7 @@ export function JobsPage() {
         </Box>
       </Surface>
 
-      {loadError && <InlineAlert tone="danger">{loadError}</InlineAlert>}
-
-      <Surface sx={{ mb: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
+      <Surface sx={{ flex: "0 0 auto", mb: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
         <SearchFilterBar
           query={keyword}
           onQueryChange={setKeyword}
@@ -525,64 +523,69 @@ export function JobsPage() {
         </Box>
       </Surface>
 
-      {loading && items.length === 0 ? (
-        // 拉取窗口：3 行卡片骨架（约等于 JobCard 高度），数据到了直接替换不跳版
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2 }}>
-          {[0, 1, 2].map((i) => (
-            <Skeleton key={i} height={96} sx={{ borderRadius: radius.s }} />
-          ))}
-        </Box>
-      ) : items.length === 0 ? (
-        <EmptyState
-          title="库还是空的"
-          description="点右上「开始采集」拉一批，或放宽上面的筛选条件。"
-        />
-      ) : (
-        <Box
-          sx={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 1.5,
-            mb: 2,
-            // 翻页/重筛时旧列表压暗占位（与 LibraryDataSection 同款），别整块抽走
-            opacity: loading ? 0.55 : 1,
-            transition: "opacity 160ms ease",
-          }}
-        >
-          {items.map((j) => {
-            const id = j.encrypt_job_id;
-            const count = interviewCounts[id] ?? 0;
-            return (
-              <JobCard
-                key={id}
-                job={toSummary(j)}
-                onClick={() => void openDetail(id)}
-                leading={
-                  <Checkbox
-                    checked={selected.has(id)}
-                    onChange={() => toggleSelect(id)}
-                    inputProps={{ "aria-label": `选择 ${j.job_name}` }}
-                  />
-                }
-                actions={
-                  <Button
-                    size="small"
-                    variant="gray"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate("/interview");
-                    }}
-                  >
-                    {count ? `面试题 ${count}` : "面试准备"}
-                  </Button>
-                }
-              />
-            );
-          })}
-        </Box>
-      )}
+      {/* 内部滚动：载入错误 + 骨架 / 空态 / 职位列表 */}
+      <ScrollArea>
+        {loadError && <InlineAlert tone="danger">{loadError}</InlineAlert>}
+        {loading && items.length === 0 ? (
+          // 拉取窗口：3 行卡片骨架（约等于 JobCard 高度），数据到了直接替换不跳版
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2 }}>
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} height={96} sx={{ borderRadius: radius.s }} />
+            ))}
+          </Box>
+        ) : items.length === 0 ? (
+          <EmptyState
+            title="库还是空的"
+            description="点右上「开始采集」拉一批，或放宽上面的筛选条件。"
+          />
+        ) : (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 1.5,
+              mb: 2,
+              // 翻页/重筛时旧列表压暗占位（与 LibraryDataSection 同款），别整块抽走
+              opacity: loading ? 0.55 : 1,
+              transition: "opacity 160ms ease",
+            }}
+          >
+            {items.map((j) => {
+              const id = j.encrypt_job_id;
+              const count = interviewCounts[id] ?? 0;
+              return (
+                <JobCard
+                  key={id}
+                  job={toSummary(j)}
+                  onClick={() => void openDetail(id)}
+                  leading={
+                    <Checkbox
+                      checked={selected.has(id)}
+                      onChange={() => toggleSelect(id)}
+                      inputProps={{ "aria-label": `选择 ${j.job_name}` }}
+                    />
+                  }
+                  actions={
+                    <Button
+                      size="small"
+                      variant="gray"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate("/interview");
+                      }}
+                    >
+                      {count ? `面试题 ${count}` : "面试准备"}
+                    </Button>
+                  }
+                />
+              );
+            })}
+          </Box>
+        )}
+      </ScrollArea>
 
-      <Box sx={{ display: "flex", gap: 1.5, alignItems: "center", justifyContent: "center", mt: 2 }}>
+      {/* 固定底：分页器 */}
+      <Box sx={{ display: "flex", gap: 1.5, alignItems: "center", justifyContent: "center", mt: 2, flex: "0 0 auto" }}>
         <Button
           variant="gray"
           disabled={offset <= 0 || loading}

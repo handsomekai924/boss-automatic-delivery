@@ -34,7 +34,7 @@ export function Pager({
   onNext: () => void;
 }) {
   return (
-    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1.5, gap: 1, flexWrap: "wrap" }}>
+    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1.5, gap: 1, flexWrap: "wrap", flex: "0 0 auto" }}>
       <Typography sx={{ ...typeScale.s, color: "text.secondary" }}>
         共 {fmtNumber(total)} 条 · 第 {page + 1}/{Math.max(1, pageCount)} 页
       </Typography>

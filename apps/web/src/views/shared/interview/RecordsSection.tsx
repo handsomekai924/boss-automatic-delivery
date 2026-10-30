@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Box, Typography } from "@mui/material";
 
 import {
-  Button, CellTitle, DataTable, Surface, TextField, useToast, type Column,
+  Button, CellTitle, DataTable, ScrollArea, Surface, TextField, pageRootSx, useToast, type Column,
 } from "../../../components";
 import { typeScale } from "../../../theme/tokens";
 import { fmtNumber, fmtTime } from "../../../utils/format";
@@ -89,8 +89,8 @@ export function RecordsSection({
   const recsPageCount = Math.max(1, Math.ceil(recsTotal / PAGE_SIZE));
 
   return (
-    <Box>
-      <Surface sx={{ mb: 2, display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
+    <Box sx={pageRootSx}>
+      <Surface sx={{ mb: 2, flex: "0 0 auto", display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
         <TextField
           label="记录搜索"
           type="search"
@@ -119,44 +119,46 @@ export function RecordsSection({
         </Typography>
       </Surface>
 
-      <DataTable
-        columns={recordColumns}
-        rows={records}
-        rowKey={(r) => r.encrypt_job_id}
-        loading={recsLoading}
-        emptyText="还没有生成记录"
-        rowActions={(r) => (
-          <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
-            {/* 没题可看就禁用（与出题页「查看」同规则） */}
-            <Button
-              size="small"
-              variant="plain"
-              disabled={r.question_count === 0}
-              onClick={() =>
-                setPrep({
-                  encryptJobId: r.encrypt_job_id,
-                  jobName: r.job_name,
-                  brandName: r.brand_name,
-                  analysisId: r.analysis_id || undefined,
-                })
-              }
-            >
-              详情
-            </Button>
-            <Button
-              size="small"
-              variant="gray"
-              sx={{ whiteSpace: "nowrap" }}
-              disabled={busy.has(r.encrypt_job_id) || regenId !== null}
-              onClick={() => void startGenerate([r.encrypt_job_id])}
-            >
-              {busy.has(r.encrypt_job_id)
-                ? "任务中"
-                : regenId === r.encrypt_job_id ? "生成中…" : "重新生成"}
-            </Button>
-          </Box>
-        )}
-      />
+      <ScrollArea>
+        <DataTable
+          columns={recordColumns}
+          rows={records}
+          rowKey={(r) => r.encrypt_job_id}
+          loading={recsLoading}
+          emptyText="还没有生成记录"
+          rowActions={(r) => (
+            <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
+              {/* 没题可看就禁用（与出题页「查看」同规则） */}
+              <Button
+                size="small"
+                variant="plain"
+                disabled={r.question_count === 0}
+                onClick={() =>
+                  setPrep({
+                    encryptJobId: r.encrypt_job_id,
+                    jobName: r.job_name,
+                    brandName: r.brand_name,
+                    analysisId: r.analysis_id || undefined,
+                  })
+                }
+              >
+                详情
+              </Button>
+              <Button
+                size="small"
+                variant="gray"
+                sx={{ whiteSpace: "nowrap" }}
+                disabled={busy.has(r.encrypt_job_id) || regenId !== null}
+                onClick={() => void startGenerate([r.encrypt_job_id])}
+              >
+                {busy.has(r.encrypt_job_id)
+                  ? "任务中"
+                  : regenId === r.encrypt_job_id ? "生成中…" : "重新生成"}
+              </Button>
+            </Box>
+          )}
+        />
+      </ScrollArea>
       <Pager
         total={recsTotal}
         page={recsPage}

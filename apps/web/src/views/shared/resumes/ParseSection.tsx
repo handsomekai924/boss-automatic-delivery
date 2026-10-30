@@ -7,7 +7,9 @@
 
 import { Box, Typography } from "@mui/material";
 
-import { Button, EmptyState, Skeleton, Surface, TaskPanel } from "../../../components";
+import {
+  Button, EmptyState, ScrollArea, Skeleton, Surface, TaskPanel, pageRootSx,
+} from "../../../components";
 import { typeScale } from "../../../theme/tokens";
 import { fmtTime } from "../../../utils/format";
 import { ParsedChapters } from "./chapters";
@@ -29,10 +31,14 @@ export function ParseSection({
 }) {
   if (!current) {
     return (
-      <EmptyState
-        title="还没有选中简历"
-        description="到「简历库」上传一份简历，再回来看解析结果。"
-      />
+      <Box sx={pageRootSx}>
+        <ScrollArea>
+          <EmptyState
+            title="还没有选中简历"
+            description="到「简历库」上传一份简历，再回来看解析结果。"
+          />
+        </ScrollArea>
+      </Box>
     );
   }
 
@@ -40,9 +46,10 @@ export function ParseSection({
   const running = run != null && !PARSE_TERMINAL.has(run.status);
 
   return (
-    <Box>
-      <Surface>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
+    <Box sx={pageRootSx}>
+      {/* 白底圆角容器撑满剩余高度，滚动条落在它内部：标题行固定，正文自滚 */}
+      <Surface sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap", flex: "0 0 auto" }}>
           <Typography sx={{ ...typeScale.l, fontWeight: 650, flex: 1, minWidth: 0 }}>
             {current.title || current.resume_id}
           </Typography>
@@ -61,38 +68,40 @@ export function ParseSection({
           </Button>
         </Box>
 
-        {running ? (
-          <Box sx={{ mt: 2 }}>
-            <TaskPanel
-              title={`解析「${current.title || current.resume_id}」`}
-              status={run.status}
-              percent={run.percent}
-              current={run.current || undefined}
-              error={run.error || null}
-              events={run.events}
+        <ScrollArea sx={{ p: 0, pt: 2 }}>
+          {running ? (
+            <Box sx={{ mt: 2 }}>
+              <TaskPanel
+                title={`解析「${current.title || current.resume_id}」`}
+                status={run.status}
+                percent={run.percent}
+                current={run.current || undefined}
+                error={run.error || null}
+                events={run.events}
+              />
+            </Box>
+          ) : loading ? (
+            <Box sx={{ mt: 2, display: "flex", flexDirection: "column", gap: 1 }}>
+              {Array.from({ length: 4 }, (_, i) => <Skeleton key={i} height={28} />)}
+            </Box>
+          ) : parsedData ? (
+            <ParsedChapters data={parsedData} />
+          ) : (
+            <EmptyState
+              title="这份简历还没解析"
+              description="解析会识别出八段：基本信息 / 求职意向 / 工作经历 / 项目经历 / 教育经历 / 技能标签 / 自我评价 / 摘要。"
+              action={
+                <Button
+                  variant="filled"
+                  disabled={parseBusyId === current.resume_id}
+                  onClick={() => onRunParse(current)}
+                >
+                  {parseBusyId === current.resume_id ? "解析中…" : detail?.llm ? "重新解析" : "开始解析"}
+                </Button>
+              }
             />
-          </Box>
-        ) : loading ? (
-          <Box sx={{ mt: 2, display: "flex", flexDirection: "column", gap: 1 }}>
-            {Array.from({ length: 4 }, (_, i) => <Skeleton key={i} height={28} />)}
-          </Box>
-        ) : parsedData ? (
-          <ParsedChapters data={parsedData} />
-        ) : (
-          <EmptyState
-            title="这份简历还没解析"
-            description="解析会识别出八段：基本信息 / 求职意向 / 工作经历 / 项目经历 / 教育经历 / 技能标签 / 自我评价 / 摘要。"
-            action={
-              <Button
-                variant="filled"
-                disabled={parseBusyId === current.resume_id}
-                onClick={() => onRunParse(current)}
-              >
-                {parseBusyId === current.resume_id ? "解析中…" : detail?.llm ? "重新解析" : "开始解析"}
-              </Button>
-            }
-          />
-        )}
+          )}
+        </ScrollArea>
       </Surface>
     </Box>
   );

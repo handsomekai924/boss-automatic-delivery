@@ -12,8 +12,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Box, Typography } from "@mui/material";
 
 import {
-  Button, InlineAlert, PageHeader, Pill, SegmentedControl, StatusDot, Surface, TextField,
-  useToast,
+  Button, InlineAlert, PageHeader, Pill, ScrollArea, SegmentedControl, StatusDot, Surface, TextField,
+  pageRootSx, useToast,
 } from "../../components";
 import { usePlatform } from "../../platform/PlatformProvider";
 import { useFeeds, useSession, type AuthFeed } from "../../stores/sessionStore";
@@ -216,7 +216,7 @@ export function LoginPage() {
   }, [site]);
 
   return (
-    <Box>
+    <Box sx={pageRootSx}>
       <PageHeader
         title="登录与会话"
         subtitle={`${activePlatform?.display_name ?? site} · 发码登录，或用 App 扫码；风控拦住时由你本人过滑块`}
@@ -230,136 +230,139 @@ export function LoginPage() {
         }
       />
 
-      {myFeeds.length > 0 && (
-        <Box sx={{ mb: 2.5 }}>
-          <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 1 }}>
-            等你喂料
+      {/* 内部滚动：喂料三态 / 会话状态 / 登录卡片 */}
+      <ScrollArea>
+        {myFeeds.length > 0 && (
+          <Box sx={{ mb: 2.5 }}>
+            <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 1 }}>
+              等你喂料
+            </Typography>
+            {myFeeds.map((f) => (
+              <FeedCard
+                key={f.task_id}
+                feed={f}
+                onCancel={() =>
+                  authApi.cancel(site, f.task_id).catch((e: unknown) =>
+                    toast.toast(e instanceof Error ? e.message : String(e), "danger"),
+                  )
+                }
+                onChanged={() => void authApi.status(site).then((s) => setTask(s.task)).catch(() => undefined)}
+              />
+            ))}
+          </Box>
+        )}
+
+        <Surface sx={{ mb: 2.5, maxWidth: 640 }}>
+          <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 1.5 }}>
+            当前会话
           </Typography>
-          {myFeeds.map((f) => (
-            <FeedCard
-              key={f.task_id}
-              feed={f}
-              onCancel={() =>
-                authApi.cancel(site, f.task_id).catch((e: unknown) =>
-                  toast.toast(e instanceof Error ? e.message : String(e), "danger"),
-                )
-              }
-              onChanged={() => void authApi.status(site).then((s) => setTask(s.task)).catch(() => undefined)}
+          {session?.logged_in ? (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+              <StatusDot tone="ok" />
+              <Typography sx={{ ...typeScale.bodySm }}>
+                已登录{session.phone_masked ? ` · ${session.phone_masked}` : ""}
+              </Typography>
+            </Box>
+          ) : (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+              <StatusDot tone="idle" />
+              <Typography sx={{ ...typeScale.bodySm, color: "text.secondary" }}>
+                还没登录。下面选一种方式登录，中途要你配合的地方会自动弹出来。
+              </Typography>
+            </Box>
+          )}
+        </Surface>
+
+        <Surface sx={{ maxWidth: 640 }}>
+          <Box sx={{ mb: 2 }}>
+            <SegmentedControl
+              value={mode}
+              onChange={(v) => setMode(v as Mode)}
+              options={[
+                { value: "sms", label: "手机号 + 验证码", disabled: !canSms },
+                { value: "qr", label: "App 扫码", disabled: !canQr },
+              ]}
             />
-          ))}
-        </Box>
-      )}
-
-      <Surface sx={{ mb: 2.5, maxWidth: 640 }}>
-        <Typography sx={{ ...typeScale.s, fontWeight: 590, color: "text.secondary", mb: 1.5 }}>
-          当前会话
-        </Typography>
-        {session?.logged_in ? (
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
-            <StatusDot tone="ok" />
-            <Typography sx={{ ...typeScale.bodySm }}>
-              已登录{session.phone_masked ? ` · ${session.phone_masked}` : ""}
-            </Typography>
           </Box>
-        ) : (
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
-            <StatusDot tone="idle" />
-            <Typography sx={{ ...typeScale.bodySm, color: "text.secondary" }}>
-              还没登录。下面选一种方式登录，中途要你配合的地方会自动弹出来。
-            </Typography>
-          </Box>
+
+          {!canSms && !canQr && (
+            <InlineAlert tone="warn">
+              这个平台没声明任何登录方式（caps.auth 全为假），登录页在这里只是占位。
+            </InlineAlert>
+          )}
+
+          {mode === "sms" && (
+            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <TextField
+                label="区号"
+                value={dialCode}
+                onChange={(e) => setDialCode(e.target.value)}
+                sx={{ width: 96 }}
+                disabled={busy}
+              />
+              <TextField
+                label="手机号"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                inputProps={{ inputMode: "tel", maxLength: 11 }}
+                sx={{ width: 200 }}
+                disabled={busy}
+              />
+              <Button
+                variant="filled"
+                disabled={busy || phone.trim().length < 11}
+                onClick={() =>
+                  void run(
+                    () => authApi.sendSms(site, { phone: phone.trim(), dial_code: dialCode.trim() || "86" }),
+                    `验证码已发到 ${maskPhone(phone.trim())}`,
+                  )
+                }
+              >
+                {busy ? "发送中…" : "发送验证码"}
+              </Button>
+            </Box>
+          )}
+
+          {mode === "qr" && (
+            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
+              <Button
+                variant="filled"
+                disabled={busy}
+                onClick={() => void run(() => authApi.startQr(site), "二维码已生成")}
+              >
+                {busy ? "生成中…" : "生成二维码"}
+              </Button>
+              {task?.qr?.active && (
+                <QrImage site={site} taskId={task.task_id} revision={task.qr?.revision} />
+              )}
+            </Box>
+          )}
+
+          {task && !task.qr?.active && (
+            <Box sx={{ mt: 2, display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
+              <Pill tone="static">任务 {task.task_id}</Pill>
+              <Pill tone={task.status === "error" ? "danger" : "accent"}>{task.status}</Pill>
+              {task.error && (
+                <Typography sx={{ ...typeScale.s, color: "error.main" }}>{task.error}</Typography>
+              )}
+              <Button
+                variant="plain"
+                disabled={busy}
+                onClick={() => void run(() => authApi.cancel(site, task.task_id).then(() => task), "已取消")}
+              >
+                {busy ? "取消中…" : "取消登录"}
+              </Button>
+            </Box>
+          )}
+        </Surface>
+
+        {caps?.slider && (
+          <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2 }}>
+            这个平台可能触发风控滑块——出现时上面会自动出一张「需要你过一下滑块」的卡，
+            拖完票据由后端递回，不需要你做别的。
+          </Typography>
         )}
-      </Surface>
-
-      <Surface sx={{ maxWidth: 640 }}>
-        <Box sx={{ mb: 2 }}>
-          <SegmentedControl
-            value={mode}
-            onChange={(v) => setMode(v as Mode)}
-            options={[
-              { value: "sms", label: "手机号 + 验证码", disabled: !canSms },
-              { value: "qr", label: "App 扫码", disabled: !canQr },
-            ]}
-          />
-        </Box>
-
-        {!canSms && !canQr && (
-          <InlineAlert tone="warn">
-            这个平台没声明任何登录方式（caps.auth 全为假），登录页在这里只是占位。
-          </InlineAlert>
-        )}
-
-        {mode === "sms" && (
-          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "flex-end" }}>
-            <TextField
-              label="区号"
-              value={dialCode}
-              onChange={(e) => setDialCode(e.target.value)}
-              sx={{ width: 96 }}
-              disabled={busy}
-            />
-            <TextField
-              label="手机号"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              inputProps={{ inputMode: "tel", maxLength: 11 }}
-              sx={{ width: 200 }}
-              disabled={busy}
-            />
-            <Button
-              variant="filled"
-              disabled={busy || phone.trim().length < 11}
-              onClick={() =>
-                void run(
-                  () => authApi.sendSms(site, { phone: phone.trim(), dial_code: dialCode.trim() || "86" }),
-                  `验证码已发到 ${maskPhone(phone.trim())}`,
-                )
-              }
-            >
-              {busy ? "发送中…" : "发送验证码"}
-            </Button>
-          </Box>
-        )}
-
-        {mode === "qr" && (
-          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
-            <Button
-              variant="filled"
-              disabled={busy}
-              onClick={() => void run(() => authApi.startQr(site), "二维码已生成")}
-            >
-              {busy ? "生成中…" : "生成二维码"}
-            </Button>
-            {task?.qr?.active && (
-              <QrImage site={site} taskId={task.task_id} revision={task.qr?.revision} />
-            )}
-          </Box>
-        )}
-
-        {task && !task.qr?.active && (
-          <Box sx={{ mt: 2, display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
-            <Pill tone="static">任务 {task.task_id}</Pill>
-            <Pill tone={task.status === "error" ? "danger" : "accent"}>{task.status}</Pill>
-            {task.error && (
-              <Typography sx={{ ...typeScale.s, color: "error.main" }}>{task.error}</Typography>
-            )}
-            <Button
-              variant="plain"
-              disabled={busy}
-              onClick={() => void run(() => authApi.cancel(site, task.task_id).then(() => task), "已取消")}
-            >
-              {busy ? "取消中…" : "取消登录"}
-            </Button>
-          </Box>
-        )}
-      </Surface>
-
-      {caps?.slider && (
-        <Typography sx={{ ...typeScale.s, color: "text.secondary", mt: 2 }}>
-          这个平台可能触发风控滑块——出现时上面会自动出一张「需要你过一下滑块」的卡，
-          拖完票据由后端递回，不需要你做别的。
-        </Typography>
-      )}
+      </ScrollArea>
     </Box>
   );
 }
